@@ -75,7 +75,9 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
     val r = riskOf(acc, marks)
     val start = acc.account.startingBalance
     // One line: account and equity on the left, live distance to each rule as slim bars.
-    Column(modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.panel).padding(horizontal = 8.dp, vertical = 5.dp)) {
+    var pick by androidx.compose.runtime.remember { mutableStateOf(false) }
+    // Tap anywhere on the strip to switch account.
+    Column(modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.panel).clickable { pick = true }.padding(horizontal = 8.dp, vertical = 5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AccountSwitcher(repo, Modifier.width(118.dp))
             AwayBar("DD", r.ddRoom, r.ddAllowance, acc.account.risk != null, Modifier.weight(1f))
@@ -120,6 +122,7 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
         RiskWarning(r)
         LockBanner(repo)
     }
+    if (pick) AccountPickerSheet(repo) { pick = false }
 }
 
 /** Dollars left before a floor, with a bar of the allowance still unused. */

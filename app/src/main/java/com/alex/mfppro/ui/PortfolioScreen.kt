@@ -439,10 +439,11 @@ private fun AccountHero(repo: Repo, acc: AccountState, marks: Map<String, Double
     val start = acc.account.startingBalance
     val shape = RoundedCornerShape(16.dp)
     Column(
+        // The whole card opens the account picker.
         Modifier.padding(horizontal = 10.dp, vertical = 4.dp).fillMaxWidth().clip(shape).background(C.panel)
-            .border(1.dp, C.line, shape).padding(14.dp),
+            .border(1.dp, C.line, shape).clickable { open = true }.padding(14.dp),
     ) {
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { open = true }, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(accountName(acc), color = C.text, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1,
                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
