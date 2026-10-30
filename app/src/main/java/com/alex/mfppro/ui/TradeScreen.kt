@@ -598,7 +598,7 @@ private fun TradesTape(repo: Repo, market: Market) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MarketPicker(repo: Repo, markets: List<Market>, classes: Map<String, String>, onDismiss: () -> Unit, onPick: (Market) -> Unit) {
+internal fun MarketPicker(repo: Repo, markets: List<Market>, classes: Map<String, String>, onDismiss: () -> Unit, onPick: (Market) -> Unit) {
     var q by remember { mutableStateOf("") }
     var sortBy by remember { mutableStateOf(repo.prefs.pickerSort) }
     var venue by remember { mutableStateOf<String?>(null) }

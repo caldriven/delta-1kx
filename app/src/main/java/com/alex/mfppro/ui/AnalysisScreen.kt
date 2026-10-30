@@ -3,6 +3,7 @@ package com.alex.mfppro.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -56,7 +57,11 @@ private enum class Window(val label: String, val interval: String, val bars: Int
     H1("1h · 7d", "1h", 168, 24.0), H4("4h · 30d", "4h", 180, 6.0), D1("1d · 90d", "1d", 90, 1.0)
 }
 
-private enum class Universe(val label: String) { POS("Positions"), TOP10("Top 10"), TOP20("Top 20") }
+/** Correlation presets: your book, the big coins, top alts, or crypto against macro. */
+private enum class Universe(val label: String) { POS("Positions"), MAJORS("Majors"), ALTS("Top alts"), MACRO("Macro"), TOP20("Top 20") }
+
+private val MAJORS = listOf("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "HYPE")
+private val MACRO = listOf("BTC", "ETH", "XAU", "XAG", "CL", "XYZ100", "NAS100", "SP500", "EUR")
 
 /** Log returns keyed by candle open time. */
 private fun returns(c: List<Candle>): Map<Long, Double> {
@@ -105,13 +110,21 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
     val btc = markets.firstOrNull { it.symbol == "BTC" }
     val held = acc?.positions?.values?.mapNotNull { p -> all.firstOrNull { it.marketId == p.marketId } ?: markets.firstOrNull { it.symbol == p.symbol } }.orEmpty()
     // BTC always in, for beta; positions first.
-    val set = when (universe) {
-        Universe.POS -> (held + listOfNotNull(btc) + markets.filter { it.symbol == "ETH" } + byVol).distinctBy { it.marketId }.take(maxOf(6, held.size + 2))
-        Universe.TOP10 -> (listOfNotNull(btc) + byVol).distinctBy { it.marketId }.take(10)
+    fun bySymbols(list: List<String>) = list.mapNotNull { sym -> markets.firstOrNull { it.symbol.equals(sym, true) } }
+    val crypto = byVol.filter { AssetClasses.classOf(it, classes) == "Crypto" }
+    var extraIds by remember { mutableStateOf(repo.prefs.corrExtra) }
+    val added = extraIds.mapNotNull { id -> all.firstOrNull { it.marketId == id } }
+    val base = when (universe) {
+        Universe.POS -> (held + bySymbols(listOf("BTC", "ETH"))).distinctBy { it.marketId }
+        Universe.MAJORS -> bySymbols(MAJORS)
+        Universe.ALTS -> listOfNotNull(btc) + crypto.filter { it.symbol !in MAJORS }.take(9)
+        Universe.MACRO -> bySymbols(MACRO).distinctBy { it.symbol.replace("NAS100", "XYZ100") }
         Universe.TOP20 -> (listOfNotNull(btc) + byVol).distinctBy { it.marketId }.take(20)
     }
+    val set = (base + added).distinctBy { it.marketId }
+    var adding by remember { mutableStateOf(false) }
     // Freeze the set per choice: live volume ranks swap constantly and would restart the load each time.
-    val heldKey = held.map { it.marketId }.sorted().joinToString()
+    val heldKey = held.map { it.marketId }.sorted().joinToString() + "|" + extraIds.joinToString()
     var frozen by remember(universe, heldKey) { mutableStateOf<List<Market>?>(null) }
     if (frozen == null || (frozen!!.size < set.size) || (frozen!!.isNotEmpty() && stats.isNotEmpty() && frozen!!.none { stats[it.feedKey]?.dayNtlVlm != null } && set.any { stats[it.feedKey]?.dayNtlVlm != null })) frozen = set
     val setKey = frozen.orEmpty().map { it.marketId }.sorted().joinToString(",")
@@ -132,10 +145,28 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         loading = false
     }
 
+    if (adding) MarketPicker(repo, markets, classes, onDismiss = { adding = false }) { m ->
+        adding = false
+        if (m.marketId !in extraIds) { extraIds = extraIds + m.marketId; repo.prefs.corrExtra = extraIds }
+    }
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Universe.entries.forEach { u -> Seg(u.label, universe == u, C.accent) { universe = u; repo.prefs.corrSet = u.name } }
+                Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Universe.entries.forEach { u -> Seg(u.label, universe == u, C.accent) { universe = u; repo.prefs.corrSet = u.name } }
+                }
+            }
+            // Your own assets, added to whichever preset is on.
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("+ Asset", color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).border(1.dp, C.accent.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .clickable { adding = true }.padding(horizontal = 10.dp, vertical = 5.dp))
+                added.forEach { m ->
+                    Text(m.symbol + "  ✕", color = C.text, fontSize = 12.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(C.panel2)
+                            .clickable { extraIds = extraIds - m.marketId; repo.prefs.corrExtra = extraIds }.padding(horizontal = 10.dp, vertical = 5.dp))
+                }
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Window.entries.forEach { w -> Seg(w.label, window == w, C.accent) { window = w; repo.prefs.corrWindow = w.name } }

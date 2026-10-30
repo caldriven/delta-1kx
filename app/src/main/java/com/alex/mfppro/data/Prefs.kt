@@ -221,4 +221,16 @@ class Prefs(ctx: Context) {
     var fillsAllMarkets: Boolean
         get() = plain.getBoolean("fills_all_markets", true)
         set(v) = plain.edit().putBoolean("fills_all_markets", v).apply()
+
+    var theme: String
+        get() = plain.getString("theme", "STANDARD") ?: "STANDARD"
+        set(v) = plain.edit().putString("theme", v).apply()
+
+    /** Back to default settings. The API key lives in the encrypted store and is kept. */
+    fun resetUi() = plain.edit().clear().commit()
+
+    /** Extra markets added to every correlation preset. */
+    var corrExtra: List<String>
+        get() = plain.getString("corr_extra", "")!!.split(',').filter { it.isNotBlank() }
+        set(v) = plain.edit().putString("corr_extra", v.joinToString(",")).apply()
 }

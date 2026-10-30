@@ -60,7 +60,15 @@ class MainActivity : ComponentActivity() {
         com.alex.mfppro.ui.Split.pct = repo.prefs.profitSplit
         com.alex.mfppro.ui.Comp.hide = repo.prefs.hideComp
         com.alex.mfppro.ui.Palette.colorBlind = repo.prefs.colorBlind
+        com.alex.mfppro.ui.Palette.theme = com.alex.mfppro.ui.AppTheme.entries.firstOrNull { it.name == repo.prefs.theme } ?: com.alex.mfppro.ui.AppTheme.STANDARD
         setContent {
+            // Status and navigation bar icons follow the theme (dark icons on the light theme).
+            val dark = com.alex.mfppro.ui.Palette.theme.dark
+            androidx.compose.runtime.LaunchedEffect(dark) {
+                val bar = if (dark) androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    else androidx.activity.SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                enableEdgeToEdge(statusBarStyle = bar, navigationBarStyle = bar)
+            }
             MfpTheme {
                 var tab by rememberSaveable { mutableStateOf(0) }
                 var marketId by rememberSaveable { mutableStateOf(repo.prefs.lastMarketId) }

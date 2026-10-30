@@ -1,6 +1,9 @@
 package com.alex.mfppro.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -60,6 +64,8 @@ fun SettingsScreen(repo: Repo) {
     var input by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var removeAsk by remember { mutableStateOf(false) }
+    var resetAsk by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val askNotify = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -79,7 +85,7 @@ fun SettingsScreen(repo: Repo) {
                         Spacer(Modifier.height(2.dp))
                         ConnBadge(conn)
                     }
-                    Act("Remove key", color = C.down, modifier = Modifier.width(100.dp)) { repo.setApiKey(null); status = null }
+                    Act("Remove key", color = C.down, modifier = Modifier.width(100.dp)) { removeAsk = true }
                 }
             } else {
                 AppInput("", input, { input = it.trim() }, Modifier.fillMaxWidth(), secret = true, placeholder = "fp_live_… or fp_test_…")
@@ -197,6 +203,23 @@ fun SettingsScreen(repo: Repo) {
         }
 
         Section("Display", DISPLAY, androidx.compose.material.icons.Icons.Filled.Palette) {
+            Label("Theme")
+            // Each chip shows the theme's own background, panel and accent.
+            Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppTheme.entries.forEach { t ->
+                    val on = Palette.theme == t
+                    Column(
+                        Modifier.clip(RoundedCornerShape(10.dp)).background(Color(t.bg))
+                            .border(if (on) 2.dp else 1.dp, if (on) Color(t.accent) else Color(t.line), RoundedCornerShape(10.dp))
+                            .clickable { Palette.theme = t; repo.prefs.theme = t.name }.padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            for (c in listOf(t.panel2, t.up, t.down, t.accent)) Box(Modifier.size(10.dp).clip(CircleShape).background(Color(c)))
+                        }
+                        Text(t.label, color = Color(t.text), fontSize = 11.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
             Toggle("Colour-blind mode", "Blue up, orange down", Palette.colorBlind, DISPLAY) {
                 Palette.colorBlind = it; repo.prefs.colorBlind = it
             }
@@ -214,6 +237,39 @@ fun SettingsScreen(repo: Repo) {
                 }
             }
         }
+
+        Section("Reset", RULES, androidx.compose.material.icons.Icons.Filled.Refresh) {
+            Note("Puts every setting back to default. Your API key stays.")
+            Act("Reset settings", color = C.down, modifier = Modifier.padding(top = 8.dp).fillMaxWidth()) { resetAsk = true }
+        }
+    }
+
+    // Removing the key needs "ok" typed: it logs the app out of every account.
+    if (removeAsk) {
+        var typed by remember { mutableStateOf("") }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { removeAsk = false }, containerColor = C.panel,
+            title = { Text("Remove API key?", color = C.down) },
+            text = {
+                Column {
+                    Text("The app disconnects from every account until you add a key again. Type ok to confirm.", color = C.text, fontSize = 13.sp)
+                    AppInput("", typed, { typed = it }, Modifier.fillMaxWidth().padding(top = 8.dp), placeholder = "ok")
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(enabled = typed.trim().equals("ok", true), onClick = { removeAsk = false; repo.setApiKey(null); status = null }) {
+                    Text("Remove", color = if (typed.trim().equals("ok", true)) C.down else C.muted)
+                }
+            },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { removeAsk = false }) { Text("Cancel", color = C.muted) } },
+        )
+    }
+    if (resetAsk) ConfirmDialog("Reset settings", "Back to defaults", C.down, note = "Theme, alerts, chart and order settings reset. The API key is kept.",
+        confirm = "Reset", onDismiss = { resetAsk = false }) {
+        resetAsk = false
+        repo.prefs.resetUi()
+        // Restart so every screen picks up the defaults.
+        (ctx as? android.app.Activity)?.recreate()
     }
 }
 

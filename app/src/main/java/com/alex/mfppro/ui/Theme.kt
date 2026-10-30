@@ -34,18 +34,34 @@ fun net(v: Double?): Double? = v?.let { if (it > 0) it * Split.pct / 100.0 else 
 /** Colour-blind mode swaps green/red for blue/orange everywhere (state-backed, so it applies live). */
 object Palette {
     var colorBlind by androidx.compose.runtime.mutableStateOf(false)
+    var theme by androidx.compose.runtime.mutableStateOf(AppTheme.STANDARD)
+}
+
+/** Colour sets; the dark ones follow the Δ1KX mockups. */
+enum class AppTheme(
+    val label: String, val dark: Boolean,
+    val bg: Long, val panel: Long, val panel2: Long, val line: Long, val text: Long, val muted: Long,
+    val up: Long, val down: Long, val accent: Long,
+) {
+    STANDARD("Standard", true, 0xFF0B0E11, 0xFF15191E, 0xFF1E2329, 0xFF2B3139, 0xFFEAECEF, 0xFF848E9C, 0xFF20B26C, 0xFFEF454A, 0xFFF7A600),
+    HYBRID("Hybrid", true, 0xFF050508, 0xFF0D0D12, 0xFF16161D, 0xFF24242E, 0xFFE8E4D9, 0xFF8A8678, 0xFF20D0D0, 0xFFF06848, 0xFFF0A030),
+    TERMINAL("Terminal", true, 0xFF000000, 0xFF0A0A0A, 0xFF141414, 0xFF262626, 0xFFFFB347, 0xFF9A7A4A, 0xFF33FF66, 0xFFFF3B3B, 0xFFFF9900),
+    CLEAN("Clean", true, 0xFF0A0A0B, 0xFF111113, 0xFF18181B, 0xFF27272A, 0xFFFAFAFA, 0xFF8B8B93, 0xFF22C55E, 0xFFEF4444, 0xFF3B82F6),
+    GLASS("Glass", true, 0xFF0A0F1E, 0xFF131A2E, 0xFF1B2440, 0xFF28324F, 0xFFE6ECFF, 0xFF8792B3, 0xFF10B981, 0xFFEF4444, 0xFF60A5FA),
+    LIGHT("Light", false, 0xFFF4F5F7, 0xFFFFFFFF, 0xFFEDEFF2, 0xFFDCDFE4, 0xFF14171C, 0xFF6B7280, 0xFF0E9F5A, 0xFFD9363E, 0xFFD98A00),
 }
 
 object C {
-    val bg = Color(0xFF0B0E11)
-    val panel = Color(0xFF15191E)
-    val panel2 = Color(0xFF1E2329)
-    val line = Color(0xFF2B3139)
-    val text = Color(0xFFEAECEF)
-    val muted = Color(0xFF848E9C)
-    val up get() = if (Palette.colorBlind) Color(0xFF3B8BFF) else Color(0xFF20B26C)
-    val down get() = if (Palette.colorBlind) Color(0xFFFF8C1A) else Color(0xFFEF454A)
-    val accent get() = if (Palette.colorBlind) Color(0xFFB794F6) else Color(0xFFF7A600)
+    private val t get() = Palette.theme
+    val bg get() = Color(t.bg)
+    val panel get() = Color(t.panel)
+    val panel2 get() = Color(t.panel2)
+    val line get() = Color(t.line)
+    val text get() = Color(t.text)
+    val muted get() = Color(t.muted)
+    val up get() = if (Palette.colorBlind) Color(0xFF3B8BFF) else Color(t.up)
+    val down get() = if (Palette.colorBlind) Color(0xFFFF8C1A) else Color(t.down)
+    val accent get() = if (Palette.colorBlind) Color(0xFFB794F6) else Color(t.accent)
     val liq get() = if (Palette.colorBlind) Color(0xFFE879F9) else Color(0xFFFF7A00)
 }
 
@@ -76,9 +92,13 @@ private val typography = Typography().let { t ->
 
 @Composable
 fun MfpTheme(content: @Composable () -> Unit) = MaterialTheme(
-    colorScheme = darkColorScheme(
+    colorScheme = if (Palette.theme.dark) darkColorScheme(
         background = C.bg, surface = C.panel, surfaceVariant = C.panel2, primary = C.accent,
         onPrimary = Color.Black, onBackground = C.text, onSurface = C.text, onSurfaceVariant = C.muted,
+        outline = C.line, secondaryContainer = C.panel2, onSecondaryContainer = C.text,
+    ) else androidx.compose.material3.lightColorScheme(
+        background = C.bg, surface = C.panel, surfaceVariant = C.panel2, primary = C.accent,
+        onPrimary = Color.White, onBackground = C.text, onSurface = C.text, onSurfaceVariant = C.muted,
         outline = C.line, secondaryContainer = C.panel2, onSecondaryContainer = C.text,
     ),
     typography = typography,
@@ -86,7 +106,7 @@ fun MfpTheme(content: @Composable () -> Unit) = MaterialTheme(
 )
 
 /** Tabular figures so columns of numbers don't jitter as they update. */
-val num = TextStyle(fontFamily = Mono, fontFeatureSettings = "tnum", fontSize = 13.sp, color = C.text, letterSpacing = (-0.2).sp)
+val num: TextStyle get() = TextStyle(fontFamily = Mono, fontFeatureSettings = "tnum", fontSize = 13.sp, color = C.text, letterSpacing = (-0.2).sp)
 
 fun pnlColor(v: Double?) = when {
     v == null || v == 0.0 -> C.text

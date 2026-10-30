@@ -353,15 +353,15 @@ fun BrandMark(modifier: Modifier = Modifier) {
     val grad = androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color(0xFFFFD682), Color(0xFFF0A030), Color(0xFFE0661F)))
     androidx.compose.foundation.Canvas(modifier.size(width = 44.dp, height = 38.dp)) {
         val w = size.width; val h = size.height
-        val stroke = w * 0.05f
+        val stroke = w * 0.085f
         val path = androidx.compose.ui.graphics.Path().apply {
             moveTo(w / 2, stroke); lineTo(w - stroke, h - stroke); lineTo(stroke, h - stroke); close()
         }
         // Glow, then the outline.
         drawPath(path, Color(0xFFF0A030).copy(alpha = 0.10f), style = androidx.compose.ui.graphics.drawscope.Stroke(stroke * 2.2f, join = androidx.compose.ui.graphics.StrokeJoin.Round))
         drawPath(path, grad, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, join = androidx.compose.ui.graphics.StrokeJoin.Round))
-        val t = tm.measure("1KX", androidx.compose.ui.text.TextStyle(brush = grad, fontFamily = Inter, fontWeight = FontWeight.Bold, fontSize = (h * 0.27f / density).sp))
-        drawText(t, topLeft = androidx.compose.ui.geometry.Offset(w / 2 - t.size.width / 2, h * 0.86f - t.size.height))
+        val t = tm.measure("1KX", androidx.compose.ui.text.TextStyle(brush = grad, fontFamily = Inter, fontWeight = FontWeight.Bold, fontSize = (h * 0.3f / density).sp, letterSpacing = (-0.5).sp))
+        drawText(t, topLeft = androidx.compose.ui.geometry.Offset(w / 2 - t.size.width / 2, h * 0.84f - t.size.height))
     }
 }
 
