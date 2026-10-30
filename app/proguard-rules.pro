@@ -1,0 +1,8 @@
+-keepattributes *Annotation*, InnerClasses
+-keep,includedescriptorclasses class com.alex.mfppro.**$$serializer { *; }
+-keepclassmembers class com.alex.mfppro.** { *** Companion; }
+-keepclasseswithmembers class com.alex.mfppro.** { kotlinx.serialization.KSerializer serializer(...); }
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+-dontwarn com.google.errorprone.annotations.**

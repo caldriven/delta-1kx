@@ -1,0 +1,224 @@
+package com.alex.mfppro.data
+
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+
+class Prefs(ctx: Context) {
+    private val secure = EncryptedSharedPreferences.create(
+        ctx,
+        "secure",
+        MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
+    private val plain = ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
+
+    var apiKey: String?
+        get() = secure.getString("api_key", null)
+        set(v) = secure.edit().putString("api_key", v).apply()
+
+    /** Empty means "all accounts". */
+    var selectedAccounts: Set<String>
+        get() = plain.getStringSet("selected_accounts", emptySet())!!.toSet()
+        set(v) = plain.edit().putStringSet("selected_accounts", v).apply()
+
+    var lastMarketId: String?
+        get() = plain.getString("last_market", null)
+        set(v) = plain.edit().putString("last_market", v).apply()
+
+    var tradeAccountId: String?
+        get() = plain.getString("trade_account", null)
+        set(v) = plain.edit().putString("trade_account", v).apply()
+
+    var confirmOrders: Boolean
+        get() = plain.getBoolean("confirm_orders", true)
+        set(v) = plain.edit().putBoolean("confirm_orders", v).apply()
+
+    var slippageBps: Int
+        get() = plain.getInt("slippage_bps", 20)
+        set(v) = plain.edit().putInt("slippage_bps", v).apply()
+
+    var quickSizes: List<Int>
+        get() = plain.getString("quick_sizes", "250,500,1000")!!.split(",").mapNotNull { it.trim().toIntOrNull() }
+        set(v) = plain.edit().putString("quick_sizes", v.joinToString(",")).apply()
+
+    fun leverage(marketId: String, default: Int) = plain.getInt("lev_$marketId", default)
+    fun setLeverage(marketId: String, v: Int) = plain.edit().putInt("lev_$marketId", v).apply()
+
+    var marginMode: String
+        get() = plain.getString("margin_mode", "cross")!!
+        set(v) = plain.edit().putString("margin_mode", v).apply()
+
+    var lockEnabled: Boolean
+        get() = plain.getBoolean("lock_enabled", true)
+        set(v) = plain.edit().putBoolean("lock_enabled", v).apply()
+
+    /** No new trades from lockStart:00 until lockEnd:00, Oslo time. */
+    var lockStart: Int
+        get() = plain.getInt("lock_start", 0)
+        set(v) = plain.edit().putInt("lock_start", v).apply()
+
+    var lockEnd: Int
+        get() = plain.getInt("lock_end", 7)
+        set(v) = plain.edit().putInt("lock_end", v).apply()
+
+    fun locked() = tradeLocked(lockEnabled, lockStart, lockEnd)
+
+    var assetClasses: String
+        get() = plain.getString("asset_classes", "")!!
+        set(v) = plain.edit().putString("asset_classes", v).apply()
+
+    var overviewSort: String
+        get() = plain.getString("overview_sort", "vol:desc")!!
+        set(v) = plain.edit().putString("overview_sort", v).apply()
+
+    var overviewClass: String
+        get() = plain.getString("overview_class", "All")!!
+        set(v) = plain.edit().putString("overview_class", v).apply()
+
+    /** Display-only payout share applied to positive PnL: 100, 90 or 80. */
+    var profitSplit: Int
+        get() = plain.getInt("profit_split", 100)
+        set(v) = plain.edit().putInt("profit_split", v).apply()
+
+    var alertsEnabled: Boolean
+        get() = plain.getBoolean("alerts_enabled", true)
+        set(v) = plain.edit().putBoolean("alerts_enabled", v).apply()
+
+    /** Alert when drawdown left drops below this many dollars (0 = off). */
+    var alertRoomUsd: Int
+        get() = plain.getInt("alert_room_usd", 300)
+        set(v) = plain.edit().putInt("alert_room_usd", v).apply()
+
+    /** Alert when drawdown left drops below this share of the allowance (0 = off). */
+    var alertRoomPct: Int
+        get() = plain.getInt("alert_room_pct", 25)
+        set(v) = plain.edit().putInt("alert_room_pct", v).apply()
+
+    var monitorBackground: Boolean
+        get() = plain.getBoolean("monitor_background", false)
+        set(v) = plain.edit().putBoolean("monitor_background", v).apply()
+
+    var colorBlind: Boolean
+        get() = plain.getBoolean("color_blind", false)
+        set(v) = plain.edit().putBoolean("color_blind", v).apply()
+
+    var lastInterval: String
+        get() = plain.getString("last_interval", "15m")!!
+        set(v) = plain.edit().putString("last_interval", v).apply()
+
+    var showOpens: Boolean
+        get() = plain.getBoolean("show_opens", true)
+        set(v) = plain.edit().putBoolean("show_opens", v).apply()
+
+    var showVp: Boolean
+        get() = plain.getBoolean("show_vp", false)
+        set(v) = plain.edit().putBoolean("show_vp", v).apply()
+
+    /** Trade screen: show positions from every active account instead of just the trading one. */
+    var tradeShowAll: Boolean
+        get() = plain.getBoolean("trade_show_all", false)
+        set(v) = plain.edit().putBoolean("trade_show_all", v).apply()
+
+    var realtimePnl: Boolean
+        get() = plain.getBoolean("realtime_pnl", true)
+        set(v) = plain.edit().putBoolean("realtime_pnl", v).apply()
+
+    var showPoc: Boolean
+        get() = plain.getBoolean("show_poc", true)
+        set(v) = plain.edit().putBoolean("show_poc", v).apply()
+
+    var hideComp: Boolean
+        get() = plain.getBoolean("hide_comp", false)
+        set(v) = plain.edit().putBoolean("hide_comp", v).apply()
+    var confirmCloseAll: Boolean
+        get() = plain.getBoolean("confirm_close_all", true)
+        set(v) = plain.edit().putBoolean("confirm_close_all", v).apply()
+
+    var showSessions: Boolean
+        get() = plain.getBoolean("show_sessions", true)
+        set(v) = plain.edit().putBoolean("show_sessions", v).apply()
+    var sessionEu: Boolean
+        get() = plain.getBoolean("session_eu", false)
+        set(v) = plain.edit().putBoolean("session_eu", v).apply()
+    var killzones: Boolean
+        get() = plain.getBoolean("killzones", true)
+        set(v) = plain.edit().putBoolean("killzones", v).apply()
+
+    var largeOnly: Boolean
+        get() = plain.getBoolean("large_only", false)
+        set(v) = plain.edit().putBoolean("large_only", v).apply()
+    var largeTradeMin: Int
+        get() = plain.getInt("large_trade_min", 250_000)
+        set(v) = plain.edit().putInt("large_trade_min", v).apply()
+
+    var ordersAllMarkets: Boolean
+        get() = plain.getBoolean("orders_all_markets", true)
+        set(v) = plain.edit().putBoolean("orders_all_markets", v).apply()
+
+    var dashAll: Boolean
+        get() = plain.getBoolean("dash_all", false)
+        set(v) = plain.edit().putBoolean("dash_all", v).apply()
+
+    // Which indicator toggles appear above the chart, and whether that bar is open.
+    var chipOpens: Boolean
+        get() = plain.getBoolean("chip_opens", true)
+        set(v) = plain.edit().putBoolean("chip_opens", v).apply()
+    var chipVp: Boolean
+        get() = plain.getBoolean("chip_vp", true)
+        set(v) = plain.edit().putBoolean("chip_vp", v).apply()
+    var chipPoc: Boolean
+        get() = plain.getBoolean("chip_poc", true)
+        set(v) = plain.edit().putBoolean("chip_poc", v).apply()
+    var chipSess: Boolean
+        get() = plain.getBoolean("chip_sess", true)
+        set(v) = plain.edit().putBoolean("chip_sess", v).apply()
+    var indBarOpen: Boolean
+        get() = plain.getBoolean("ind_bar_open", true)
+        set(v) = plain.edit().putBoolean("ind_bar_open", v).apply()
+
+    // Trade notifications.
+    var notifyFills: Boolean
+        get() = plain.getBoolean("notify_fills", true)
+        set(v) = plain.edit().putBoolean("notify_fills", v).apply()
+    var notifyStops: Boolean
+        get() = plain.getBoolean("notify_stops", true)
+        set(v) = plain.edit().putBoolean("notify_stops", v).apply()
+    var notifyBreach: Boolean
+        get() = plain.getBoolean("notify_breach", true)
+        set(v) = plain.edit().putBoolean("notify_breach", v).apply()
+    var notifyMargin: Boolean
+        get() = plain.getBoolean("notify_margin", true)
+        set(v) = plain.edit().putBoolean("notify_margin", v).apply()
+    var marginAlertPct: Int
+        get() = plain.getInt("margin_alert_pct", 90)
+        set(v) = plain.edit().putInt("margin_alert_pct", v).apply()
+    var notifyPnl: Boolean
+        get() = plain.getBoolean("notify_pnl", false)
+        set(v) = plain.edit().putBoolean("notify_pnl", v).apply()
+    var pnlStepUsd: Int
+        get() = plain.getInt("pnl_step_usd", 100)
+        set(v) = plain.edit().putInt("pnl_step_usd", v).apply()
+    var pnlStepPct: Float
+        get() = plain.getFloat("pnl_step_pct", 1f)
+        set(v) = plain.edit().putFloat("pnl_step_pct", v).apply()
+
+    var pickerSort: String
+        get() = plain.getString("picker_sort", "24h") ?: "24h"
+        set(v) = plain.edit().putString("picker_sort", v).apply()
+
+    var marketsAnalysis: Boolean
+        get() = plain.getBoolean("markets_analysis", false)
+        set(v) = plain.edit().putBoolean("markets_analysis", v).apply()
+    var corrSet: String
+        get() = plain.getString("corr_set", "POS") ?: "POS"
+        set(v) = plain.edit().putString("corr_set", v).apply()
+    var corrWindow: String
+        get() = plain.getString("corr_window", "H1") ?: "H1"
+        set(v) = plain.edit().putString("corr_window", v).apply()
+
+    var fillsAllMarkets: Boolean
+        get() = plain.getBoolean("fills_all_markets", true)
+        set(v) = plain.edit().putBoolean("fills_all_markets", v).apply()
+}
