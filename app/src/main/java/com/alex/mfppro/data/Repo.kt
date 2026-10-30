@@ -94,6 +94,20 @@ class Repo(ctx: Context) {
 
     // ---- trading -------------------------------------------------------
 
+    /** Closed positions (whole trades), newest first, up to [maxPages] × 100. */
+    suspend fun closedPositions(accountId: String, maxPages: Int = 20): List<ClosedPosition> {
+        val key = _apiKey.value ?: error("Add an API key first")
+        val out = ArrayList<ClosedPosition>()
+        var cursor: String? = null
+        repeat(maxPages) {
+            val page = rest.closedPositions(key, accountId, cursor)
+            out += page.data
+            cursor = page.nextCursor
+            if (!page.hasMore || cursor == null) return out
+        }
+        return out
+    }
+
     /** Fill history for the journal, newest first (up to 2,000 fills). */
     suspend fun fills(accountId: String, maxPages: Int = 20): List<Fill> {
         val key = _apiKey.value ?: error("Add an API key first")

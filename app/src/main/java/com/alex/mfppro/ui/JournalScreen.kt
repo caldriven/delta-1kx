@@ -39,7 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.alex.mfppro.data.Fill
+import com.alex.mfppro.data.ClosedPosition
 import com.alex.mfppro.data.OSLO
 import com.alex.mfppro.data.Repo
 import java.time.Instant
@@ -48,12 +48,13 @@ import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-private fun dayOf(f: Fill): LocalDate = Instant.ofEpochMilli(f.settledAt ?: f.requestedAt).atZone(OSLO).toLocalDate()
-
-/** A closing fill: one realized result. */
-private class Closed(val f: Fill) {
-    val net get() = f.realizedPnl - f.fee
-    val day: LocalDate get() = dayOf(f)
+/**
+ * One whole trade from a closed position. realized_pnl is gross; fees are entry plus exit;
+ * funding is the swap cash flow (negative when paid).
+ */
+private class Closed(val p: ClosedPosition) {
+    val net get() = p.realizedPnl - p.fees + p.funding
+    val day: LocalDate get() = Instant.ofEpochMilli(p.closedAt ?: p.openedAt).atZone(OSLO).toLocalDate()
 }
 
 /**
@@ -63,23 +64,23 @@ private class Closed(val f: Fill) {
 @Composable
 fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
     val acc = rememberTradeAccount(repo)
-    var fills by remember { mutableStateOf<List<Fill>?>(null) }
+    var trades by remember { mutableStateOf<List<ClosedPosition>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var picker by remember { mutableStateOf(false) }
     val accountId = acc?.account?.id
     LaunchedEffect(accountId, reload) {
         if (accountId == null) return@LaunchedEffect
-        fills = null; error = null
-        runCatching { repo.fills(accountId) }.onSuccess { fills = it }.onFailure { error = it.message ?: "Couldn't load fills" }
+        trades = null; error = null
+        runCatching { repo.closedPositions(accountId) }.onSuccess { trades = it }.onFailure { error = it.message ?: "Couldn't load trades" }
     }
-    val closed = fills.orEmpty().filter { it.realizedPnl != 0.0 }.map(::Closed)
+    val closed = trades.orEmpty().map(::Closed)
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     var month by remember { mutableStateOf(YearMonth.now(OSLO)) }
     var day by remember { mutableStateOf<LocalDate?>(null) }
-    // Day results count every fee that day (opening fills too); realized PnL is before fees.
-    val byDay = fills.orEmpty().groupBy(::dayOf).mapValues { (_, v) -> v.sumOf { it.realizedPnl - it.fee } }.filterValues { it != 0.0 }
+    val byDay = closed.groupBy { it.day }.mapValues { (_, v) -> v.sumOf { it.net } }
 
-    LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
+    LazyColumn(Modifier.fillMaxSize().background(C.bg), state = listState, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
         item {
             Row(Modifier.fillMaxWidth().padding(14.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Journal", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
@@ -100,22 +101,21 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
         }
         when {
             error != null -> item { Text(error!!, color = C.down, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
-            fills == null -> item { Text("Loading fills…", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
+            trades == null -> item { Text("Loading trades…", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
             else -> {
                 val scope = if (day != null) closed.filter { it.day == day } else closed.filter { YearMonth.from(it.day) == month }
-                val periodFees = fills.orEmpty().filter { if (day != null) dayOf(it) == day else YearMonth.from(dayOf(it)) == month }.sumOf { it.fee }
-                item { Stats(scope, periodFees, if (day != null) day!!.format(DateTimeFormatter.ofPattern("d MMM", Locale.US)) else month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US))) }
-                item {
+                item(key = "stats") { Stats(scope, if (day != null) day!!.format(DateTimeFormatter.ofPattern("d MMM", Locale.US)) else month.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.US))) }
+                item(key = "cal") {
                     Calendar(month, byDay, day,
                         onMonth = { month = it; day = null },
                         onDay = { d -> day = if (day == d) null else d })
                 }
-                item {
+                item(key = "title") {
                     Text(if (day != null) "Trades on ${day!!.format(DateTimeFormatter.ofPattern("d MMM", Locale.US))}" else "Trades", color = C.text, fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 4.dp))
                 }
                 if (scope.isEmpty()) item { Text("No closed trades", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 6.dp)) }
-                items(scope, key = { it.f.id }) { TradeRow(it) }
+                items(scope, key = { it.p.id }) { TradeRow(it) }
             }
         }
     }
@@ -124,9 +124,10 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
 
 /** Solid-style headline numbers for the selected month or day. */
 @Composable
-private fun Stats(trades: List<Closed>, fees: Double, period: String) {
-    // Net counts opening fees as well as closing ones.
-    val net = trades.sumOf { it.f.realizedPnl } - fees
+private fun Stats(trades: List<Closed>, period: String) {
+    val net = trades.sumOf { it.net }
+    val fees = trades.sumOf { it.p.fees }
+    val swap = trades.sumOf { it.p.funding }
     val wins = trades.filter { it.net > 0 }
     val losses = trades.filter { it.net < 0 }
     val winRate = if (trades.isNotEmpty()) wins.size * 100.0 / trades.size else null
@@ -153,7 +154,8 @@ private fun Stats(trades: List<Closed>, fees: Double, period: String) {
                 MiniStat("Avg win", fmtUsd(wins.takeIf { it.isNotEmpty() }?.let { w -> w.sumOf { it.net } / w.size }), C.up, Modifier.weight(1f))
                 MiniStat("Avg loss", fmtUsd(losses.takeIf { it.isNotEmpty() }?.let { l -> l.sumOf { it.net } / l.size }), C.down, Modifier.weight(1f))
                 MiniStat("Profit factor", pf?.let { String.format(Locale.US, "%.2f", it) } ?: "—", C.text, Modifier.weight(1f))
-                MiniStat("Fees", fmtUsd(fees), C.muted, Modifier.weight(1f))
+                MiniStat("Fees", "-" + fmtUsd(fees), C.muted, Modifier.weight(1f))
+                MiniStat("Swap", fmtUsd(swap, true), C.muted, Modifier.weight(1f))
             }
         }
     }
@@ -218,31 +220,44 @@ private fun fmtCompactSigned(v: Double) = (if (v < 0) "-" else "+") + "$" + fmtC
 
 @Composable
 private fun TradeRow(t: Closed) {
-    val f = t.f
-    // A closing sell ends a long, a closing buy ends a short.
-    val wasLong = f.side == "sell"
-    Row(
+    val p = t.p
+    var open by remember { mutableStateOf(false) }
+    val reason = when (p.closeReason) {
+        "take_profit" -> "TP"; "stop_loss" -> "SL"; "liquidation" -> "Liquidated"; "reversal" -> "Flipped"; "system" -> "System"; else -> null
+    }
+    val held = ((p.closedAt ?: p.openedAt) - p.openedAt) / 60_000
+    val holdTxt = when { held >= 1440 -> "${held / 1440}d ${held / 60 % 24}h"; held >= 60 -> "${held / 60}h ${held % 60}m"; else -> "${held}m" }
+    Column(
         Modifier.padding(horizontal = 10.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.panel)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .clickable { open = !open }.padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        VenueTag(f.provider, 14.dp)
-        Spacer(Modifier.width(6.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(ticker(f.symbol, f.provider), color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(6.dp))
-                Tag(if (wasLong) "Long" else "Short", if (wasLong) C.up else C.down)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            VenueTag(p.provider, 14.dp)
+            Spacer(Modifier.width(6.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(ticker(p.symbol, p.provider), color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(6.dp))
+                    Tag("${if (p.isLong) "Long" else "Short"} ${p.leverage.toInt()}x", if (p.isLong) C.up else C.down)
+                    reason?.let { Spacer(Modifier.width(4.dp)); Tag(it, C.muted) }
+                }
+                Text(
+                    Instant.ofEpochMilli(p.closedAt ?: p.openedAt).atZone(OSLO).format(DateTimeFormatter.ofPattern("d MMM HH:mm", Locale.US)) +
+                        "  ·  $" + fmtCompact(p.size * p.entryPrice) + "  ·  " + holdTxt,
+                    style = num.copy(fontSize = 10.sp, color = C.muted), maxLines = 1,
+                )
             }
-            Text(
-                Instant.ofEpochMilli(f.requestedAt).atZone(OSLO).format(DateTimeFormatter.ofPattern("d MMM HH:mm", Locale.US)) +
-                    "  ·  " + "$" + fmtCompact(f.notional) + " @ " + fmtPrice(f.fillPrice),
-                style = num.copy(fontSize = 10.sp, color = C.muted), maxLines = 1,
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Text(fmtUsd(t.net, true), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = pnlColor(t.net)))
+                p.realizedMarginBasis?.takeIf { it > 0 }?.let { Text(String.format(Locale.US, "%+.2f%% ROE", t.net / it * 100), style = num.copy(fontSize = 10.sp, color = pnlColor(t.net))) }
+            }
         }
-        Column(horizontalAlignment = Alignment.End) {
-            Text(fmtUsd(t.net, true), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = pnlColor(t.net)))
-            Text("fee " + fmtUsd(f.fee), style = num.copy(fontSize = 10.sp, color = C.muted))
+        // Tap for the breakdown: prices, gross, fees and swap.
+        if (open) Text("Entry ${fmtPrice(p.entryPrice)}  →  exit ${fmtPrice(p.exitPrice)}", style = num.copy(fontSize = 11.sp, color = C.text), modifier = Modifier.padding(top = 6.dp))
+        if (open) Row(Modifier.padding(top = 4.dp)) {
+            Cell("Gross", fmtUsd(p.realizedPnl, true), Modifier.weight(1f), pnlColor(p.realizedPnl))
+            Cell("Fees", "-" + fmtUsd(p.fees), Modifier.weight(0.9f), C.muted)
+            Cell("Swap", fmtUsd(p.funding, true), Modifier.weight(0.9f), C.muted)
         }
     }
 }

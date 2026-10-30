@@ -33,6 +33,10 @@ class RestApi(private val http: OkHttpClient) {
     suspend fun tradingPolicy(key: String, accountId: String): TradingPolicy =
         get<DataOne<TradingPolicy>>(key, "/v1/accounts/" + java.net.URLEncoder.encode(accountId, "UTF-8") + "/trading-policy").data
 
+    suspend fun closedPositions(key: String, accountId: String, cursor: String?): ClosedPage =
+        get(key, "/v1/positions?status=closed&limit=100&account_id=" + java.net.URLEncoder.encode(accountId, "UTF-8") +
+            (cursor?.let { "&cursor=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: ""))
+
     /** Public catalog; served on the live host without a key. */
     suspend fun markets(): List<Market> =
         get<DataList<Market>>(null, "/v1/markets").data

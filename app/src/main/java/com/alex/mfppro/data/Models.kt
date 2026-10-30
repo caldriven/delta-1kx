@@ -176,3 +176,30 @@ data class PolicyLimits(val maxPositionValueUsd: Double? = null, val maxOpenPosi
 
 @Serializable
 data class TradingPolicy(val limits: PolicyLimits? = null, val maximumTotalNotionalUsd: Double? = null)
+
+/** A closed position from GET /v1/positions?status=closed: one whole trade with its fees and funding. */
+@Serializable
+data class ClosedPosition(
+    val id: String,
+    val accountId: String = "",
+    val marketId: String = "",
+    val provider: String = "",
+    val symbol: String = "",
+    val side: String = "",
+    val size: Double = 0.0,
+    val entryPrice: Double = 0.0,
+    val exitPrice: Double? = null,
+    val leverage: Double = 1.0,
+    val openedAt: Long = 0,
+    val closedAt: Long? = null,
+    val realizedPnl: Double = 0.0,
+    val realizedMarginBasis: Double? = null,
+    val fees: Double = 0.0,
+    val funding: Double = 0.0,
+    val closeReason: String? = null,
+) {
+    val isLong get() = side == "long"
+}
+
+@Serializable
+data class ClosedPage(val data: List<ClosedPosition> = emptyList(), val hasMore: Boolean = false, val nextCursor: String? = null)
