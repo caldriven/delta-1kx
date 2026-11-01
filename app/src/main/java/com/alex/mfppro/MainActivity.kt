@@ -69,6 +69,8 @@ class MainActivity : ComponentActivity() {
         val repo = (application as MfpApp).repo
         com.alex.mfppro.ui.Split.pct = repo.prefs.profitSplit
         com.alex.mfppro.ui.Comp.hide = repo.prefs.hideComp
+        // Retry the background monitor here too: starting it from Application.onCreate can be refused.
+        if (repo.prefs.monitorBackground) com.alex.mfppro.data.MonitorService.setEnabled(this, true)
         com.alex.mfppro.ui.Palette.colorBlind = repo.prefs.colorBlind
         com.alex.mfppro.ui.Palette.theme = com.alex.mfppro.ui.AppTheme.entries.firstOrNull { it.name == repo.prefs.theme } ?: com.alex.mfppro.ui.AppTheme.STANDARD
         setContent {

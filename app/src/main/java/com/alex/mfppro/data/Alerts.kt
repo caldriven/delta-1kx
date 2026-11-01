@@ -227,7 +227,10 @@ class MonitorService : Service() {
     companion object {
         fun setEnabled(ctx: Context, on: Boolean) {
             val i = Intent(ctx, MonitorService::class.java)
-            if (on) ContextCompat.startForegroundService(ctx, i) else ctx.stopService(i)
+            // Android blocks foreground-service starts while the app is in the background (e.g. a process
+            // started by an update); the activity starts it again when the app comes to the front.
+            if (on) runCatching { ContextCompat.startForegroundService(ctx, i) }.onFailure { android.util.Log.w("Monitor", "start deferred: ${it.message}") }
+            else ctx.stopService(i)
         }
     }
 }
