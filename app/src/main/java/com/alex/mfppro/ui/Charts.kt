@@ -232,8 +232,11 @@ fun CandleChart(
                         onDoubleTap = { offset = RIGHT_GAP; visible = 70f; manual = null; cross = null },
                         // Long press shows it a thumb's height above the finger.
                         onLongPress = {
-                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
-                            cross = Offset(it.x, (it.y - 60.dp.toPx()).coerceAtLeast(0f))
+                            // Not on the price axis: that press is scaling the axis.
+                            if (it.x < size.width - 56.dp.toPx()) {
+                                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                cross = Offset(it.x, (it.y - 60.dp.toPx()).coerceAtLeast(0f))
+                            }
                         },
                         onTap = { cross = null },
                     )

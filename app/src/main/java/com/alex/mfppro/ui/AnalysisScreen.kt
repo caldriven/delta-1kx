@@ -127,7 +127,8 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
     val heldKey = held.map { it.marketId }.sorted().joinToString() + "|" + extraIds.joinToString()
     var frozen by remember(universe, heldKey) { mutableStateOf<List<Market>?>(null) }
     // Refreeze once when volume ranks first arrive, so volume presets aren't stuck on an alphabetical guess.
-    val haveVol = byVol.take(5).count { stats[it.feedKey]?.dayNtlVlm != null } >= 3
+    // Ranks are trusted once most markets report volume (not just the first few to arrive).
+    val haveVol = markets.isNotEmpty() && markets.count { stats[it.feedKey]?.dayNtlVlm != null } >= markets.size * 0.8
     var frozeWithVol by remember(universe, heldKey) { mutableStateOf(false) }
     if (frozen == null || frozen!!.size < set.size || (haveVol && !frozeWithVol)) { frozen = set; if (haveVol) frozeWithVol = true }
     val setKey = frozen.orEmpty().map { it.marketId }.sorted().joinToString(",")
@@ -217,11 +218,16 @@ private fun Card(content: @Composable () -> Unit) {
 }
 
 /** Correlation colour: amber for moving together, cyan for opposite, dark near zero. */
-/** Colour on a scale stretched over this matrix's own range, so differences show even when everything is correlated. */
+/**
+ * Sign keeps its colour (amber positive, cyan negative). Strength is stretched over this set's
+ * own range of |ρ|, so differences show even when everything is correlated.
+ */
 private fun corrColor(c: Double?, lo: Double, hi: Double): Color {
     if (c == null) return C.panel2
-    val f = if (hi > lo) ((c - lo) / (hi - lo)).toFloat().coerceIn(0f, 1f) else 0.5f
-    return if (f >= 0.5f) lerp(C.panel2, POS_C, (f - 0.5f) * 2) else lerp(C.panel2, NEG_C, (0.5f - f) * 2)
+    val top = maxOf(kotlin.math.abs(lo), kotlin.math.abs(hi))
+    val bottom = if (lo >= 0) lo else if (hi <= 0) -hi else 0.0
+    val f = if (top > bottom) ((kotlin.math.abs(c) - bottom) / (top - bottom)).toFloat().coerceIn(0f, 1f) else 1f
+    return lerp(C.panel2, if (c >= 0) POS_C else NEG_C, 0.25f + 0.75f * f)
 }
 
 @Composable
@@ -261,10 +267,10 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
         Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(String.format(Locale.US, "%.2f", lo), style = num.copy(fontSize = 9.sp, color = C.muted))
             Box(Modifier.padding(horizontal = 6.dp).weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp))
-                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(NEG_C, C.panel2, POS_C))))
+                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(if (lo >= 0) listOf(lerp(C.panel2, POS_C, 0.25f), POS_C) else if (hi <= 0) listOf(NEG_C, lerp(C.panel2, NEG_C, 0.25f)) else listOf(NEG_C, C.panel2, POS_C))))
             Text(String.format(Locale.US, "%.2f", hi), style = num.copy(fontSize = 9.sp, color = C.muted))
         }
-        Text("Colours span this set's own range · tap a cell for the pair", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+        Text("Amber = move together, cyan = opposite · shade spans this set's range · tap a cell", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -304,20 +310,25 @@ private fun PairLine(mx: Matrix, i: Int, j: Int, c: Double, onClick: () -> Unit)
 @Composable
 private fun PairDetail(mx: Matrix, i: Int, j: Int, window: Window) {
     val a = mx.ret[i]; val b = mx.ret[j]
-    val keys = a.keys.filter { it in b }.sorted()
     val ca = mx.markets[i]; val cb = mx.markets[j]
     val c = mx.cells[i][j]
-    // Cumulative returns in %.
-    var sa = 0.0; var sb = 0.0
-    val pa = keys.map { sa += a[it]!!; (kotlin.math.exp(sa) - 1) * 100 }
-    val pb = keys.map { sb += b[it]!!; (kotlin.math.exp(sb) - 1) * 100 }
     val w = maxOf(12, (window.perDay).toInt().coerceAtLeast(12))
-    val rolling = keys.indices.map { k ->
-        if (k < w) null else {
-            val sl = keys.subList(k - w, k)
-            pair(sl.associateWith { a[it]!! }, sl.associateWith { b[it]!! })?.corr
+    // Computed once per pair; the screen recomposes every second on live stats.
+    val (keys, series, rolling) = androidx.compose.runtime.remember(mx, i, j, w) {
+        val keys = a.keys.filter { it in b }.sorted()
+        // Cumulative returns in %.
+        var sa = 0.0; var sb = 0.0
+        val pa = keys.map { sa += a[it]!!; (kotlin.math.exp(sa) - 1) * 100 }
+        val pb = keys.map { sb += b[it]!!; (kotlin.math.exp(sb) - 1) * 100 }
+        val rolling = keys.indices.map { k ->
+            if (k < w) null else {
+                val sl = keys.subList(k - w, k)
+                pair(sl.associateWith { a[it]!! }, sl.associateWith { b[it]!! })?.corr
+            }
         }
+        Triple(keys, pa to pb, rolling)
     }
+    val (pa, pb) = series
     val vb = mx.cells[j][j]?.cov
     val beta = if (c != null && vb != null && vb > 0) c.cov / vb else null
     val colA = C.accent; val colB = Color(0xFF60A5FA)

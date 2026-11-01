@@ -83,10 +83,11 @@ class MainActivity : ComponentActivity() {
                 var tab by rememberSaveable { mutableStateOf(0) }
                 var marketId by rememberSaveable { mutableStateOf(repo.prefs.lastMarketId) }
                 var compact by rememberSaveable { mutableStateOf(false) }
-                var orderOpen by remember { mutableStateOf(false) }
+                val orderOpen = com.alex.mfppro.ui.OrderPanel.open != null
                 // Full-chart focus: account strip and bottom bar tucked away, one Trade button left to bring them back.
                 var focus by rememberSaveable { mutableStateOf(false) }
                 val focusOn = focus && tab == 1 && !compact
+                LaunchedEffect(tab, compact) { if (tab != 1 || compact) focus = false }
                 var analysis by rememberSaveable { mutableStateOf(repo.prefs.marketsAnalysis) }
                 // Bar order of the paged screens: Dashboard, Markets, Trade, Journal.
                 val pageTabs = remember { listOf(0, 4, 1, 2) }
@@ -159,8 +160,8 @@ class MainActivity : ComponentActivity() {
                             },
                         ) {
                             // Order toggles the panel; any other tab closes it.
-                            if (it == 5) orderOpen = !orderOpen
-                            else if (orderOpen) { orderOpen = false; if (it != tab) go(it) }
+                            if (it == 5) com.alex.mfppro.ui.OrderPanel.open = if (orderOpen) null else (marketId ?: "") to com.alex.mfppro.ui.TicketRequest(buy = true)
+                            else if (orderOpen) { com.alex.mfppro.ui.OrderPanel.open = null; if (it != tab) go(it) }
                             // Markets, like Trade, flips between its two views when tapped again.
                             else if (it == 4 && tab == 4) {
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
@@ -188,12 +189,12 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        if (orderOpen) {
+                        com.alex.mfppro.ui.OrderPanel.open?.let { (id, req) ->
                             val markets by repo.markets.collectAsStateWithLifecycle()
                             val venues by repo.venues.collectAsStateWithLifecycle()
-                            val m = markets.firstOrNull { it.marketId == marketId } ?: venues.firstOrNull { it.marketId == marketId } ?: markets.firstOrNull { it.symbol == "BTC" }
-                            if (m == null) orderOpen = false
-                            else com.alex.mfppro.ui.OrderTicket(repo, m, com.alex.mfppro.ui.TicketRequest(buy = true)) { orderOpen = false }
+                            val m = markets.firstOrNull { it.marketId == id } ?: venues.firstOrNull { it.marketId == id } ?: markets.firstOrNull { it.symbol == "BTC" }
+                            if (m == null) com.alex.mfppro.ui.OrderPanel.open = null
+                            else androidx.compose.runtime.key(id, req) { com.alex.mfppro.ui.OrderTicket(repo, m, req) { com.alex.mfppro.ui.OrderPanel.open = null } }
                         }
                     }
                 }

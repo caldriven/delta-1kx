@@ -81,6 +81,11 @@ import kotlin.math.roundToInt
 
 data class TicketRequest(val buy: Boolean, val limitPrice: Double? = null)
 
+/** The single order panel: which market it's open on and how. MainActivity draws it; anything can open or close it. */
+object OrderPanel {
+    var open by androidx.compose.runtime.mutableStateOf<Pair<String, TicketRequest>?>(null)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: () -> Unit) {

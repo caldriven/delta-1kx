@@ -161,7 +161,6 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 
     var tab by rememberSaveable { mutableStateOf(0) }
     var view by rememberSaveable { mutableStateOf(0) }
-    var ticket by remember { mutableStateOf<TicketRequest?>(null) }
     var exitAsk by remember { mutableStateOf<ExitAsk?>(null) }
     var confirmAsk by remember { mutableStateOf<ChartAsk?>(null) }
     val tradeScope = rememberCoroutineScope()
@@ -184,7 +183,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val pct = (px / p.entryPrice - 1) * 100 * (if (p.isLong) 1 else -1)
         return String.format(Locale.US, "%s %+.2f%% / %s", k, pct, fmtUsd(pnl, true)) to (if (k == "TP") C.up else C.down)
     }
-    var showPos by remember { mutableStateOf(repo.prefs.showPosLines) }
+    // Hidden only while its chip is offered; turning the chip off in Settings shows the lines again.
+    var showPosPick by remember { mutableStateOf(repo.prefs.showPosLines) }
+    val showPos = showPosPick || !repo.prefs.chipPos
     val chartLines = (if (showPos) myPositions else emptyList()).flatMap { p ->
         val acc = accounts[p.accountId] ?: return@flatMap emptyList()
         val r = riskOf(acc, marks)
@@ -293,7 +294,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             run {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPos = !showPos; repo.prefs.showPosLines = showPos }
+                    if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPosPick = !showPos; repo.prefs.showPosLines = showPosPick }
                     if (repo.prefs.chipOpens) OverlayChip("D/W/M", showOpens, Icons.Filled.HorizontalRule) { showOpens = !showOpens; repo.prefs.showOpens = showOpens }
                     if (repo.prefs.chipVp) OverlayChip("VP", showVp, Icons.AutoMirrored.Filled.Notes) { showVp = !showVp; repo.prefs.showVp = showVp }
                     if (repo.prefs.chipPoc) OverlayChip("POC", showPoc, Icons.Filled.Adjust) { showPoc = !showPoc; repo.prefs.showPoc = showPoc }
@@ -348,7 +349,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         var ordersAll by remember { mutableStateOf(repo.prefs.ordersAllMarkets) }
         val shownOrders = allOrders.filter { (_, o) -> ordersAll || o.marketId == market.marketId || o.symbol.equals(market.symbol, true) }
             .sortedWith(compareByDescending<Pair<com.alex.mfppro.data.AccountState, com.alex.mfppro.data.Order>> { it.second.marketId == market.marketId }.thenBy { it.second.symbol })
-        if (!compact) PillTabs(listOf("Positions ${allPositions.size}", "Orders ${shownOrders.size}", "Fills", "Book", "Trades"), tab) { tab = it }
+        if (!compact) PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = it }
         if (!compact) when (tab) {
             0 -> Column {
                 Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -379,14 +380,13 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 Spacer(Modifier.height(8.dp))
             }
             2 -> FillsTab(repo, tradeAcc, market, onPickMarket)
-            3 -> OrderBook(repo, key) { px, bid -> ticket = TicketRequest(buy = bid, limitPrice = px) }
+            3 -> OrderBook(repo, key) { px, bid -> OrderPanel.open = market.marketId to TicketRequest(buy = bid, limitPrice = px) }
             else -> TradesTape(repo, market)
         }
     }
         // No sticky position bar: the positions list is right below the chart.
     }
 
-    ticket?.let { OrderTicket(repo, market, it) { ticket = null } }
 
     // Landscape chart is drawn by MainActivity over the whole app (bottom bar included).
     if (landscape) {
@@ -846,17 +846,15 @@ fun MiniSwitch(left: String, right: String, leftOn: Boolean, onChange: (Boolean)
  * cell, the selected cell raised with an accent underline and count badge.
  */
 @Composable
-private fun PillTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+private fun PillTabs(labels: List<Pair<String, Int>>, selected: Int, onSelect: (Int) -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).height(38.dp)
             .clip(RoundedCornerShape(10.dp)).background(C.panel2).padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        labels.forEachIndexed { i, t ->
+        labels.forEachIndexed { i, (name, n) ->
             val on = i == selected
-            // "Positions 3" -> name plus a small count.
-            val name = t.substringBeforeLast(' ').takeIf { t.last().isDigit() } ?: t
-            val count = t.substringAfterLast(' ').takeIf { t.last().isDigit() && it != "0" }
+            val count = n.takeIf { it > 0 }?.toString()
             Row(
                 Modifier.weight(if (name.length > 6) 1.3f else 1f).fillMaxHeight().clip(RoundedCornerShape(8.dp))
                     .background(if (on) C.panel else Color.Transparent)

@@ -248,7 +248,8 @@ private fun SideToggle(buy: Boolean, onChange: (Boolean) -> Unit) {
             .pointerInput(Unit) { detectTapGestures { change(!cur) } }
             .pointerInput(Unit) {
                 var acc = 0f
-                detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragEnd = { if (kotlin.math.abs(acc) > 40f) change(!cur) }) { ch, dx -> ch.consume(); acc += dx }
+                // A deliberate swipe (over a third of the button) is needed, so a brush while scrolling never flips the side.
+                detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragEnd = { if (kotlin.math.abs(acc) > maxOf(80.dp.toPx(), size.width / 3f)) change(!cur) }) { ch, dx -> ch.consume(); acc += dx }
             },
         contentAlignment = Alignment.Center,
     ) {
