@@ -50,8 +50,8 @@ fun rememberTradeAccount(repo: Repo): AccountState? {
     return active.firstOrNull { it.account.id == chosen } ?: active.firstOrNull()
 }
 
-private val ROOM_FULL = androidx.compose.ui.graphics.Color(0xFFFDBA74)
-private val TARGET_C = androidx.compose.ui.graphics.Color(0xFF22D3EE)
+private val ROOM_FULL get() = C.roomFull
+private val TARGET_C get() = C.target
 
 /**
  * Room left under MFP's exposure caps for a new order in [marketId]: the smaller of

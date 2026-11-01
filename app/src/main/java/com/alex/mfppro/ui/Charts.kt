@@ -91,7 +91,7 @@ private val POC_C = Color(0xFFA78BFA)
 class LineDrag(val preview: (Double) -> Pair<String, Color>, val onDrop: (Double) -> Unit)
 
 // TradingView-style labels: the system sans (Roboto) with tabular figures, not monospace.
-private val axisStyle = TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif, fontSize = 11.sp, color = C.muted, fontFeatureSettings = "tnum", letterSpacing = 0.sp)
+private val axisStyle get() = TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif, fontSize = 11.sp, color = C.muted, fontFeatureSettings = "tnum", letterSpacing = 0.sp)
 private val vpColor = Color(0xFF6B7A90)
 
 /**
@@ -129,6 +129,7 @@ fun CandleChart(
     var dragging by remember { mutableStateOf<Pair<LineDrag, Float>?>(null) }
     // Crosshair: long-press to show, drag to move, tap to clear.
     var cross by remember { mutableStateOf<Offset?>(null) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     // The crosshair button: each press toggles it, starting at the chart centre.
     val canvasSize = remember { FloatArray(2) }
     LaunchedEffect(crossKey) { if (crossKey > 0) cross = if (cross == null) Offset(canvasSize[0] * 0.45f, canvasSize[1] * 0.4f) else null }
@@ -193,7 +194,12 @@ fun CandleChart(
                                 continue
                             }
                             if (mode == 0) mode = if (cross != null) 7 else if (abs(total.x) > abs(total.y)) 1 else -1
-                            if (mode == 7) { cross = ch.position; ch.consume(); continue }
+                            // TradingView style: while the crosshair is on, any drag moves it by the same amount,
+                            // so it never hides under the thumb; releasing leaves it where it is.
+                            if (mode == 7) {
+                                cross = cross?.let { c -> Offset((c.x + d.x).coerceIn(0f, size.width - axisW), (c.y + d.y).coerceIn(0f, size.height.toFloat())) }
+                                ch.consume(); continue
+                            }
                             val barW = (size.width - axisW) / visible
                             when (mode) {
                                 5 -> { dragging = dragging?.let { it.first to (it.second + d.y).coerceIn(0f, geom[2].toFloat()) }; ch.consume() }
@@ -224,7 +230,11 @@ fun CandleChart(
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onDoubleTap = { offset = RIGHT_GAP; visible = 70f; manual = null; cross = null },
-                        onLongPress = { cross = it },
+                        // Long press shows it a thumb's height above the finger.
+                        onLongPress = {
+                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                            cross = Offset(it.x, (it.y - 60.dp.toPx()).coerceAtLeast(0f))
+                        },
                         onTap = { cross = null },
                     )
                 }
@@ -386,7 +396,7 @@ fun CandleChart(
 
             // Ghost line under the finger while dragging a line, plus a Cancel target.
             dragging?.let {
-                val t = tm.measure("✕  Cancel", pillStyle.copy(fontWeight = FontWeight.Bold))
+                val t = tm.measure("✕  Cancel", pillStyle.copy(fontWeight = FontWeight.Bold, color = C.text))
                 val cw = t.size.width + 28.dp.toPx(); val ch = 30.dp.toPx()
                 val cx = size.width / 2 - cw / 2; val cy = 6.dp.toPx()
                 drawRoundRect(C.bg.copy(alpha = 0.92f), Offset(cx, cy), Size(cw, ch), androidx.compose.ui.geometry.CornerRadius(15f, 15f))
@@ -446,7 +456,7 @@ fun CandleChart(
                 drawLine(C.text.copy(alpha = 0.6f), Offset(0f, cy), Offset(chartW, cy), 1f, pathEffect = dot)
                 val cp = hi - cy / chartH * (hi - lo)
                 drawRect(C.text, Offset(chartW, cy - 8.dp.toPx()), Size(axisW, 16.dp.toPx()))
-                label(tm, fmtPrice(cp), Offset(chartW + 4.dp.toPx(), cy - 6.dp.toPx()), axisStyle.copy(color = Color.Black))
+                label(tm, fmtPrice(cp), Offset(chartW + 4.dp.toPx(), cy - 6.dp.toPx()), axisStyle.copy(color = C.bg))
                 val i = ((cx - (chartW - (slice.size + gap) * barW)) / barW).toInt()
                 slice.getOrNull(i)?.let { k ->
                     val chg = if (k.o > 0) (k.c / k.o - 1) * 100 else 0.0

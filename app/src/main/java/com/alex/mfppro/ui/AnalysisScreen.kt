@@ -126,7 +126,10 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
     // Freeze the set per choice: live volume ranks swap constantly and would restart the load each time.
     val heldKey = held.map { it.marketId }.sorted().joinToString() + "|" + extraIds.joinToString()
     var frozen by remember(universe, heldKey) { mutableStateOf<List<Market>?>(null) }
-    if (frozen == null || (frozen!!.size < set.size) || (frozen!!.isNotEmpty() && stats.isNotEmpty() && frozen!!.none { stats[it.feedKey]?.dayNtlVlm != null } && set.any { stats[it.feedKey]?.dayNtlVlm != null })) frozen = set
+    // Refreeze once when volume ranks first arrive, so volume presets aren't stuck on an alphabetical guess.
+    val haveVol = byVol.take(5).count { stats[it.feedKey]?.dayNtlVlm != null } >= 3
+    var frozeWithVol by remember(universe, heldKey) { mutableStateOf(false) }
+    if (frozen == null || frozen!!.size < set.size || (haveVol && !frozeWithVol)) { frozen = set; if (haveVol) frozeWithVol = true }
     val setKey = frozen.orEmpty().map { it.marketId }.sorted().joinToString(",")
 
     var matrix by remember { mutableStateOf<Matrix?>(null) }
@@ -139,9 +142,18 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         val rets = coroutineScope {
             set.map { m -> async { returns(runCatching { repo.market.candleHistory(m.provider, m.coin, window.interval, window.bars) }.getOrDefault(emptyList())) } }.awaitAll()
         }
-        val cells = Array(set.size) { i -> Array(set.size) { j -> if (i <= j) pair(rets[i], rets[j]) else null } }
-        for (i in set.indices) for (j in 0 until i) cells[i][j] = cells[j][i]
-        matrix = Matrix(set, rets, cells)
+        val raw = Array(set.size) { i -> Array(set.size) { j -> if (i <= j) pair(rets[i], rets[j]) else null } }
+        for (i in set.indices) for (j in 0 until i) raw[i][j] = raw[j][i]
+        // Order so related markets sit together: start at BTC (or the first), then always the closest remaining one.
+        val order = ArrayList<Int>()
+        val left = set.indices.toMutableSet()
+        var cur = set.indexOfFirst { it.symbol == "BTC" }.takeIf { it >= 0 } ?: 0
+        while (true) {
+            order += cur; left -= cur
+            cur = left.maxByOrNull { raw[cur][it]?.corr ?: -2.0 } ?: break
+        }
+        val cells = Array(order.size) { a -> Array(order.size) { b -> raw[order[a]][order[b]] } }
+        matrix = Matrix(order.map { set[it] }, order.map { rets[it] }, cells)
         loading = false
     }
 
@@ -177,16 +189,8 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         if (mx == null) item { Text(if (loading) "Loading candles…" else "Not enough markets", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
         else {
             item { Heatmap(mx, picked) { picked = it } }
-            picked?.let { (i, j) ->
-                item {
-                    val c = mx.cells[i][j]
-                    Card {
-                        Text("${mx.markets[i].symbol} × ${mx.markets[j].symbol}", color = C.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Text(c?.let { String.format(Locale.US, "Correlation %.2f over %d bars", it.corr, it.n) } ?: "Not enough overlap",
-                            style = num.copy(fontSize = 12.sp, color = C.muted))
-                    }
-                }
-            }
+            picked?.let { (i, j) -> item { PairDetail(mx, i, j, window) } }
+            item { PairLists(mx) { picked = it } }
             item { PositionRisk(repo, mx, window) }
             item { Title("Volatility & beta", "annualised, vs BTC") }
             item { VolBeta(mx, window, onOpenMarket) }
@@ -213,51 +217,152 @@ private fun Card(content: @Composable () -> Unit) {
 }
 
 /** Correlation colour: amber for moving together, cyan for opposite, dark near zero. */
-private fun corrColor(c: Double?) = when {
-    c == null -> C.panel2
-    c >= 0 -> lerp(C.panel2, POS_C, c.toFloat().coerceIn(0f, 1f))
-    else -> lerp(C.panel2, NEG_C, (-c).toFloat().coerceIn(0f, 1f))
+/** Colour on a scale stretched over this matrix's own range, so differences show even when everything is correlated. */
+private fun corrColor(c: Double?, lo: Double, hi: Double): Color {
+    if (c == null) return C.panel2
+    val f = if (hi > lo) ((c - lo) / (hi - lo)).toFloat().coerceIn(0f, 1f) else 0.5f
+    return if (f >= 0.5f) lerp(C.panel2, POS_C, (f - 0.5f) * 2) else lerp(C.panel2, NEG_C, (0.5f - f) * 2)
 }
 
 @Composable
 private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>) -> Unit) {
     val n = mx.markets.size
+    val off = (0 until n).flatMap { i -> (0 until i).mapNotNull { j -> mx.cells[i][j]?.corr } }
+    val lo = off.minOrNull() ?: -1.0
+    val hi = off.maxOrNull() ?: 1.0
     Card {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val label = 44.dp
+            val label = 46.dp
             val cell = (maxWidth - label) / n
-            val showNum = cell >= 26.dp
+            val showNum = cell >= 24.dp
+            // Lower triangle only: each pair once, with the symbol on the diagonal.
             Column {
-                // Column headers.
-                Row {
-                    Spacer(Modifier.width(label))
-                    mx.markets.forEach { m ->
-                        Text(m.symbol.take(4), color = C.muted, fontSize = 8.sp, textAlign = TextAlign.Center, maxLines = 1, modifier = Modifier.width(cell))
-                    }
-                }
                 for (i in 0 until n) Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(mx.markets[i].symbol.take(6), color = C.text, fontSize = 9.sp, maxLines = 1, modifier = Modifier.width(label))
+                    Text(mx.markets[i].symbol.take(6), color = C.text, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.width(label))
                     for (j in 0 until n) {
+                        if (j > i) { Spacer(Modifier.width(cell)); continue }
                         val c = mx.cells[i][j]?.corr
                         val on = picked == (i to j) || picked == (j to i)
+                        val bg = if (i == j) Color.Transparent else corrColor(c, lo, hi)
                         Box(
-                            Modifier.width(cell).aspectRatio(1f).padding(0.5.dp).clip(RoundedCornerShape(3.dp)).background(corrColor(c))
-                                .then(if (on) Modifier.border(1.5.dp, C.text, RoundedCornerShape(3.dp)) else Modifier)
-                                .clickable { onPick(i to j) },
+                            Modifier.width(cell).aspectRatio(1f).padding(1.dp).clip(RoundedCornerShape(4.dp)).background(bg)
+                                .then(if (on) Modifier.border(2.dp, C.text, RoundedCornerShape(4.dp)) else Modifier)
+                                .clickable(enabled = i != j) { onPick(i to j) },
                             contentAlignment = Alignment.Center,
                         ) {
-                            if (showNum && c != null && i != j) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
-                                style = num.copy(fontSize = 8.sp, color = if (abs(c) > 0.5) Color.Black else C.text))
+                            if (i == j) Text(mx.markets[i].symbol.take(4), color = C.muted, fontSize = 8.sp, maxLines = 1)
+                            else if (showNum && c != null) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
+                                style = num.copy(fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = onColor(bg)))
                         }
                     }
                 }
             }
         }
         Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("-1", style = num.copy(fontSize = 9.sp, color = C.muted))
+            Text(String.format(Locale.US, "%.2f", lo), style = num.copy(fontSize = 9.sp, color = C.muted))
             Box(Modifier.padding(horizontal = 6.dp).weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp))
                 .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(NEG_C, C.panel2, POS_C))))
-            Text("+1", style = num.copy(fontSize = 9.sp, color = C.muted))
+            Text(String.format(Locale.US, "%.2f", hi), style = num.copy(fontSize = 9.sp, color = C.muted))
+        }
+        Text("Colours span this set's own range · tap a cell for the pair", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+    }
+}
+
+/** Most and least correlated pairs, as tappable rows. */
+@Composable
+private fun PairLists(mx: Matrix, onPick: (Pair<Int, Int>) -> Unit) {
+    val n = mx.markets.size
+    val pairs = (0 until n).flatMap { i -> (0 until i).mapNotNull { j -> mx.cells[i][j]?.let { Triple(i, j, it.corr) } } }
+    if (pairs.size < 2) return
+    Card {
+        Row {
+            Column(Modifier.weight(1f)) {
+                Text("Move together", color = C.muted, fontSize = 11.sp)
+                pairs.sortedByDescending { it.third }.take(4).forEach { (i, j, c) -> PairLine(mx, i, j, c) { onPick(i to j) } }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Diversify", color = C.muted, fontSize = 11.sp)
+                pairs.sortedBy { it.third }.take(4).forEach { (i, j, c) -> PairLine(mx, i, j, c) { onPick(i to j) } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairLine(mx: Matrix, i: Int, j: Int, c: Double, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${mx.markets[i].symbol} / ${mx.markets[j].symbol}", color = C.text, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        Text(String.format(Locale.US, "%.2f", c), style = num.copy(fontSize = 12.sp, color = if (c >= 0) POS_C else NEG_C))
+    }
+}
+
+/**
+ * One pair up close: both prices rebased to 0% over the window, rolling
+ * correlation over the last ~day of bars, and beta of the first to the second.
+ */
+@Composable
+private fun PairDetail(mx: Matrix, i: Int, j: Int, window: Window) {
+    val a = mx.ret[i]; val b = mx.ret[j]
+    val keys = a.keys.filter { it in b }.sorted()
+    val ca = mx.markets[i]; val cb = mx.markets[j]
+    val c = mx.cells[i][j]
+    // Cumulative returns in %.
+    var sa = 0.0; var sb = 0.0
+    val pa = keys.map { sa += a[it]!!; (kotlin.math.exp(sa) - 1) * 100 }
+    val pb = keys.map { sb += b[it]!!; (kotlin.math.exp(sb) - 1) * 100 }
+    val w = maxOf(12, (window.perDay).toInt().coerceAtLeast(12))
+    val rolling = keys.indices.map { k ->
+        if (k < w) null else {
+            val sl = keys.subList(k - w, k)
+            pair(sl.associateWith { a[it]!! }, sl.associateWith { b[it]!! })?.corr
+        }
+    }
+    val vb = mx.cells[j][j]?.cov
+    val beta = if (c != null && vb != null && vb > 0) c.cov / vb else null
+    val colA = C.accent; val colB = Color(0xFF60A5FA)
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(ca.symbol, color = colA, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text("  ×  ", color = C.muted, fontSize = 14.sp)
+            Text(cb.symbol, color = colB, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(c?.let { String.format(Locale.US, "ρ %.2f", it.corr) } ?: "—", style = num.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold))
+        }
+        Text(listOfNotNull(
+            beta?.let { String.format(Locale.US, "β %.2f (%s moves %.2f%% per 1%% of %s)", it, ca.symbol, it, cb.symbol) },
+            c?.let { "${it.n} bars" },
+        ).joinToString(" · "), style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.padding(top = 2.dp))
+        if (keys.size > 2) {
+            val lo = minOf(pa.min(), pb.min()); val hi = maxOf(pa.max(), pb.max())
+            androidx.compose.foundation.Canvas(Modifier.padding(top = 8.dp).fillMaxWidth().height(110.dp)) {
+                val span = (hi - lo).takeIf { it > 0 } ?: 1.0
+                fun y(v: Double) = ((hi - v) / span * size.height).toFloat()
+                fun x(k: Int) = k.toFloat() / (keys.size - 1) * size.width
+                drawLine(C.line, androidx.compose.ui.geometry.Offset(0f, y(0.0)), androidx.compose.ui.geometry.Offset(size.width, y(0.0)), 1f)
+                for ((series, col) in listOf(pa to colA, pb to colB)) {
+                    val path = androidx.compose.ui.graphics.Path()
+                    series.forEachIndexed { k, v -> if (k == 0) path.moveTo(x(k), y(v)) else path.lineTo(x(k), y(v)) }
+                    drawPath(path, col, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
+                }
+            }
+            Row {
+                Text(String.format(Locale.US, "%s %+.2f%%", ca.symbol, pa.last()), style = num.copy(fontSize = 11.sp, color = colA), modifier = Modifier.weight(1f))
+                Text(String.format(Locale.US, "%s %+.2f%%", cb.symbol, pb.last()), style = num.copy(fontSize = 11.sp, color = colB))
+            }
+            // Rolling correlation: is the relationship stable or breaking down?
+            val roll = rolling.filterNotNull()
+            if (roll.size > 2) {
+                Text("Rolling ρ (${w} bars)", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                androidx.compose.foundation.Canvas(Modifier.padding(top = 4.dp).fillMaxWidth().height(48.dp)) {
+                    fun y(v: Double) = ((1 - v) / 2 * size.height).toFloat()
+                    drawLine(C.line, androidx.compose.ui.geometry.Offset(0f, y(0.0)), androidx.compose.ui.geometry.Offset(size.width, y(0.0)), 1f)
+                    val path = androidx.compose.ui.graphics.Path()
+                    roll.forEachIndexed { k, v -> val xx = k.toFloat() / (roll.size - 1) * size.width; if (k == 0) path.moveTo(xx, y(v)) else path.lineTo(xx, y(v)) }
+                    drawPath(path, C.text, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f))
+                }
+                Text(String.format(Locale.US, "now %.2f · min %.2f · max %.2f", roll.last(), roll.min(), roll.max()), style = num.copy(fontSize = 10.sp, color = C.muted))
+            }
         }
     }
 }

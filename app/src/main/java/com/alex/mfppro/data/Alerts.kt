@@ -67,7 +67,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     private fun onFill(f: Fill) {
         val p = repo.prefs
         val name = repo.account.accounts.value[f.accountId]?.let { it.account.name.ifBlank { "#" + it.account.accountNumber } } ?: ""
-        val sym = f.symbol + "USDT"
+        val sym = com.alex.mfppro.ui.ticker(f.symbol, f.provider)
         when {
             f.type == "liquidation" || f.type == "close_out" -> if (p.notifyBreach)
                 trade(f.id.hashCode(), "${if (f.type == "liquidation") "Liquidated" else "Closed out"}: $sym", "${fmtSigned(f.realizedPnl)} · $name", alarm = true)

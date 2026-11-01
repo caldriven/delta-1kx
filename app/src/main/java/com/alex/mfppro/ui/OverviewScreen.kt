@@ -243,9 +243,9 @@ private fun HeaderCell(label: String, modifier: Modifier, align: TextAlign = Tex
 private fun ChangePill(pct: Double?) {
     val col = pnlColor(pct)
     Text(
-        fmtPct(pct), style = num.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (pct == null) C.muted else Color.White),
+        fmtPct(pct), style = num.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (pct == null || pct == 0.0) C.muted else Color.White),
         modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(4.dp))
-            .background(if (pct == null) C.panel2 else col.copy(alpha = 0.85f)).padding(horizontal = 6.dp, vertical = 1.dp),
+            .background(if (pct == null || pct == 0.0) C.panel2 else col.copy(alpha = 0.85f)).padding(horizontal = 6.dp, vertical = 1.dp),
     )
 }
 

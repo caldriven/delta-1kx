@@ -135,7 +135,7 @@ private fun LongShortBar(longPct: Double) {
     }
 }
 
-private val axis = TextStyle(fontFamily = Mono, fontSize = 10.sp, color = C.muted, fontFeatureSettings = "tnum")
+private val axis get() = TextStyle(fontFamily = Mono, fontSize = 10.sp, color = C.muted, fontFeatureSettings = "tnum")
 
 @Composable
 private fun OiHistoryChart(samples: List<OiSample>, range: OiRange, modifier: Modifier) {

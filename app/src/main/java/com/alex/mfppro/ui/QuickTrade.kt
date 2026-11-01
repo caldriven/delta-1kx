@@ -36,6 +36,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
@@ -233,53 +234,39 @@ private fun ReduceChip(on: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * Neutral pill with Long on the left and Short on the right; a soft coloured
- * block slides to the chosen side. Tap anywhere to swap.
+ * One swap button: shows the side you're on in its colour; tap (or swipe) flips
+ * it, with the label sliding out and the other side sliding in.
  */
 @Composable
 private fun SideToggle(buy: Boolean, onChange: (Boolean) -> Unit) {
     val shape = RoundedCornerShape(10.dp)
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        Modifier.padding(top = 6.dp).fillMaxWidth().height(38.dp).clip(shape).background(C.panel2).border(1.dp, C.line, shape),
+    val col by androidx.compose.animation.animateColorAsState(if (buy) C.up else C.down, androidx.compose.animation.core.tween(220), label = "sideCol")
+    val change by androidx.compose.runtime.rememberUpdatedState(onChange)
+    val cur by androidx.compose.runtime.rememberUpdatedState(buy)
+    Box(
+        Modifier.padding(top = 6.dp).fillMaxWidth().height(40.dp).clip(shape).background(col.copy(alpha = 0.18f)).border(1.dp, col.copy(alpha = 0.75f), shape)
+            .pointerInput(Unit) { detectTapGestures { change(!cur) } }
+            .pointerInput(Unit) {
+                var acc = 0f
+                detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragEnd = { if (kotlin.math.abs(acc) > 40f) change(!cur) }) { ch, dx -> ch.consume(); acc += dx }
+            },
+        contentAlignment = Alignment.Center,
     ) {
-        val half = maxWidth / 2
-        val density = androidx.compose.ui.platform.LocalDensity.current
-        val halfPx = with(density) { half.toPx() }
-        // Finger offset while sliding the block; released past the middle picks that side.
-        var drag by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
-        val cur by androidx.compose.runtime.rememberUpdatedState(buy)
-        val change by androidx.compose.runtime.rememberUpdatedState(onChange)
-        val base by androidx.compose.animation.core.animateDpAsState(if (buy) 0.dp else half, androidx.compose.animation.core.tween(220), label = "side")
-        val x = (base + with(density) { drag.toDp() }).coerceIn(0.dp, half)
-
-        val col by androidx.compose.animation.animateColorAsState(if (buy) C.up else C.down, androidx.compose.animation.core.tween(220), label = "sideCol")
-        Box(
-            Modifier.offset(x = x).width(half).fillMaxHeight().padding(3.dp).clip(RoundedCornerShape(8.dp))
-                .background(col.copy(alpha = 0.22f)).border(1.dp, col.copy(alpha = 0.7f), RoundedCornerShape(8.dp)),
-        )
-        Row(Modifier.fillMaxSize()) {
-            for (b in listOf(true, false)) {
-                val on = buy == b
-                Row(
-                    Modifier.weight(1f).fillMaxHeight(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(if (b) Icons.AutoMirrored.Filled.TrendingUp else Icons.AutoMirrored.Filled.TrendingDown, null,
-                        tint = if (on) (if (b) C.up else C.down) else C.muted, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (b) "Long" else "Short", color = if (on) C.text else C.muted, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
+        androidx.compose.animation.AnimatedContent(
+            buy, label = "side",
+            transitionSpec = {
+                val dir = if (targetState) -1 else 1
+                (androidx.compose.animation.slideInHorizontally { it * dir / 2 } + androidx.compose.animation.fadeIn())
+                    .togetherWith(androidx.compose.animation.slideOutHorizontally { -it * dir / 2 } + androidx.compose.animation.fadeOut())
+            },
+        ) { b ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (b) Icons.AutoMirrored.Filled.TrendingUp else Icons.AutoMirrored.Filled.TrendingDown, null, tint = if (b) C.up else C.down, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (b) "Long" else "Short", color = if (b) C.up else C.down, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
         }
-        // Touch layer on top: tap swaps, drag slides the block and picks the side it's released over.
-        Box(
-            Modifier.matchParentSize()
-                .pointerInput(halfPx) { detectTapGestures { change(!cur) } }
-                .pointerInput(halfPx) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = { val pos = (if (cur) 0f else halfPx) + drag; drag = 0f; change(pos < halfPx / 2) },
-                        onDragCancel = { drag = 0f },
-                    ) { ch, dx -> ch.consume(); drag = (drag + dx).coerceIn(if (cur) 0f else -halfPx, if (cur) halfPx else 0f) }
-                },
-        )
+        // Swap hint at the right edge.
+        Text("⇄", color = col.copy(alpha = 0.8f), fontSize = 16.sp, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 14.dp))
     }
 }

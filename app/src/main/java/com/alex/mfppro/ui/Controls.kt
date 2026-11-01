@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.sample
@@ -147,9 +148,18 @@ fun BottomBar(
     dragPos: Float? = null,
     onDrag: (Float) -> Unit = {},
     onDragEnd: () -> Unit = {},
+    onSwipeDown: (() -> Unit)? = null,
     onSelect: (Int) -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().background(C.panel).navigationBarsPadding()) {
+    val down by androidx.compose.runtime.rememberUpdatedState(onSwipeDown)
+    Column(
+        Modifier.fillMaxWidth().background(C.panel).navigationBarsPadding()
+            // Swipe the bar down (on the full chart) to tuck it away.
+            .pointerInput(Unit) {
+                var dy = 0f
+                detectVerticalDragGestures(onDragStart = { dy = 0f }, onDragEnd = { if (dy > 40.dp.toPx()) down?.invoke() }) { ch, d -> if (down != null) { ch.consume(); dy += d } }
+            },
+    ) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(C.line))
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth().height(58.dp).padding(horizontal = 6.dp, vertical = 5.dp)) {
             val w = maxWidth / items.size

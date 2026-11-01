@@ -132,6 +132,11 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     val limitPx = priceText.toDoubleOrNull()
     val startPx = startText.toDoubleOrNull(); val endPx = endText.toDoubleOrNull()
     val triggerPx = triggerText.toDoubleOrNull(); val capPx = capText.toDoubleOrNull()
+    // A buy ladder above the best ask (or a sell below the best bid) fills those rungs at market.
+    val ladderCrosses = scaled && startPx != null && endPx != null && book != null && run {
+        val far = if (buy) maxOf(startPx, endPx) else minOf(startPx, endPx)
+        if (buy) far >= (book.asks.firstOrNull()?.px ?: Double.MAX_VALUE) else far <= (book.bids.firstOrNull()?.px ?: 0.0)
+    }
     val refPx = if (stop) (if (stopLimit) limitPx ?: triggerPx else triggerPx)
         else if (chase) ((if (buy) book?.bids?.firstOrNull()?.px else book?.asks?.firstOrNull()?.px) ?: mark)
         else if (scaled) (if (startPx != null && endPx != null) (startPx + endPx) / 2 else null) else if (limit) limitPx else (if (buy) book?.asks?.firstOrNull()?.px else book?.bids?.firstOrNull()?.px) ?: mark
@@ -223,7 +228,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 put("rung_count", rungs); put("distribution", dist)
                 put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
                 if (reduceOnly) put("reduce_only", true)
-                put("marketable_limit_acknowledged", true)
+                if (ladderCrosses) put("marketable_limit_acknowledged", true)
             }
             scope.launch {
                 val r = repo.placeScaled("Scaled $sideWord ${market.symbol}", ladder)
@@ -446,7 +451,8 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
 
 
             Column(Modifier.padding(vertical = 10.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.bg).padding(10.dp)) {
-                Info("Estimated price", fmtPrice(if (limit) limitPx else quote?.estimatedFillPrice ?: refPx))
+                Info(if (scaled) "Average price" else "Estimated price", fmtPrice(if (scaled) refPx else if (limit) limitPx else quote?.estimatedFillPrice ?: refPx))
+                if (ladderCrosses) Info("Warning", "Some rungs cross the book and fill at market", C.down)
                 if (!limit) Info("Max slippage", String.format(Locale.US, "%.2f%%", repo.prefs.slippageBps / 100.0))
                 Info("Notional", fmtUsd(usd))
                 Info("Margin", fmtUsd(usd / lev))
@@ -601,14 +607,11 @@ fun PctSlider(value: Float, color: Color, modifier: Modifier = Modifier, onChang
 }
 
 /**
- * Full-height panel that slides in from the right edge over whatever screen is open.
- * Drawn in the app's own overlay (not a dialog) so status/gesture bar insets are exact.
+ * Panel that slides in from the right over the screen it's opened from. Drawn in place,
+ * so the bottom bar stays visible and usable below it.
  */
 @Composable
-fun SidePanel(onDismiss: () -> Unit, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
-    androidx.compose.runtime.SideEffect { Overlay.content = { PanelBody(onDismiss, content) } }
-    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { Overlay.content = null } }
-}
+fun SidePanel(onDismiss: () -> Unit, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) = PanelBody(onDismiss, content)
 
 @Composable
 private fun PanelBody(onDismiss: () -> Unit, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
@@ -625,7 +628,7 @@ private fun PanelBody(onDismiss: () -> Unit, content: @Composable androidx.compo
             Column(
                 Modifier.fillMaxHeight().fillMaxWidth(0.96f).clip(RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp)).background(C.panel)
                     .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) {}
-                    .statusBarsPadding().navigationBarsPadding().imePadding(),
+                    .imePadding(),
                 content = content,
             )
         }

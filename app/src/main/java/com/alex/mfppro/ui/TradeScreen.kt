@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.BubbleChart
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CandlestickChart
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -94,7 +95,7 @@ private val INTERVALS = listOf("1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M")
  * [compact] = position-management layout: chart at about a third of the screen
  * with quick trade and positions under it. Otherwise the chart gets most of it.
  */
-fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit) {
+fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit, focus: Boolean = false) {
     val markets by repo.markets.collectAsStateWithLifecycle()
     val venues by repo.venues.collectAsStateWithLifecycle()
     // Alternate venues aren't in the main list; look there too.
@@ -183,7 +184,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val pct = (px / p.entryPrice - 1) * 100 * (if (p.isLong) 1 else -1)
         return String.format(Locale.US, "%s %+.2f%% / %s", k, pct, fmtUsd(pnl, true)) to (if (k == "TP") C.up else C.down)
     }
-    val chartLines = myPositions.flatMap { p ->
+    var showPos by remember { mutableStateOf(repo.prefs.showPosLines) }
+    val chartLines = (if (showPos) myPositions else emptyList()).flatMap { p ->
         val acc = accounts[p.accountId] ?: return@flatMap emptyList()
         val r = riskOf(acc, marks)
         val tag = if (multi) accountName(acc).take(14) else ""
@@ -245,7 +247,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         }
         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
         LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
-        if (!compact) Row(
+        if (!compact && !focus) Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -257,7 +259,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             HeadStat("D open", fmtPrice(dOpen))
         }
 
-        RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = compact)
+        androidx.compose.animation.AnimatedVisibility(!focus) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = compact) }
 
         var barOpen by remember { mutableStateOf(repo.prefs.indBarOpen) }
         var crossKey by remember { mutableStateOf(0) }
@@ -291,6 +293,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             run {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPos = !showPos; repo.prefs.showPosLines = showPos }
                     if (repo.prefs.chipOpens) OverlayChip("D/W/M", showOpens, Icons.Filled.HorizontalRule) { showOpens = !showOpens; repo.prefs.showOpens = showOpens }
                     if (repo.prefs.chipVp) OverlayChip("VP", showVp, Icons.AutoMirrored.Filled.Notes) { showVp = !showVp; repo.prefs.showVp = showVp }
                     if (repo.prefs.chipPoc) OverlayChip("POC", showPoc, Icons.Filled.Adjust) { showPoc = !showPoc; repo.prefs.showPoc = showPoc }
@@ -345,7 +348,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         var ordersAll by remember { mutableStateOf(repo.prefs.ordersAllMarkets) }
         val shownOrders = allOrders.filter { (_, o) -> ordersAll || o.marketId == market.marketId || o.symbol.equals(market.symbol, true) }
             .sortedWith(compareByDescending<Pair<com.alex.mfppro.data.AccountState, com.alex.mfppro.data.Order>> { it.second.marketId == market.marketId }.thenBy { it.second.symbol })
-        if (!compact) AppTabs(listOf("Positions (${allPositions.size})", "Orders (${shownOrders.size})", "Fills", "Book", "Trades"), tab, Modifier.padding(top = 2.dp)) { tab = it }
+        if (!compact) PillTabs(listOf("Positions ${allPositions.size}", "Orders ${shownOrders.size}", "Fills", "Book", "Trades"), tab) { tab = it }
         if (!compact) when (tab) {
             0 -> Column {
                 Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -431,7 +434,7 @@ private class ChartAsk(val title: String, val headline: String, val color: Color
 private class ExitAsk(val p: com.alex.mfppro.data.Position, val tp: Boolean, val price: Double, val tp0: Double?, val sl0: Double?)
 
 private val PASS = Color(0xFF22D3EE)
-private val OPEN_D = Color(0xFFE5E7EB)
+private val OPEN_D get() = C.openD
 private val OPEN_W = Color(0xFF38BDF8)
 private val OPEN_M = Color(0xFFF472B6)
 
@@ -588,7 +591,7 @@ private fun TradesTape(repo: Repo, market: Market) {
             ) {
                 Box(Modifier.width(40.dp)) { VenueTag(venue, 14.dp) }
                 Text(fmtPrice(t.price), style = num.copy(fontSize = 12.sp, color = col), modifier = Modifier.weight(1f))
-                Text("$" + fmtCompact(usd), style = num.copy(fontSize = 12.sp, color = if (big) Color.White else C.text, fontWeight = if (big) FontWeight.Bold else FontWeight.Normal), modifier = Modifier.weight(1f))
+                Text("$" + fmtCompact(usd), style = num.copy(fontSize = 12.sp, color = C.text, fontWeight = if (big) FontWeight.Bold else FontWeight.Normal), modifier = Modifier.weight(1f))
                 Text(timeFmt.format(Date(t.time)), style = num.copy(fontSize = 11.sp, color = C.muted))
             }
             Spacer(Modifier.height(1.dp))
@@ -834,6 +837,22 @@ fun MiniSwitch(left: String, right: String, leftOn: Boolean, onChange: (Boolean)
                     .clickable { onChange(label == left) }.padding(horizontal = 10.dp),
                 contentAlignment = Alignment.Center,
             ) { Text(label, color = if (on) C.text else C.muted, fontSize = 11.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal) }
+        }
+    }
+}
+
+/** Section switcher as separate pill buttons; the selected one is filled. */
+@Composable
+private fun PillTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        labels.forEachIndexed { i, t ->
+            val on = i == selected
+            Text(
+                t, color = if (on) onColor(C.accent) else C.text, fontSize = 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1,
+                modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(if (on) C.accent else C.panel2)
+                    .border(1.dp, if (on) C.accent else C.line, RoundedCornerShape(10.dp))
+                    .clickable { onSelect(i) }.padding(horizontal = 14.dp, vertical = 8.dp),
+            )
         }
     }
 }

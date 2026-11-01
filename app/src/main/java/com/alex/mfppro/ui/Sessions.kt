@@ -35,6 +35,9 @@ private const val KZ_NYPM = 256
 private const val US_OPEN = 512
 private const val US_CLOSE = 1024
 private const val ASIA_OPEN = 2048
+private const val WEEKEND = 4096
+private const val WK_CLOSE = 8192
+private const val WK_OPEN = 16384
 
 private val ASIA_C = Color(0xFF8B5CF6)
 private val EU_C = Color(0xFF3B82F6)
@@ -68,6 +71,17 @@ private fun flags(t: Long, stepMin: Int): Int {
     cache[k]?.let { return it }
     if (cache.size > 20_000) cache.clear()
     val ny = minuteOf(t, NY)
+    val dow = Instant.ofEpochMilli(t).atZone(NY).dayOfWeek
+    // Weekend runs from the Friday 17:00 New York close to the Sunday 18:00 open (weekly / Asia open).
+    val weekend = (dow == java.time.DayOfWeek.FRIDAY && ny >= 17 * 60) || dow == java.time.DayOfWeek.SATURDAY ||
+        (dow == java.time.DayOfWeek.SUNDAY && ny < 18 * 60)
+    fun hitsAt(m: Int, at: Int) = at >= m && at < m + stepMin
+    if (weekend) {
+        var w = WEEKEND
+        if (dow == java.time.DayOfWeek.FRIDAY && hitsAt(ny, 17 * 60)) w = w or WK_CLOSE
+        cache[k] = w
+        return w
+    }
     val tk = minuteOf(t, TOKYO)
     val ld = minuteOf(t, LONDON)
     fun inR(m: Int, a: Int, b: Int) = if (a <= b) m in a until b else m >= a || m < b
@@ -87,6 +101,7 @@ private fun flags(t: Long, stepMin: Int): Int {
     if (hits(ny, 9 * 60 + 30)) f = f or US_OPEN
     if (hits(ny, 16 * 60)) f = f or US_CLOSE
     if (hits(tk, 9 * 60)) f = f or ASIA_OPEN
+    if (Instant.ofEpochMilli(t).atZone(NY).dayOfWeek == java.time.DayOfWeek.SUNDAY && hits(ny, 18 * 60)) f = f or WK_OPEN
     cache[k] = f
     return f
 }
@@ -120,6 +135,16 @@ internal fun DrawScope.sessions(slice: List<Candle>, xOf: (Int) -> Float, barW: 
             }
         }
     }
+    // Weekend: a muted grey band and no sessions or killzones.
+    for (i in times.indices) {
+        if (fl[i] and WEEKEND == 0) continue
+        val x = xOf(i)
+        drawRect(Color(0xFF808080).copy(alpha = 0.07f), Offset(x - barW / 2, 0f), Size(barW, chartH))
+        if (i == 0 || fl[i - 1] and WEEKEND == 0) {
+            val t = tm.measure("Weekend", sessLabel.copy(color = Color(0xFF9CA3AF)))
+            drawText(t, topLeft = Offset(x + 3.dp.toPx(), stripH + 3.dp.toPx()))
+        }
+    }
     if (opts.killzones) for (z in ZONES) {
         for (i in times.indices) {
             if (fl[i] and z.bit == 0) continue
@@ -132,6 +157,8 @@ internal fun DrawScope.sessions(slice: List<Candle>, xOf: (Int) -> Float, barW: 
         val (label, col) = when {
             fl[i] and US_OPEN != 0 -> "US open" to US_C
             fl[i] and US_CLOSE != 0 -> "US close" to US_C
+            fl[i] and WK_CLOSE != 0 -> "Weekend close" to Color(0xFF9CA3AF)
+            fl[i] and WK_OPEN != 0 -> "Weekly open" to ASIA_C
             fl[i] and ASIA_OPEN != 0 -> "Tokyo open" to ASIA_C
             else -> continue
         }

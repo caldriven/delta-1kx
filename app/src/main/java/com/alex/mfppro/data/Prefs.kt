@@ -227,10 +227,23 @@ class Prefs(ctx: Context) {
         set(v) = plain.edit().putString("theme", v).apply()
 
     /** Back to default settings. The API key lives in the encrypted store and is kept. */
-    fun resetUi() = plain.edit().clear().commit()
+    fun resetUi() {
+        // Keep what you trade on: account, selection, market and per-market leverage.
+        val keep = setOf("trade_account", "selected_accounts", "last_market")
+        val e = plain.edit()
+        plain.all.keys.filter { it !in keep && !it.startsWith("lev_") }.forEach { e.remove(it) }
+        e.commit()
+    }
 
     /** Extra markets added to every correlation preset. */
     var corrExtra: List<String>
         get() = plain.getString("corr_extra", "")!!.split(',').filter { it.isNotBlank() }
         set(v) = plain.edit().putString("corr_extra", v.joinToString(",")).apply()
+
+    var showPosLines: Boolean
+        get() = plain.getBoolean("show_pos_lines", true)
+        set(v) = plain.edit().putBoolean("show_pos_lines", v).apply()
+    var chipPos: Boolean
+        get() = plain.getBoolean("chip_pos", true)
+        set(v) = plain.edit().putBoolean("chip_pos", v).apply()
 }

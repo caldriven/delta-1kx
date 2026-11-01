@@ -192,6 +192,8 @@ fun SettingsScreen(repo: Repo) {
 
         Section("Chart indicators", DATA, androidx.compose.material.icons.Icons.Filled.Build) {
             Note("Which toggles show in the bar above the chart.")
+            var ps by remember { mutableStateOf(repo.prefs.chipPos) }
+            Toggle("Position lines", "Net PnL box, TP/SL, DLL, Max DD and pass target", ps, DATA) { ps = it; repo.prefs.chipPos = it; if (!it) repo.prefs.showPosLines = true }
             var o by remember { mutableStateOf(repo.prefs.chipOpens) }
             Toggle("D/W/M opens", "Daily, weekly, monthly open lines", o, DATA) { o = it; repo.prefs.chipOpens = it }
             var v by remember { mutableStateOf(repo.prefs.chipVp) }
@@ -268,6 +270,9 @@ fun SettingsScreen(repo: Repo) {
         confirm = "Reset", onDismiss = { resetAsk = false }) {
         resetAsk = false
         repo.prefs.resetUi()
+        // Live state that isn't re-read on restart.
+        repo.setRealtime(repo.prefs.realtimePnl)
+        com.alex.mfppro.data.MonitorService.setEnabled(ctx, repo.prefs.monitorBackground)
         // Restart so every screen picks up the defaults.
         (ctx as? android.app.Activity)?.recreate()
     }

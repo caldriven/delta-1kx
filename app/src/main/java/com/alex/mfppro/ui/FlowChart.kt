@@ -38,7 +38,7 @@ private class BookSample(val time: Long, val bids: List<Level>, val asks: List<L
 
 private val HEAT_LO = Color(0xFF0B2545)
 private val HEAT_HI = Color(0xFFFACC15)
-private val flowAxis = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, color = C.muted, fontFeatureSettings = "tnum")
+private val flowAxis get() = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 11.sp, color = C.muted, fontFeatureSettings = "tnum")
 
 /**
  * Bookmap/aggr-style order flow for the last three minutes: resting book
@@ -139,7 +139,7 @@ fun FlowChart(repo: Repo, key: String, modifier: Modifier = Modifier) {
                 drawCircle(col.copy(alpha = 0.35f), r, c)
                 drawCircle(col.copy(alpha = 0.9f), r, c, style = Stroke(1.2f))
                 if (n >= bigCut) {
-                    val txt = tm.measure("$" + fmtCompact(n), flowAxis.copy(color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold))
+                    val txt = tm.measure("$" + fmtCompact(n), flowAxis.copy(color = C.text, fontSize = 10.sp, fontWeight = FontWeight.Bold))
                     val r = androidx.compose.ui.geometry.Rect(c.x - txt.size.width / 2, c.y - txt.size.height / 2, c.x + txt.size.width / 2, c.y + txt.size.height / 2)
                     if (labelled.none { it.overlaps(r) }) { labelled += r; drawText(txt, topLeft = r.topLeft) }
                 }

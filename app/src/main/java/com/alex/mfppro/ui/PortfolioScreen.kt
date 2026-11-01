@@ -417,7 +417,7 @@ fun HoldButton(label: String, color: Color, modifier: Modifier = Modifier, holdM
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.align(Alignment.CenterStart).fillMaxWidth(progress.value).fillMaxHeight().background(color.copy(alpha = 0.7f)))
-        Text(label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text(label, color = if (progress.value > 0.5f) onColor(color) else C.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
     }
 }
 
@@ -467,7 +467,7 @@ private fun AccountHero(repo: Repo, acc: AccountState, marks: Map<String, Double
 @Composable
 private fun RuleLine(label: String, left: Double?, of: Double?, target: Boolean = false, floor: Double? = null) {
     val f = if (left != null && of != null && of > 0) (left / of).coerceIn(0.0, 1.0) else null
-    val col = if (target) Color(0xFF22D3EE) else androidx.compose.ui.graphics.lerp(C.down, Color(0xFFFDBA74), (f ?: 1.0).toFloat())
+    val col = if (target) C.target else androidx.compose.ui.graphics.lerp(C.down, C.roomFull, (f ?: 1.0).toFloat())
     val fill = if (target) 1.0 - (f ?: 1.0) else (f ?: 0.0)
     Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = C.muted, fontSize = 13.sp, modifier = Modifier.weight(1f))

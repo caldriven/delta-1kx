@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
 import java.util.Locale
@@ -51,6 +52,9 @@ enum class AppTheme(
     LIGHT("Light", false, 0xFFF4F5F7, 0xFFFFFFFF, 0xFFEDEFF2, 0xFFDCDFE4, 0xFF14171C, 0xFF6B7280, 0xFF0E9F5A, 0xFFD9363E, 0xFFD98A00),
 }
 
+/** Text colour that reads on [bg]: black on light fills, white on dark ones. */
+fun onColor(bg: Color): Color = if (bg.luminance() > 0.5f) Color.Black else Color.White
+
 object C {
     private val t get() = Palette.theme
     val bg get() = Color(t.bg)
@@ -63,6 +67,10 @@ object C {
     val down get() = if (Palette.colorBlind) Color(0xFFFF8C1A) else Color(t.down)
     val accent get() = if (Palette.colorBlind) Color(0xFFB794F6) else Color(t.accent)
     val liq get() = if (Palette.colorBlind) Color(0xFFE879F9) else Color(0xFFFF7A00)
+    // Drawdown room (full → light orange), target cyan and the D open line, tuned for contrast per theme.
+    val roomFull get() = if (Palette.theme.dark) Color(0xFFFDBA74) else Color(0xFFC2710C)
+    val target get() = if (Palette.theme.dark) Color(0xFF22D3EE) else Color(0xFF0E7490)
+    val openD get() = if (Palette.theme.dark) Color(0xFFE5E7EB) else Color(0xFF4B5563)
 }
 
 val Inter = FontFamily(

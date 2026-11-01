@@ -38,6 +38,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import androidx.compose.animation.togetherWith
@@ -74,6 +84,9 @@ class MainActivity : ComponentActivity() {
                 var marketId by rememberSaveable { mutableStateOf(repo.prefs.lastMarketId) }
                 var compact by rememberSaveable { mutableStateOf(false) }
                 var orderOpen by remember { mutableStateOf(false) }
+                // Full-chart focus: account strip and bottom bar tucked away, one Trade button left to bring them back.
+                var focus by rememberSaveable { mutableStateOf(false) }
+                val focusOn = focus && tab == 1 && !compact
                 var analysis by rememberSaveable { mutableStateOf(repo.prefs.marketsAnalysis) }
                 // Bar order of the paged screens: Dashboard, Markets, Trade, Journal.
                 val pageTabs = remember { listOf(0, 4, 1, 2) }
@@ -92,7 +105,9 @@ class MainActivity : ComponentActivity() {
                 }
                 val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
                 // Screens visited, so Android back steps through them before leaving the app.
-                val history = remember { androidx.compose.runtime.mutableStateListOf<Int>() }
+                val history = androidx.compose.runtime.saveable.rememberSaveable(
+                    saver = androidx.compose.runtime.saveable.listSaver(save = { it.toList() }, restore = { androidx.compose.runtime.mutableStateListOf<Int>().apply { addAll(it) } }),
+                ) { androidx.compose.runtime.mutableStateListOf<Int>() }
                 val go = { t: Int -> if (t != tab) { history.remove(t); history.add(tab); tab = t } }
                 androidx.activity.compose.BackHandler(enabled = history.isNotEmpty()) { tab = history.removeAt(history.lastIndex) }
                 val openMarket = { id: String -> marketId = id; repo.prefs.lastMarketId = id; go(1) }
@@ -103,7 +118,21 @@ class MainActivity : ComponentActivity() {
                     containerColor = C.bg,
                     snackbarHost = { SnackbarHost(snack) },
                     bottomBar = {
-                        BottomBar(
+                        androidx.compose.animation.AnimatedContent(focusOn, label = "focus",
+                            transitionSpec = {
+                                (androidx.compose.animation.slideInVertically { it } + androidx.compose.animation.fadeIn())
+                                    .togetherWith(androidx.compose.animation.slideOutVertically { it } + androidx.compose.animation.fadeOut())
+                            }) { hidden ->
+                        if (hidden) Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 6.dp), contentAlignment = Alignment.Center) {
+                            Row(
+                                Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(50)).background(com.alex.mfppro.ui.C.panel2)
+                                    .clickable { focus = false }.padding(horizontal = 18.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.Icon(Icons.Filled.CandlestickChart, "Show bar", tint = com.alex.mfppro.ui.C.accent, modifier = Modifier.size(18.dp))
+                                androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.KeyboardArrowUp, null, tint = com.alex.mfppro.ui.C.muted, modifier = Modifier.size(16.dp))
+                            }
+                        } else BottomBar(
                             listOf(
                                 NavItem("Dashboard", Icons.Filled.Dashboard, 0),
                                 NavItem(if (tab == 4 && analysis) "Analysis" else "Markets", if (tab == 4 && analysis) Icons.Filled.Insights else Icons.Filled.QueryStats, 4, mode = if (tab == 4) (if (analysis) 1 else 0) else null),
@@ -115,6 +144,7 @@ class MainActivity : ComponentActivity() {
                             ),
                             tab,
                             pages = pageTabs.size,
+                            onSwipeDown = if (tab == 1 && !compact) ({ focus = true }) else null,
                             dragPos = dragPos,
                             onDrag = { f ->
                                 dragPos = f
@@ -128,7 +158,9 @@ class MainActivity : ComponentActivity() {
                                 if (pageTabs[t] == tab) pagerScope.launch { pager.animateScrollToPage(t) } else go(pageTabs[t])
                             },
                         ) {
-                            if (it == 5) orderOpen = true
+                            // Order toggles the panel; any other tab closes it.
+                            if (it == 5) orderOpen = !orderOpen
+                            else if (orderOpen) { orderOpen = false; if (it != tab) go(it) }
                             // Markets, like Trade, flips between its two views when tapped again.
                             else if (it == 4 && tab == 4) {
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
@@ -137,6 +169,7 @@ class MainActivity : ComponentActivity() {
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                                 compact = !compact
                             } else go(it)
+                        }
                         }
                     },
                 ) { pad ->
@@ -149,7 +182,7 @@ class MainActivity : ComponentActivity() {
                             else androidx.compose.foundation.pager.HorizontalPager(pager, userScrollEnabled = false, key = { pageTabs[it] }) { i ->
                                 when (pageTabs[i]) {
                                     0 -> PositionsScreen(repo, onOpenMarket = openMarket, onOpenSettings = { go(3) })
-                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket)
+                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket, focus = focusOn)
                                     2 -> com.alex.mfppro.ui.JournalScreen(repo, onOpenSettings = { go(3) })
                                     else -> OverviewScreen(repo, analysis, onOpenMarket = openMarket)
                                 }
