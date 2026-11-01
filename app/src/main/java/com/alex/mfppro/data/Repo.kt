@@ -55,6 +55,13 @@ class Repo(ctx: Context) {
     /** Public trade prints straight from the venues, for the cross-exchange tape. */
     val venueTrades by lazy { VenueTrades(http) }
 
+    /** Macro factors (VIX, 10Y, DXY) for analysis only. */
+    val factors by lazy { FactorFeed(http) }
+
+    /** Candle history for a market or a macro factor. */
+    suspend fun history(m: Market, interval: String, bars: Int): List<Candle> =
+        if (m.provider == FactorFeed.PROVIDER) factors.candles(m, interval, bars) else market.candleHistory(m.provider, m.coin, interval, bars)
+
     /** One-line results of trading actions, shown as snackbars. */
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val messages = _messages.asSharedFlow()

@@ -218,6 +218,17 @@ class Prefs(ctx: Context) {
         get() = plain.getString("corr_window", "H1") ?: "H1"
         set(v) = plain.edit().putString("corr_window", v).apply()
 
+    /** Analysis view: correlation or special trades. */
+    var analysisView: String
+        get() = plain.getString("analysis_view", "CORR") ?: "CORR"
+        set(v) = plain.edit().putString("analysis_view", v).apply()
+    var pairScan: String
+        get() = plain.getString("pair_scan", "T20") ?: "T20"
+        set(v) = plain.edit().putString("pair_scan", v).apply()
+    var pairWindow: String
+        get() = plain.getString("pair_window", "H4") ?: "H4"
+        set(v) = plain.edit().putString("pair_window", v).apply()
+
     var fillsAllMarkets: Boolean
         get() = plain.getBoolean("fills_all_markets", true)
         set(v) = plain.edit().putBoolean("fills_all_markets", v).apply()

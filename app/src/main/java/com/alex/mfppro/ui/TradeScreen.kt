@@ -95,7 +95,7 @@ private val INTERVALS = listOf("1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M")
  * [compact] = position-management layout: chart at about a third of the screen
  * with quick trade and positions under it. Otherwise the chart gets most of it.
  */
-fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit, focus: Boolean = false) {
+fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit, focus: Boolean = false, onOpenMarkets: (() -> Unit)? = null) {
     val markets by repo.markets.collectAsStateWithLifecycle()
     val venues by repo.venues.collectAsStateWithLifecycle()
     // Alternate venues aren't in the main list; look there too.
@@ -159,7 +159,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     val multi = showAll && scoped.size > 1
     val myPositions = scoped.flatMap { a -> a.positions.values.filter { it.inMarket(market) } }
 
-    var tab by rememberSaveable { mutableStateOf(0) }
+    // Section under the chart; -1 = none open, so the chart fills the screen and nothing scrolls.
+    var tab by rememberSaveable { mutableStateOf(-1) }
     var view by rememberSaveable { mutableStateOf(0) }
     var exitAsk by remember { mutableStateOf<ExitAsk?>(null) }
     var confirmAsk by remember { mutableStateOf<ChartAsk?>(null) }
@@ -174,7 +175,6 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     var showSess by remember { mutableStateOf(repo.prefs.showSessions) }
     var landscape by rememberSaveable { mutableStateOf(false) }
     val sessOpts = if (showSess) SessionOpts(repo.prefs.sessionEu, repo.prefs.killzones) else null
-    LaunchedEffect(compact) { if (compact) tab = 0 }
 
     // Dragging the position line sets TP (profit side) or SL (loss side); TP/SL lines drag to move.
     fun exitPreview(p: com.alex.mfppro.data.Position, px: Double, kind: String?): Pair<String, Color> {
@@ -231,10 +231,13 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     ) else emptyList()
 
     Column(Modifier.fillMaxSize().background(C.bg)) {
-    Column(Modifier.weight(1f).then(if (compact) Modifier else Modifier.verticalScroll(rememberScrollState()))) {
+    // Chart view scrolls only while a section is open (or on the data view, which is a long list).
+    val scrolls = !compact && (tab >= 0 || view == 1)
+    Column(Modifier.weight(1f).then(if (scrolls) Modifier.verticalScroll(rememberScrollState()) else Modifier)) {
         // Header: market + live price on one line, stats strip below.
         Row(Modifier.fillMaxWidth().padding(10.dp, 4.dp, 12.dp, 0.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { picker = true }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            // The symbol glides over to the market list (or opens the picker when there's no list to go to).
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { onOpenMarkets?.invoke() ?: run { picker = true } }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 MarketLogo(market, AssetClasses.classOf(market, classes), 22.dp)
                 Spacer(Modifier.width(8.dp))
                 Text(market.symbol, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = C.text)
@@ -260,7 +263,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             HeadStat("D open", fmtPrice(dOpen))
         }
 
-        androidx.compose.animation.AnimatedVisibility(!focus) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = compact) }
+        // The account lives on the Trade view; Chart keeps just the asset and its stats on top.
+        androidx.compose.animation.AnimatedVisibility(!focus && compact) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = true) }
 
         var barOpen by remember { mutableStateOf(repo.prefs.indBarOpen) }
         var crossKey by remember { mutableStateOf(0) }
@@ -309,14 +313,16 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         }
         val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
         val chartH = (screenH * if (compact) 0.27f else 0.54f).dp
+        // Nothing open below: the chart stretches down to the section tabs.
+        val sized = if (!compact && !scrolls) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
         run {
             when (view) {
                 1 -> TradingData(repo, market, s?.openInterestUsd, mark, oi[key].orEmpty())
-                3 -> FlowChart(repo, key, Modifier.fillMaxWidth().height(chartH).padding(start = 2.dp, top = 2.dp))
-                2 -> DepthChart(book, Modifier.fillMaxWidth().height(chartH).padding(horizontal = 8.dp, vertical = 4.dp))
+                3 -> FlowChart(repo, key, sized.padding(start = 2.dp, top = 2.dp))
+                2 -> DepthChart(book, sized.padding(horizontal = 8.dp, vertical = 4.dp))
                 else -> androidx.compose.runtime.key(market.marketId, interval) { CandleChart(
                     candles[candleKey(market.provider, market.coin, interval)].orEmpty().withLive(live), chartLines,
-                    Modifier.fillMaxWidth().height(chartH).padding(start = 2.dp, top = 2.dp),
+                    sized.padding(start = 2.dp, top = 2.dp),
                     showVp = showVp,
                     showPoc = showPoc,
                     vpSince = if (interval in listOf("1m", "5m", "15m", "1h")) Opens.dayStart() else null,
@@ -349,8 +355,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         var ordersAll by remember { mutableStateOf(repo.prefs.ordersAllMarkets) }
         val shownOrders = allOrders.filter { (_, o) -> ordersAll || o.marketId == market.marketId || o.symbol.equals(market.symbol, true) }
             .sortedWith(compareByDescending<Pair<com.alex.mfppro.data.AccountState, com.alex.mfppro.data.Order>> { it.second.marketId == market.marketId }.thenBy { it.second.symbol })
-        if (!compact) PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = it }
-        if (!compact) when (tab) {
+        if (!compact) PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = if (tab == it) -1 else it }
+        if (!compact && tab >= 0) when (tab) {
             0 -> Column {
                 Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (showAll) "All active accounts" else tradeAcc?.let(::accountName) ?: "", color = C.muted, fontSize = 11.sp, modifier = Modifier.weight(1f))

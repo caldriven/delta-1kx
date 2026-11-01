@@ -136,9 +136,16 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     val fundingCol = sort.first == SortKey.FUND
 
     if (analysis) {
+        var view by remember { mutableStateOf(repo.prefs.analysisView) }
         Column(Modifier.fillMaxSize().background(C.bg)) {
-            Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(14.dp, 8.dp, 12.dp, 4.dp))
-            AnalysisScreen(repo, onOpenMarket)
+            Row(Modifier.fillMaxWidth().padding(14.dp, 8.dp, 10.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
+                Spacer(Modifier.weight(1f))
+                Seg("Correlation", view != "SPECIAL", C.accent) { view = "CORR"; repo.prefs.analysisView = view }
+                Spacer(Modifier.width(4.dp))
+                Seg("Special trades", view == "SPECIAL", C.accent) { view = "SPECIAL"; repo.prefs.analysisView = view }
+            }
+            if (view == "SPECIAL") SpecialTrades(repo) else AnalysisScreen(repo, onOpenMarket)
         }
         return
     }

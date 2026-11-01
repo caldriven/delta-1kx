@@ -138,9 +138,9 @@ class MainActivity : ComponentActivity() {
                         } else BottomBar(
                             listOf(
                                 NavItem("Dashboard", Icons.Filled.Dashboard, 0),
-                                NavItem(if (tab == 4 && analysis) "Analysis" else "Markets", if (tab == 4 && analysis) Icons.Filled.Insights else Icons.Filled.QueryStats, 4, mode = if (tab == 4) (if (analysis) 1 else 0) else null),
+                                NavItem(if (tab == 4 && analysis) "Analysis" else "Markets", if (tab == 4 && analysis) Icons.Filled.Insights else Icons.Filled.QueryStats, 4, mode = if (tab == 4) (if (analysis) 1 else 0) else null, modes = listOf("List", "Analysis")),
                                 // On Trade, this button flips between chart and position management.
-                                NavItem("Trade", if (tab == 1 && compact) Icons.Filled.Tune else Icons.Filled.CandlestickChart, 1, mode = if (tab == 1) (if (compact) 1 else 0) else null),
+                                NavItem("Trade", if (tab == 1 && compact) Icons.Filled.Tune else Icons.Filled.CandlestickChart, 1, mode = if (tab == 1) (if (compact) 1 else 0) else null, modes = listOf("Chart", "Trade")),
                                 NavItem("Journal", Icons.AutoMirrored.Filled.MenuBook, 2),
                                 // Opens the order panel over whatever screen is showing.
                                 NavItem("Order", Icons.Filled.SwapVert, 5),
@@ -185,7 +185,8 @@ class MainActivity : ComponentActivity() {
                             else androidx.compose.foundation.pager.HorizontalPager(pager, userScrollEnabled = false, key = { pageTabs[it] }) { i ->
                                 when (pageTabs[i]) {
                                     0 -> PositionsScreen(repo, onOpenMarket = openMarket, onOpenSettings = { go(3) })
-                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket, focus = focusOn)
+                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket, focus = focusOn,
+                                        onOpenMarkets = { analysis = false; repo.prefs.marketsAnalysis = false; go(4) })
                                     2 -> com.alex.mfppro.ui.JournalScreen(repo, onOpenSettings = { go(3) })
                                     else -> OverviewScreen(repo, analysis, onOpenMarket = openMarket)
                                 }
@@ -197,6 +198,9 @@ class MainActivity : ComponentActivity() {
                             val m = markets.firstOrNull { it.marketId == id } ?: venues.firstOrNull { it.marketId == id } ?: markets.firstOrNull { it.symbol == "BTC" }
                             if (m == null) com.alex.mfppro.ui.OrderPanel.open = null
                             else androidx.compose.runtime.key(id, req) { com.alex.mfppro.ui.OrderTicket(repo, m, req) { com.alex.mfppro.ui.OrderPanel.open = null } }
+                        }
+                        com.alex.mfppro.ui.PairPanel.open?.let { req ->
+                            androidx.compose.runtime.key(req) { com.alex.mfppro.ui.PairTicket(repo, req) { com.alex.mfppro.ui.PairPanel.open = null } }
                         }
                     }
                 }

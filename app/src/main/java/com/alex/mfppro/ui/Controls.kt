@@ -132,8 +132,14 @@ fun AppTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, 
     Box(Modifier.fillMaxWidth().height(1.dp).background(C.line))
 }
 
-/** [mode] (0/1) draws two dots under the label for a button that flips between two views. */
-data class NavItem(val label: String, val icon: ImageVector, val id: Int, val mode: Int? = null)
+/**
+ * [mode] (0/1) marks a button that flips between two views: while it's the open tab its label
+ * reads as a switch ([modes], e.g. Chart / Trade) with the active side lit in that view's colour.
+ */
+data class NavItem(val label: String, val icon: ImageVector, val id: Int, val mode: Int? = null, val modes: List<String>? = null)
+
+/** One colour per view of a two-view button. */
+private val MODE_COLORS get() = listOf(C.accent, Color(0xFF60A5FA))
 
 /**
  * Bottom bar with a pill that slides to the selected item. The pill can also be dragged across
@@ -202,7 +208,8 @@ fun BottomBar(
             ) {
                 items.forEach { item ->
                     val on = item.id == selected
-                    val tint by animateColorAsState(if (on) C.accent else C.muted, label = "navTint")
+                    val m = item.mode?.takeIf { on && item.modes != null }
+                    val tint by animateColorAsState(if (!on) C.muted else if (m != null) MODE_COLORS[m] else C.accent, label = "navTint")
                     Column(
                         Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).clickable { onSelect(item.id) },
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -216,14 +223,12 @@ fun BottomBar(
                                     .togetherWith(androidx.compose.animation.scaleOut(targetScale = 0.6f) + androidx.compose.animation.fadeOut())
                             },
                         ) { ic -> Icon(ic, item.label, tint = tint, modifier = Modifier.size(20.dp)) }
-                        Text(item.label, color = tint, fontSize = 10.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
-                        item.mode?.let { m ->
-                            Row(Modifier.padding(top = 2.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(3.dp)) {
-                                for (i in 0..1) {
-                                    val dot by animateColorAsState(if (i == m) tint else C.line, label = "dot")
-                                    val dw by animateDpAsState(if (i == m) 10.dp else 4.dp, label = "dotW")
-                                    Box(Modifier.width(dw).height(3.dp).clip(RoundedCornerShape(2.dp)).background(dot))
-                                }
+                        if (m == null) Text(item.label, color = tint, fontSize = 10.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+                        else Row(verticalAlignment = Alignment.CenterVertically) {
+                            item.modes!!.forEachIndexed { i, l ->
+                                if (i > 0) Text("/", color = C.line, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 2.dp))
+                                val c by animateColorAsState(if (i == m) MODE_COLORS[i] else C.muted, label = "modeTint")
+                                Text(l, color = c, fontSize = 10.sp, fontWeight = if (i == m) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
                             }
                         }
                     }
