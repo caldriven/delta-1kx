@@ -841,18 +841,36 @@ fun MiniSwitch(left: String, right: String, leftOn: Boolean, onChange: (Boolean)
     }
 }
 
-/** Section switcher as separate pill buttons; the selected one is filled. */
+/**
+ * Section switcher as a segmented control: one track, each section its own
+ * cell, the selected cell raised with an accent underline and count badge.
+ */
 @Composable
 private fun PillTabs(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).height(38.dp)
+            .clip(RoundedCornerShape(10.dp)).background(C.panel2).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
         labels.forEachIndexed { i, t ->
             val on = i == selected
-            Text(
-                t, color = if (on) onColor(C.accent) else C.text, fontSize = 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1,
-                modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(if (on) C.accent else C.panel2)
-                    .border(1.dp, if (on) C.accent else C.line, RoundedCornerShape(10.dp))
-                    .clickable { onSelect(i) }.padding(horizontal = 14.dp, vertical = 8.dp),
-            )
+            // "Positions 3" -> name plus a small count.
+            val name = t.substringBeforeLast(' ').takeIf { t.last().isDigit() } ?: t
+            val count = t.substringAfterLast(' ').takeIf { t.last().isDigit() && it != "0" }
+            Row(
+                Modifier.weight(if (name.length > 6) 1.3f else 1f).fillMaxHeight().clip(RoundedCornerShape(8.dp))
+                    .background(if (on) C.panel else Color.Transparent)
+                    .then(if (on) Modifier.border(1.dp, C.line, RoundedCornerShape(8.dp)) else Modifier)
+                    .clickable { onSelect(i) },
+                horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(name, color = if (on) C.text else C.muted, fontSize = 12.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
+                count?.let {
+                    Spacer(Modifier.width(4.dp))
+                    Text(it, style = num.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold, color = if (on) onColor(C.accent) else C.muted),
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (on) C.accent else C.line).padding(horizontal = 5.dp))
+                }
+            }
         }
     }
 }
