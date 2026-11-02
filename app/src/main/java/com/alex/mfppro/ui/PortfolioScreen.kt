@@ -168,7 +168,7 @@ fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: 
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(10.dp)).background(C.panel)) {
                     val m = marks[p.feedKey]
                     val br = m?.let { mk -> riskOf(s, marks).room?.let { breachPrice(p, mk, it) } }
-                    PositionRow(p, m, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { onOpenMarket(p.marketId) }
+                    PositionRow(p, m, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { repo.setTradeAccount(p.accountId); onOpenMarket(p.marketId) }
                     PositionActions(repo, p, marks[p.feedKey])
                 }
             }

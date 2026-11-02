@@ -163,6 +163,9 @@ fun CandleChart(
                         val hit = hits.firstOrNull { it.rect.inflate(6.dp.toPx()).contains(down.position) }
                         var mode = when {
                             hit != null -> { down.consume(); 6 }
+                            // While the crosshair is up, every one-finger drag moves it and never the chart,
+                            // even with a manual price range or starting on the axis.
+                            cross != null -> 7
                             down.position.x > size.width - axisW -> 2
                             manual != null -> 3
                             else -> 0

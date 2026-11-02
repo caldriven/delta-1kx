@@ -436,7 +436,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     val pm = marks[p.feedKey]
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
                         val br = accounts[p.accountId]?.let { a -> pm?.let { mk -> riskOf(a, marks).room?.let { breachPrice(p, mk, it) } } }
-                        PositionRow(p, pm, accounts[p.accountId]?.let(::accountName) ?: "", showAccount = multi, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { onPickMarket(p.marketId) }
+                        PositionRow(p, pm, accounts[p.accountId]?.let(::accountName) ?: "", showAccount = multi, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { repo.setTradeAccount(p.accountId); onPickMarket(p.marketId) }
                         PositionActions(repo, p, pm)
                     }
                 } }
