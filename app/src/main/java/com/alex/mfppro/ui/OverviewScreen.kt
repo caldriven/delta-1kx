@@ -33,6 +33,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -136,16 +140,19 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     val fundingCol = sort.first == SortKey.FUND
 
     if (analysis) {
-        var view by remember { mutableStateOf(repo.prefs.analysisView) }
+        var view by remember { mutableStateOf(repo.prefs.analysisView.takeIf { v -> ANALYSIS_TABS.any { it.key == v } } ?: "CHARTS") }
+        val tab = ANALYSIS_TABS.first { it.key == view }
         Column(Modifier.fillMaxSize().background(C.bg)) {
-            Row(Modifier.fillMaxWidth().padding(14.dp, 8.dp, 10.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
-                Spacer(Modifier.weight(1f))
-                Seg("Correlation", view != "SPECIAL", C.accent) { view = "CORR"; repo.prefs.analysisView = view }
-                Spacer(Modifier.width(4.dp))
-                Seg("Special trades", view == "SPECIAL", C.accent) { view = "SPECIAL"; repo.prefs.analysisView = view }
+            Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(14.dp, 8.dp, 10.dp, 0.dp))
+            AnalysisTabBar(view) { view = it; repo.prefs.analysisView = it }
+            // One line on what this tab is for, so nobody has to guess.
+            Text(tab.what, color = C.muted, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(horizontal = 14.dp).padding(bottom = 4.dp))
+            when (view) {
+                "CHARTS" -> MultiChart(repo, onOpenMarket)
+                "SPECIAL" -> SpecialTrades(repo)
+                "SCAN" -> AnalysisScreen(repo, onOpenMarket, scanOnly = true)
+                else -> AnalysisScreen(repo, onOpenMarket)
             }
-            if (view == "SPECIAL") SpecialTrades(repo) else AnalysisScreen(repo, onOpenMarket)
         }
         return
     }
@@ -301,3 +308,37 @@ private fun RoundImage(url: String?, name: String, size: Dp) {
 
 private val palette = listOf(0xFF3B82F6, 0xFF8B5CF6, 0xFFEC4899, 0xFF14B8A6, 0xFFF59E0B, 0xFF6366F1, 0xFF10B981, 0xFFEF4444)
 private fun letterColor(s: String) = Color(palette[(s.hashCode() and 0x7fffffff) % palette.size])
+
+private class AnalysisTab(val key: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val color: Color, val what: String)
+
+private val ANALYSIS_TABS = listOf(
+    AnalysisTab("CHARTS", "Charts", androidx.compose.material.icons.Icons.Filled.GridView, Color(0xFF3B82F6),
+        "Four markets side by side. Tap a name to swap it."),
+    AnalysisTab("CORR", "Correlation", androidx.compose.material.icons.Icons.Filled.Hub, Color(0xFFF59E0B),
+        "Which markets move together, how that stacks your risk, and how big to size each."),
+    AnalysisTab("SCAN", "Scanner", androidx.compose.material.icons.Icons.Filled.Radar, Color(0xFF22C55E),
+        "Biggest movers and crowded funding or open interest right now."),
+    AnalysisTab("SPECIAL", "Pairs", androidx.compose.material.icons.Icons.AutoMirrored.Filled.CompareArrows, Color(0xFFA78BFA),
+        "Pair trades: long one, short the other when their spread is stretched."),
+)
+
+/** Full-width tabs, icon over label, each in its own colour when selected. */
+@Composable
+private fun AnalysisTabBar(selected: String, onSelect: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(C.panel2).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        ANALYSIS_TABS.forEach { t ->
+            val on = t.key == selected
+            Column(
+                Modifier.weight(1f).clip(RoundedCornerShape(9.dp)).background(if (on) t.color.copy(alpha = 0.18f) else Color.Transparent)
+                    .clickable { onSelect(t.key) }.padding(vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                androidx.compose.material3.Icon(t.icon, null, tint = if (on) t.color else C.muted, modifier = Modifier.size(18.dp))
+                Text(t.label, color = if (on) t.color else C.muted, fontSize = 11.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+            }
+        }
+    }
+}

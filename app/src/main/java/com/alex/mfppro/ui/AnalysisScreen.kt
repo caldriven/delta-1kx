@@ -97,7 +97,7 @@ private class Matrix(val markets: List<Market>, val ret: List<Map<Long, Double>>
  * Everything is computed on the phone from MFP candles and stats.
  */
 @Composable
-fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
+fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit, scanOnly: Boolean = false) {
     val markets by repo.markets.collectAsStateWithLifecycle()
     val venues by repo.venues.collectAsStateWithLifecycle()
     val stats by repo.market.stats.collectThrottled(1000)
@@ -141,7 +141,7 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
     var picked by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     LaunchedEffect(setKey, window) {
         val set = frozen.orEmpty()
-        if (set.size < 2) return@LaunchedEffect
+        if (scanOnly || set.size < 2) return@LaunchedEffect
         loading = true; picked = null
         val rets = coroutineScope {
             set.map { m -> async { returns(runCatching { repo.history(m, window.interval, window.bars) }.getOrDefault(emptyList())) } }.awaitAll()
@@ -166,6 +166,14 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         if (m.marketId !in extraIds) { extraIds = extraIds + m.marketId; repo.prefs.corrExtra = extraIds }
     }
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
+        // Scanner tab: just what is moving and where positioning is crowded.
+        if (scanOnly) {
+            item { Title("Movers", "4h · 24h · 7d") }
+            item { Movers(repo, markets, stats, extras, classes, onOpenMarket) }
+            item { Title("Funding & OI", "extremes now") }
+            item { FundingOi(markets, stats, extras, onOpenMarket) }
+            return@LazyColumn
+        }
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -197,10 +205,6 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
             item { Title("Volatility & sizing", "vs BTC") }
             item { VolBeta(mx, window, onOpenMarket) }
         }
-        item { Title("Movers", "4h · 24h · 7d") }
-        item { Movers(repo, markets, stats, extras, classes, onOpenMarket) }
-        item { Title("Funding & OI", "extremes now") }
-        item { FundingOi(markets, stats, extras, onOpenMarket) }
     }
 }
 

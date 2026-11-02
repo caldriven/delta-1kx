@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -117,8 +118,11 @@ fun CandleChart(
     sessions: SessionOpts? = null,
     crossKey: Int = 0,
     fills: List<FillMark> = emptyList(),
+    // Narrow price axis with short labels, for small charts (multi-chart grid).
+    compactAxis: Boolean = false,
     overlay: @Composable BoxScope.() -> Unit = {},
 ) {
+    val axisDp = if (compactAxis) 40.dp else 56.dp
     val tm = rememberTextMeasurer()
     var visible by remember { mutableFloatStateOf(70f) }
     // Bars scrolled back from the newest; negative leaves empty space right of the last candle.
@@ -136,7 +140,12 @@ fun CandleChart(
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     // The crosshair button: each press toggles it, starting at the chart centre.
     val canvasSize = remember { FloatArray(2) }
-    LaunchedEffect(crossKey) { if (crossKey > 0) cross = if (cross == null) Offset(canvasSize[0] * 0.45f, canvasSize[1] * 0.4f) else null }
+    // Only a press made while this chart is up toggles it: a chart rebuilt for a new market or interval
+    // starts with the key already above zero and must not pop the crosshair open by itself.
+    var seenCross by remember { mutableIntStateOf(crossKey) }
+    LaunchedEffect(crossKey) {
+        if (crossKey != seenCross) { seenCross = crossKey; cross = if (cross == null) Offset(canvasSize[0] * 0.45f, canvasSize[1] * 0.4f) else null }
+    }
     // Ticks once a second for the next-candle countdown.
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis() } }
@@ -144,8 +153,8 @@ fun CandleChart(
     Box(modifier) {
         Canvas(
             Modifier.fillMaxSize()
-                .pointerInput(Unit) {
-                    val axisW = 56.dp.toPx()
+                .pointerInput(axisDp) {
+                    val axisW = axisDp.toPx()
                     val slop = viewConfiguration.touchSlop
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
@@ -231,13 +240,13 @@ fun CandleChart(
                         }
                     }
                 }
-                .pointerInput(Unit) {
+                .pointerInput(axisDp) {
                     detectTapGestures(
                         onDoubleTap = { offset = RIGHT_GAP; visible = 70f; manual = null; cross = null },
                         // Long press shows it a thumb's height above the finger.
                         onLongPress = {
                             // Not on the price axis: that press is scaling the axis.
-                            if (it.x < size.width - 56.dp.toPx()) {
+                            if (it.x < size.width - axisDp.toPx()) {
                                 haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                                 cross = Offset(it.x, (it.y - 60.dp.toPx()).coerceAtLeast(0f))
                             }
@@ -246,7 +255,12 @@ fun CandleChart(
                     )
                 }
         ) {
-            val axisW = 56.dp.toPx()
+            val axisW = axisDp.toPx()
+            // Axis price text: full precision normally, short and small on a compact axis.
+            fun ap(p: Double) = if (!compactAxis) fmtPrice(p) else kotlin.math.abs(p).let { a ->
+                String.format(java.util.Locale.US, if (a >= 1000) "%.0f" else if (a >= 100) "%.1f" else if (a >= 1) "%.3f" else "%.5f", p)
+            }
+            val axStyle = if (compactAxis) axisStyle.copy(fontSize = 9.sp) else axisStyle
             canvasSize[0] = size.width - axisW; canvasSize[1] = size.height
             // Bottom strip for the time axis.
             val timeH = 14.dp.toPx()
@@ -278,7 +292,7 @@ fun CandleChart(
                 val p = lo + (hi - lo) * i / 5
                 val yy = y(p)
                 drawLine(C.line.copy(alpha = 0.35f), Offset(0f, yy), Offset(chartW, yy), 1f)
-                if (taken.none { kotlin.math.abs(it - yy) < 18.dp.toPx() }) label(tm, fmtPrice(p), Offset(chartW + 4.dp.toPx(), yy - 6.dp.toPx()), axisStyle)
+                if (taken.none { kotlin.math.abs(it - yy) < 18.dp.toPx() }) label(tm, ap(p), Offset(chartW + 3.dp.toPx(), yy - 6.dp.toPx()), axStyle)
             }
             drawLine(C.line, Offset(chartW, 0f), Offset(chartW, size.height), 1f)
 
@@ -460,7 +474,7 @@ fun CandleChart(
             limit = fixedBottom
             for (t in below) { val top = maxOf(t.y - tagH / 2, limit + 1f); drawAxisTag(tm, t, top, chartW, axisW, tagH); limit = top + tagH }
             drawRect(MARK_C, Offset(chartW, fixedTop), Size(axisW, tagH))
-            label(tm, fmtPrice(last.c), Offset(chartW + 4.dp.toPx(), ly - 6.dp.toPx()), axisStyle.copy(color = Color.Black))
+            label(tm, ap(last.c), Offset(chartW + 3.dp.toPx(), ly - 6.dp.toPx()), axStyle.copy(color = Color.Black))
             // Time left in the current candle, under the price tag.
             if (candles.size >= 2) {
                 val step = candles[candles.size - 1].openTime - candles[candles.size - 2].openTime
@@ -482,14 +496,17 @@ fun CandleChart(
 
             // Crosshair with the candle under it: O/H/L/C, change, range and mid.
             cross?.let { c ->
-                val cx = c.x.coerceIn(0f, chartW); val cy = c.y.coerceIn(0f, chartH)
+                val cy = c.y.coerceIn(0f, chartH)
+                // Snap the vertical line to the middle of the candle under it, so it steps cleanly bar to bar.
+                val left = chartW - (slice.size + gap) * barW
+                val i = ((c.x.coerceIn(0f, chartW) - left) / barW).toInt()
+                val cx = (left + (i + 0.5f) * barW).coerceIn(0f, chartW)
                 val dot = PathEffect.dashPathEffect(floatArrayOf(6f, 5f))
                 drawLine(C.text.copy(alpha = 0.6f), Offset(cx, 0f), Offset(cx, size.height), 1f, pathEffect = dot)
                 drawLine(C.text.copy(alpha = 0.6f), Offset(0f, cy), Offset(chartW, cy), 1f, pathEffect = dot)
                 val cp = hi - cy / chartH * (hi - lo)
                 drawRect(C.text, Offset(chartW, cy - 8.dp.toPx()), Size(axisW, 16.dp.toPx()))
-                label(tm, fmtPrice(cp), Offset(chartW + 4.dp.toPx(), cy - 6.dp.toPx()), axisStyle.copy(color = C.bg))
-                val i = ((cx - (chartW - (slice.size + gap) * barW)) / barW).toInt()
+                label(tm, ap(cp), Offset(chartW + 3.dp.toPx(), cy - 6.dp.toPx()), axStyle.copy(color = C.bg))
                 slice.getOrNull(i)?.let { k ->
                     val chg = if (k.o > 0) (k.c / k.o - 1) * 100 else 0.0
                     val rng = if (k.l > 0) (k.h / k.l - 1) * 100 else 0.0

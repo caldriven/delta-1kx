@@ -280,6 +280,14 @@ class Prefs(ctx: Context) {
     }
 
     /** Extra markets added to every correlation preset. */
+    /** Multi-chart slots, as market ids; blank slots fall back to the defaults. */
+    var multiCharts: List<String>
+        get() = plain.getString("multi_charts", "")!!.split(',')
+        set(v) = plain.edit().putString("multi_charts", v.joinToString(",")).apply()
+    var multiInterval: String
+        get() = plain.getString("multi_interval", "15m") ?: "15m"
+        set(v) = plain.edit().putString("multi_interval", v).apply()
+
     var corrExtra: List<String>
         get() = plain.getString("corr_extra", "")!!.split(',').filter { it.isNotBlank() }
         set(v) = plain.edit().putString("corr_extra", v.joinToString(",")).apply()
