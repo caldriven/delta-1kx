@@ -120,9 +120,11 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
                     step("e", pos.id, eqPct, p.pnlStepEq.toDouble())?.let { String.format(Locale.US, "%+.2f%% of equity", it) },
                     // Loss limit: only losses use it up, so this step only speaks when the position is red.
                     riskPct?.let { step("r", pos.id, it, p.pnlStepRisk.toDouble()) }?.takeIf { it < 0 && allowance != null }?.let {
+                        // Measured against the limit's size, which says nothing about a breach on its own
+                        // (today's gains add room), so the real room left goes with it.
                         val used = -it
-                        String.format(Locale.US, "Used %.0f%% of %s limit (%s of %s)", used, if (r.bindingIsDaily) "daily loss" else "max drawdown",
-                            fmt(allowance!! * used / 100), fmt(allowance))
+                        String.format(Locale.US, "Loss is %.0f%% of the %s %s limit · %s room left", used, fmt(allowance!!),
+                            if (r.bindingIsDaily) "daily" else "max DD", fmt(r.room))
                     },
                 )
                 val sideOk = when (p.pnlSide) { "loss" -> pnl < 0; "profit" -> pnl > 0; else -> true }

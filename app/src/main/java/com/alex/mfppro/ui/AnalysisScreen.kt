@@ -168,7 +168,9 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit, scanOnly: Boolean
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
         // Scanner tab: just what is moving and where positioning is crowded.
         if (scanOnly) {
-            item { Title("Movers", "4h · 24h · 7d") }
+            item { Title("Setups", "crypto · 1h candles · 7d") }
+            item { SetupScanner(repo, markets, stats, extras, classes, onOpenMarket) }
+            item { Title("Movers", "1h · 4h · 24h · 7d") }
             item { Movers(repo, markets, stats, extras, classes, onOpenMarket) }
             item { Title("Funding & OI", "extremes now") }
             item { FundingOi(markets, stats, extras, onOpenMarket) }
@@ -534,8 +536,11 @@ private fun Movers(
 ) {
     var period by remember { mutableStateOf("24h") }
     val chg4h by repo.chg4h.collectAsStateWithLifecycle()
-    LaunchedEffect(period) { if (period == "4h") repo.load4h() }
+    val chg1h by repo.chg1h.collectAsStateWithLifecycle()
+    val busiest = markets.sortedByDescending { stats[it.feedKey]?.dayNtlVlm ?: 0.0 }.take(30)
+    LaunchedEffect(period) { if (period == "4h") repo.load4h(); if (period == "1h") repo.load1h(busiest) }
     fun chg(m: Market): Double? = when (period) {
+        "1h" -> chg1h[m.marketId]
         "4h" -> chg4h[m.marketId]
         "7d" -> extras[m.marketId]?.week
         else -> {
@@ -543,11 +548,11 @@ private fun Movers(
             if (px != null && open != null && open > 0) (px / open - 1) * 100 else stats[m.feedKey]?.change24hPct
         }
     }
-    val top = markets.sortedByDescending { stats[it.feedKey]?.dayNtlVlm ?: 0.0 }.take(30).sortedByDescending { chg(it) ?: -999.0 }
+    val top = busiest.sortedByDescending { chg(it) ?: -999.0 }
     val maxAbs = top.mapNotNull { chg(it) }.maxOfOrNull { abs(it) }?.takeIf { it > 0 } ?: 1.0
     Card {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-            for (p in listOf("4h", "24h", "7d")) Seg(p, period == p, C.accent) { period = p }
+            for (p in listOf("1h", "4h", "24h", "7d")) Seg(p, period == p, C.accent) { period = p }
         }
         top.chunked(5).forEach { row ->
             Row(Modifier.padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

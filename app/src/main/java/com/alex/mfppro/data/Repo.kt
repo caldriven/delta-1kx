@@ -331,6 +331,25 @@ class Repo(ctx: Context) {
         }
     }
 
+    /** Rolling 1-hour change per market, from twelve 5-minute candles; refreshed every 2 min at most. */
+    private val _chg1h = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val chg1h = _chg1h.asStateFlow()
+    private var chg1hAt = 0L
+    private var chg1hJob: Job? = null
+    fun load1h(only: List<Market> = _markets.value) {
+        if (chg1hJob?.isActive == true || System.currentTimeMillis() - chg1hAt < 2 * 60_000) return
+        chg1hJob = scope.launch {
+            chg1hAt = System.currentTimeMillis()
+            for (m in only) launch {
+                val c = runCatching { market.candleHistory(m.provider, m.coin, "5m", 13) }.getOrNull().orEmpty()
+                if (c.size >= 12) {
+                    val open = c[c.size - 12].o
+                    if (open > 0) _chg1h.update { it + (m.marketId to (c.last().c / open - 1) * 100) }
+                }
+            }
+        }
+    }
+
     private fun loadMarkets() = scope.launch {
         loadVenues()
         var wait = 1_000L

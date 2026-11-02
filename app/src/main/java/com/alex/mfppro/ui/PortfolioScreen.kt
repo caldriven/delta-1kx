@@ -297,7 +297,8 @@ fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolea
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            CoinLogo(p.coin, p.provider, 20.dp)
+            // The market symbol, as the market list uses for its logos; the venue's coin id doesn't always match.
+            CoinLogo(p.symbol.uppercase().removeSuffix("USDT").removeSuffix("-PERP").ifBlank { p.coin }, p.provider, 20.dp)
             Spacer(Modifier.width(6.dp))
             Text(ticker(p.symbol, p.provider), color = C.text, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(6.dp))

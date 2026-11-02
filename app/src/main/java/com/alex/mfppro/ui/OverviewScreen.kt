@@ -317,7 +317,7 @@ private val ANALYSIS_TABS = listOf(
     AnalysisTab("CORR", "Correlation", androidx.compose.material.icons.Icons.Filled.Hub, Color(0xFFF59E0B),
         "Which markets move together, how that stacks your risk, and how big to size each."),
     AnalysisTab("SCAN", "Scanner", androidx.compose.material.icons.Icons.Filled.Radar, Color(0xFF22C55E),
-        "Biggest movers and crowded funding or open interest right now."),
+        "Coins leading BTC, coiled ones about to move, and which to avoid. Then movers and crowded funding or OI."),
     AnalysisTab("SPECIAL", "Pairs", androidx.compose.material.icons.Icons.AutoMirrored.Filled.CompareArrows, Color(0xFFA78BFA),
         "Pair trades: long one, short the other when their spread is stretched."),
 )
