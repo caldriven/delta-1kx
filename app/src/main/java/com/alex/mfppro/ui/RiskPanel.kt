@@ -24,6 +24,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -74,11 +78,29 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
     val acc = rememberTradeAccount(repo) ?: return
     val r = riskOf(acc, marks)
     val start = acc.account.startingBalance
-    // Stacked: account and equity on top, then one line per rule, then margin and exposure.
+    // One line (account, equity, room left) with a Show toggle; the rule lines fold out below it.
     var pick by androidx.compose.runtime.remember { mutableStateOf(false) }
+    var open by androidx.compose.runtime.remember { mutableStateOf(repo.prefs.accountOpen) }
     // Tap anywhere on the card to switch account.
     Column(modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.panel).clickable { pick = true }.padding(horizontal = 10.dp, vertical = 6.dp)) {
-        AccountSwitcher(repo, Modifier.fillMaxWidth())
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AccountSwitcher(repo, Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text("Room left", color = C.muted, fontSize = 10.sp)
+                Text(fmtCompactUsd(r.room), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = roomColor(r.roomFraction)))
+            }
+            Spacer(Modifier.width(8.dp))
+            Row(
+                Modifier.clip(RoundedCornerShape(8.dp)).background(C.panel2).clickable { open = !open; repo.prefs.accountOpen = open }.padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(if (open) "Hide" else "Show", color = C.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(4.dp))
+                Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, null, tint = C.text, modifier = Modifier.size(18.dp))
+            }
+        }
+        androidx.compose.animation.AnimatedVisibility(open, enter = androidx.compose.animation.expandVertically(), exit = androidx.compose.animation.shrinkVertically()) {
+        Column {
         val loaded = acc.account.risk != null
         // Room bars run light orange (all left) to red (none left).
         run {
@@ -112,6 +134,9 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
                 Text("Max per position " + fmtCompactUsd(it), style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.padding(top = 2.dp))
             }
         }
+        }
+        }
+        // Warnings stay visible when folded.
         RiskWarning(r)
         LockBanner(repo)
     }

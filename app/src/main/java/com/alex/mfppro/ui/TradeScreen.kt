@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -186,7 +188,36 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     // Hidden only while its chip is offered; turning the chip off in Settings shows the lines again.
     var showPosPick by remember { mutableStateOf(repo.prefs.showPosLines) }
     val showPos = showPosPick || !repo.prefs.chipPos
-    val chartLines = (if (showPos) myPositions else emptyList()).flatMap { p ->
+    val draft = remember(market.marketId) { LimitDraft().apply { decimals = repo.prefs.priceDecimals(market.marketId) } }
+    // Chart layers switched off in the Layers menu.
+    var hidden by remember { mutableStateOf(repo.prefs.chartHidden) }
+    fun shows(layer: String) = layer !in hidden
+    // Your fills in this market, as candle markers; reloaded when a new fill arrives.
+    var fillMarks by remember(market.marketId, tradeAcc?.account?.id) { mutableStateOf<List<FillMark>>(emptyList()) }
+    LaunchedEffect(market.marketId, tradeAcc?.account?.id, shows("fills")) {
+        val id = tradeAcc?.account?.id ?: return@LaunchedEffect
+        if (!shows("fills")) { fillMarks = emptyList(); return@LaunchedEffect }
+        suspend fun load() = runCatching { repo.fills(id, maxPages = 3) }.getOrNull()?.let { list ->
+            fillMarks = list.filter { it.marketId == market.marketId || it.symbol.equals(market.symbol, true) }
+                .map { FillMark(it.settledAt ?: it.requestedAt, it.side == "buy", it.fillPrice) }
+        }
+        load()
+        repo.account.fills.collect { delay(1500); load() }
+    }
+    fun pctAway(px: Double) = mark?.let { fmtPct((px / it - 1) * 100) } ?: ""
+    // Resting entry orders in this market (not TP/SL, which ride on the position), plus the draft limit.
+    val orderLines = scoped.flatMap { a -> a.orders.values }.filter { o -> shows("orders") && o.exitGroup == null && (o.marketId == market.marketId || o.symbol.equals(market.symbol, true)) }
+        .mapNotNull { o ->
+            val px = o.limitPrice ?: o.triggerPrice ?: return@mapNotNull null
+            val buy = o.side == "buy"
+            val kind = (if (o.type.startsWith("stop")) "Stop " else "Limit ") + (if (buy) "buy" else "sell") + (if (o.reduceOnly) " · reduce" else "")
+            PriceLine(px, if (buy) C.up else C.down, kind, parts = listOf(kind, fmtUsd(o.size * px), pctAway(px)))
+        } + listOfNotNull(draft.price?.takeIf { compact && draft.on }?.let { px ->
+            val col = if (draft.buy) C.up else C.down
+            PriceLine(px, col, "Limit", parts = listOf(if (draft.buy) "Limit buy · draft" else "Limit sell · draft", pctAway(px)),
+                drag = LineDrag({ p -> "Limit ${fmtPrice(draft.snap(p, market))} · ${pctAway(p)}" to col }) { p -> draft.price = draft.snap(p, market) })
+        })
+    val chartLines = orderLines + (if (showPos) myPositions else emptyList()).flatMap { p ->
         val acc = accounts[p.accountId] ?: return@flatMap emptyList()
         val r = riskOf(acc, marks)
         val tag = if (multi) accountName(acc).take(14) else ""
@@ -196,7 +227,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val sl = exits.firstOrNull { it.exitGroup == "sl" }?.exitPrice
         fun away(px: Double) = mark?.let { fmtPct((px / it - 1) * 100) } ?: ""
         listOfNotNull(
-            PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "", solid = true,
+            // With the PnL box off, the entry stays as a plain line.
+            if (!shows("pnl")) PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "Entry", solid = true, parts = listOf("Entry"))
+            else PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "", solid = true,
                 box = PosBox(
                     fmtUsd(pnl, true),
                     tp = LineDrag({ exitPreview(p, it, "TP") }) { px -> exitAsk = ExitAsk(p, true, px, tp, sl) },
@@ -211,15 +244,15 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                             listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(mark?.let(p::pnlAt), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) })
                     },
                 )),
-            tp?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
+            tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
                 drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> exitAsk = ExitAsk(p, true, px, tp, sl) }) },
-            sl?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(p.pnlAt(it), true), tag.ifBlank { null }),
+            sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(p.pnlAt(it), true), tag.ifBlank { null }),
                 drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> exitAsk = ExitAsk(p, false, px, tp, sl) }) },
             // Where this position takes the account onto each floor, with % away from the last price.
-            mark?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
-            mark?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             // Where this position alone would bring equity to the pass target.
-            mark?.let { m -> r.toTarget?.takeIf { it > 0 && p.size > 0 }?.let { need ->
+            mark?.takeIf { shows("target") }?.let { m -> r.toTarget?.takeIf { it > 0 && p.size > 0 }?.let { need ->
                 val px = if (p.isLong) m + need / p.size else m - need / p.size
                 px.takeIf { it > 0 }?.let { PriceLine(it, PASS, "Pass target", parts = listOfNotNull("Pass target", away(it), "+" + fmtUsd(need), tag.ifBlank { null })) }
             } },
@@ -232,8 +265,22 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 
     Column(Modifier.fillMaxSize().background(C.bg)) {
     // Chart view scrolls only while a section is open (or on the data view, which is a long list).
-    val scrolls = !compact && (tab >= 0 || view == 1)
-    Column(Modifier.weight(1f).then(if (scrolls) Modifier.verticalScroll(rememberScrollState()) else Modifier)) {
+    // Trade view is one long page: chart, quick panel and positions scroll together.
+    val scrolls = compact || tab >= 0 || view == 1
+    val pageScroll = rememberScrollState()
+    // Switching Chart/Trade starts at the top, positions below the fold.
+    LaunchedEffect(compact) { pageScroll.scrollTo(0) }
+    // Where the section tabs sit in the page, so opening one can bring the list into view.
+    var tabsY by remember { mutableStateOf(0) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    LaunchedEffect(tab) {
+        if (tab >= 0 && !compact) {
+            delay(60)
+            // Keep a strip of chart above the tabs; the rest of the screen is the list.
+            pageScroll.animateScrollTo((tabsY - with(density) { 160.dp.toPx() }.toInt()).coerceAtLeast(0))
+        }
+    }
+    Column(Modifier.weight(1f).then(if (scrolls) Modifier.verticalScroll(pageScroll) else Modifier)) {
         // Header: market + live price on one line, stats strip below.
         Row(Modifier.fillMaxWidth().padding(10.dp, 4.dp, 12.dp, 0.dp), verticalAlignment = Alignment.CenterVertically) {
             // The symbol glides over to the market list (or opens the picker when there's no list to go to).
@@ -306,13 +353,30 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 }
             }
             Spacer(Modifier.weight(1f))
+            // Layers: what the chart draws for your trades.
+            Box {
+                var layersOpen by remember { mutableStateOf(false) }
+                Icon(Icons.Filled.Layers, "Layers", tint = if (hidden.isEmpty()) C.text else C.accent,
+                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { layersOpen = true }.padding(3.dp).size(20.dp))
+                androidx.compose.material3.DropdownMenu(layersOpen, onDismissRequest = { layersOpen = false }, containerColor = C.panel) {
+                    Text("On the chart", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
+                    for ((key, label) in listOf("pnl" to "Net PnL box", "exits" to "TP / SL lines", "floors" to "DLL / Max DD floors",
+                        "target" to "Pass target", "orders" to "Open orders", "fills" to "Fill markers ▲▼")) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { AppCheck(label, key !in hidden) { on -> hidden = if (on) hidden - key else hidden + key; repo.prefs.chartHidden = hidden } },
+                            onClick = { hidden = if (key in hidden) hidden - key else hidden + key; repo.prefs.chartHidden = hidden },
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(6.dp))
             Icon(Icons.Filled.CenterFocusWeak, "Crosshair", tint = C.text, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { crossKey++ }.padding(3.dp).size(20.dp))
             Spacer(Modifier.width(6.dp))
             Icon(Icons.Filled.Fullscreen, "Landscape", tint = C.text, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { landscape = true }.padding(3.dp).size(20.dp))
         }
         }
         val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
-        val chartH = (screenH * if (compact) 0.27f else 0.54f).dp
+        val chartH = (screenH * if (compact) 0.47f else 0.54f).dp
         // Nothing open below: the chart stretches down to the section tabs.
         val sized = if (!compact && !scrolls) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
         run {
@@ -328,6 +392,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     vpSince = if (interval in listOf("1m", "5m", "15m", "1h")) Opens.dayStart() else null,
                     sessions = sessOpts,
                     crossKey = crossKey,
+                    fills = fillMarks,
                 ) }
             }
             if ((view == 2 || view == 3) && !compact) TopOfBook(book)
@@ -335,11 +400,11 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         // Position management: one-tap open, reduce and close, then every open
         // position on the trading account whatever market the chart shows.
         if (compact) {
-            QuickTrade(repo, market)
+            QuickTrade(repo, market, draft)
             val open = tradeAcc?.positions?.values?.byFocus(market.marketId, marks).orEmpty()
-            androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = 6.dp)) {
-                if (open.isEmpty()) item { Text("Flat", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp)) }
-                items(open, key = { it.id }) { p ->
+            Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                if (open.isEmpty()) Text("Flat", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
+                for (p in open) androidx.compose.runtime.key(p.id) {
                     val pm = marks[p.feedKey]
                     val br = pm?.let { mk -> tradeAcc?.let { riskOf(it, marks).room }?.let { breachPrice(p, mk, it) } }
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
@@ -355,7 +420,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         var ordersAll by remember { mutableStateOf(repo.prefs.ordersAllMarkets) }
         val shownOrders = allOrders.filter { (_, o) -> ordersAll || o.marketId == market.marketId || o.symbol.equals(market.symbol, true) }
             .sortedWith(compareByDescending<Pair<com.alex.mfppro.data.AccountState, com.alex.mfppro.data.Order>> { it.second.marketId == market.marketId }.thenBy { it.second.symbol })
-        if (!compact) PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = if (tab == it) -1 else it }
+        if (!compact) Box(Modifier.onGloballyPositioned { tabsY = it.positionInParent().y.toInt() }) {
+            PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = if (tab == it) -1 else it }
+        }
         if (!compact && tab >= 0) when (tab) {
             0 -> Column {
                 Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -297,16 +297,31 @@ fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolea
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            VenueTag(p.provider, 16.dp)
+            CoinLogo(p.coin, p.provider, 20.dp)
             Spacer(Modifier.width(6.dp))
             Text(ticker(p.symbol, p.provider), color = C.text, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(6.dp))
             Tag("${if (p.isLong) "Long" else "Short"} ${p.leverage.toInt()}x", if (p.isLong) C.up else C.down)
+            Spacer(Modifier.width(6.dp))
+            VenueTag(p.provider, 16.dp)
             if (showAccount) { Spacer(Modifier.width(6.dp)); Text(account, color = C.muted, fontSize = 11.sp) }
             Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
+            // Press and hold the PnL for the whole-trade breakdown (fees, swap, banked PnL, breakeven).
+            var peek by remember { mutableStateOf(false) }
+            val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+            Column(
+                Modifier.pointerInput(Unit) {
+                    detectTapGestures(
+                        onPress = { tryAwaitRelease(); peek = false },
+                        onLongPress = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); peek = true },
+                        onTap = { onClick() },
+                    )
+                },
+                horizontalAlignment = Alignment.End,
+            ) {
                 Text(fmtUsd(pnl, signed = true), style = num.copy(color = pnlColor(pnl), fontWeight = FontWeight.Medium))
                 Text(fmtPct(roe), style = num.copy(fontSize = 11.sp, color = pnlColor(pnl)))
+                if (peek && mark != null) PnlBreakdown(p, mark)
             }
         }
         Row(Modifier.padding(top = 4.dp)) {
@@ -328,6 +343,32 @@ fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolea
             Cell("To breach", fmtPct(away), Modifier.weight(1f), C.down)
             Cell("TP", fmtPrice(tp), Modifier.weight(1f), if (tp != null) C.up else C.muted)
             Cell("SL", fmtPrice(sl), Modifier.weight(1f), if (sl != null) C.down else C.muted)
+        }
+    }
+}
+
+/** Whole-trade card shown while the PnL is held, like MFP's tooltip: what the trade nets after costs. */
+@Composable
+fun PnlBreakdown(p: com.alex.mfppro.data.Position, mark: Double) {
+    val total = p.netAt(mark)
+    androidx.compose.ui.window.Popup(alignment = Alignment.TopEnd, offset = androidx.compose.ui.unit.IntOffset(0, -20)) {
+        Column(
+            Modifier.width(250.dp).clip(RoundedCornerShape(10.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(10.dp)).padding(12.dp),
+        ) {
+            @Composable
+            fun line(label: String, v: String, color: Color = C.text, bold: Boolean = false) = Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                Text(label, color = if (bold) C.text else C.muted, fontSize = 12.sp, fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                Text(v, style = num.copy(fontSize = 12.sp, fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium, color = color))
+            }
+            line("Total trade", fmtUsd(total, true), pnlColor(total), bold = true)
+            line("Unrealized PnL", fmtUsd(p.pnlAt(mark), true), pnlColor(p.pnlAt(mark)))
+            line("Gross realized PnL", fmtUsd(p.realizedPnl, true), pnlColor(p.realizedPnl))
+            line("Fees (paid)", fmtUsd(-p.fees, true), if (p.fees > 0) C.down else C.text)
+            line("Swap fees", fmtUsd(p.funding, true), pnlColor(p.funding))
+            line("Breakeven price", fmtPrice(p.breakeven))
+            if (Split.pct < 100) line("Your share (${Split.pct}%)", fmtUsd(net(total), true), pnlColor(total))
+            Text(if (total >= 0) "Net positive after costs." else "Net PnL turns positive once the mark passes breakeven.",
+                color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

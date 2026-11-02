@@ -171,13 +171,8 @@ fun SettingsScreen(repo: Repo) {
                 AppInput("Margin used %", mp, { mp = it; it.toIntOrNull()?.takeIf { v -> v in 10..100 }?.let { v -> repo.prefs.marginAlertPct = v } }, Modifier.fillMaxWidth(), numeric = true)
             }
             var np by remember { mutableStateOf(repo.prefs.notifyPnl) }
-            Toggle("PnL steps", "Each position, every $ step or % step", np, ALERTS) { np = it; repo.prefs.notifyPnl = it; if (it) ask() }
-            if (np) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                var su by remember { mutableStateOf(repo.prefs.pnlStepUsd.toString()) }
-                var sp by remember { mutableStateOf(repo.prefs.pnlStepPct.toString()) }
-                AppInput("Every $ (0 = off)", su, { su = it; repo.prefs.pnlStepUsd = it.toDoubleOrNull()?.toInt()?.coerceAtLeast(0) ?: 0 }, Modifier.weight(1f), numeric = true)
-                AppInput("Every % (0 = off)", sp, { sp = it; repo.prefs.pnlStepPct = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.weight(1f), numeric = true)
-            }
+            Toggle("PnL steps", "Each position, when PnL moves a step", np, ALERTS) { np = it; repo.prefs.notifyPnl = it; if (it) ask() }
+            if (np) PnlAlertSettings(repo)
         }
 
         Section("Chart", DATA, androidx.compose.material.icons.Icons.Filled.Bolt) {
@@ -315,3 +310,77 @@ private fun Note(text: String) = Text(text, color = C.muted, fontSize = 11.sp, l
 
 @Composable
 private fun Divider() = Box(Modifier.padding(vertical = 6.dp).fillMaxWidth().height(1.dp).background(C.line))
+/** Ready-made step sets, from few alerts to many. Values: $, % of position, % of equity, % of loss limit. */
+private val PNL_PRESETS = listOf(
+    "Calm" to listOf(0f, 0f, 1f, 25f),
+    "Normal" to listOf(0f, 2f, 0.5f, 10f),
+    "Active" to listOf(0f, 1f, 0.25f, 5f),
+    "Scalp" to listOf(0f, 0.5f, 0.1f, 2.5f),
+)
+
+@Composable
+private fun PnlAlertSettings(repo: Repo) {
+    val p = repo.prefs
+    var preset by remember { mutableStateOf(p.pnlPreset) }
+    // Bumped when a preset is applied, so the inputs pick up the new values.
+    var ver by remember { mutableStateOf(0) }
+    Note("Steps are counted per position. Any step that is on can fire; 0 turns it off.")
+    Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((name, v) in PNL_PRESETS) Seg(name, preset == name, ALERTS) {
+            p.pnlStepUsd = v[0].toInt(); p.pnlStepPct = v[1]; p.pnlStepEq = v[2]; p.pnlStepRisk = v[3]
+            preset = name; p.pnlPreset = name; ver++
+        }
+        Seg("Custom", preset == "custom", ALERTS) { preset = "custom"; p.pnlPreset = "custom" }
+    }
+    fun custom() { if (preset != "custom") { preset = "custom"; p.pnlPreset = "custom" } }
+
+    // Largest open position, to show what each step is worth in dollars right now.
+    val marks = repo.market.marks.value
+    val big = activeAccounts(repo.account.accounts.value, includeComp = true).flatMap { s -> s.positions.values.map { s to it } }
+        .maxByOrNull { (_, pos) -> pos.size * (marks[pos.feedKey] ?: pos.entryPrice) }
+    val risk = big?.let { com.alex.mfppro.data.riskOf(it.first, marks) }
+    val cost = big?.second?.let { it.size * it.entryPrice }
+    val allowance = risk?.let { (if (it.bindingIsDaily) it.dailyAllowance else it.ddAllowance)?.takeIf { a -> a > 0 } }
+    fun worth(base: Double?, pct: String) = pct.toDoubleOrNull()?.takeIf { it > 0 && base != null }?.let { "≈ " + fmtUsd(base!! * it / 100) }
+
+    androidx.compose.runtime.key(ver) {
+        var su by remember { mutableStateOf(p.pnlStepUsd.toString()) }
+        var sp by remember { mutableStateOf(p.pnlStepPct.toString()) }
+        var se by remember { mutableStateOf(p.pnlStepEq.toString()) }
+        var sr by remember { mutableStateOf(p.pnlStepRisk.toString()) }
+        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f)) {
+                AppInput("Every $", su, { su = it; custom(); p.pnlStepUsd = it.toDoubleOrNull()?.toInt()?.coerceAtLeast(0) ?: 0 }, Modifier.fillMaxWidth(), numeric = true)
+                StepHint("Fixed dollars")
+            }
+            Column(Modifier.weight(1f)) {
+                AppInput("Every % of position", sp, { sp = it; custom(); p.pnlStepPct = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
+                StepHint(worth(cost, sp) ?: "Price move on entry value")
+            }
+        }
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f)) {
+                AppInput("Every % of equity", se, { se = it; custom(); p.pnlStepEq = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
+                StepHint(worth(risk?.equity, se) ?: "Share of account equity")
+            }
+            Column(Modifier.weight(1f)) {
+                AppInput("Every % of loss limit", sr, { sr = it; custom(); p.pnlStepRisk = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
+                StepHint(worth(allowance, sr) ?: "Share of daily loss / max DD")
+            }
+        }
+    }
+    if (big != null) Note("≈ values use ${big.second.symbol} (${fmtUsd(cost ?: 0.0)}) on ${accountName(big.first)}, equity ${fmtUsd(risk?.equity ?: 0.0)}.")
+
+    Label("Notify on")
+    var side by remember { mutableStateOf(p.pnlSide) }
+    Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Seg("Both", side == "both", ALERTS) { side = "both"; p.pnlSide = "both" }
+        Seg("Losses only", side == "loss", C.down) { side = "loss"; p.pnlSide = "loss" }
+        Seg("Profits only", side == "profit", C.up) { side = "profit"; p.pnlSide = "profit" }
+    }
+    var net by remember { mutableStateOf(p.pnlNet) }
+    Toggle("Net PnL", "Count after fees and swap, not price PnL", net, ALERTS) { net = it; p.pnlNet = it }
+}
+
+@Composable
+private fun StepHint(text: String) = Text(text, color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp, top = 2.dp))

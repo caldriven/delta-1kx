@@ -53,6 +53,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.animation.togetherWith
 import androidx.compose.ui.unit.sp
 import com.alex.mfppro.ui.C
+import com.alex.mfppro.ui.TradeResultBanner
 import com.alex.mfppro.ui.BottomBar
 import com.alex.mfppro.ui.NavItem
 import com.alex.mfppro.ui.MfpTheme
@@ -205,6 +206,8 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 com.alex.mfppro.ui.Overlay.content?.invoke()
+                // Order results above everything, panels and dialogs' backdrop included.
+                TradeResultBanner(repo)
                 }
             }
         }

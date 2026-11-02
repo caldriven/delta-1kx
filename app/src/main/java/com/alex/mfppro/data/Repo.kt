@@ -67,6 +67,11 @@ class Repo(ctx: Context) {
     val messages = _messages.asSharedFlow()
     fun postMessage(text: String) { _messages.tryEmit(text) }
 
+    /** What happened to a trading action, for the result banner. [ok] null = still in progress (queued). */
+    data class TradeEvent(val what: String, val ok: Boolean?, val status: String, val detail: String, val time: Long = System.currentTimeMillis())
+    private val _tradeEvents = MutableSharedFlow<TradeEvent>(extraBufferCapacity = 16)
+    val tradeEvents = _tradeEvents.asSharedFlow()
+
     private val _markets = MutableStateFlow<List<Market>>(emptyList())
     val markets = _markets.asStateFlow()
     private val _selected = MutableStateFlow(prefs.selectedAccounts)
@@ -131,16 +136,30 @@ class Repo(ctx: Context) {
 
     private fun requireKey(): String? = _apiKey.value.also { if (it == null) _messages.tryEmit("Add an API key first") }
 
+    /** Every trading result goes to the result banner: green tick, red cross, or amber while queued. */
     private fun report(what: String, r: TradeResult): TradeResult {
-        _messages.tryEmit(
+        _tradeEvents.tryEmit(
             when (r) {
-                is TradeResult.Ok -> "$what: " + (r.order?.status ?: if (r.queued) "queued" else "done")
-                // Plain words for the rejections a trader can act on.
-                is TradeResult.Rejected -> "$what rejected: " + when (r.code) {
-                    "exposure_cap" -> "market exposure cap reached — size down or close some first"
-                    "venue_conflict" -> "you already hold this on another venue — close that first or switch venue"
-                    else -> r.message
+                is TradeResult.Ok -> {
+                    val st = r.order?.status?.lowercase()
+                    when {
+                        // Accepted by the API but the engine turned it down.
+                        st == "rejected" || st == "canceled" || st == "cancelled" || st == "expired" ->
+                            TradeEvent(what, false, st.replaceFirstChar { it.uppercase() }, "The order was not executed")
+                        r.queued -> TradeEvent(what, null, "Queued", "Waiting for the venue")
+                        else -> TradeEvent(what, true, when (st) {
+                            "filled" -> "Filled"; "open", "new", "resting" -> "Placed"; "partially_filled" -> "Partly filled"
+                            "triggered", "pending" -> "Pending"; null -> "Done"; else -> st.replace('_', ' ').replaceFirstChar { it.uppercase() }
+                        }, r.order?.let { o -> listOfNotNull(o.side.uppercase().ifBlank { null }, o.type.replace('_', ' ').ifBlank { null }, (o.limitPrice ?: o.triggerPrice)?.let { "@ " + String.format(java.util.Locale.US, "%s", java.math.BigDecimal(it).stripTrailingZeros().toPlainString()) }).joinToString(" ") } ?: "")
+                    }
                 }
+                // Plain words for the rejections a trader can act on.
+                is TradeResult.Rejected -> TradeEvent(what, false, "Rejected", when (r.code) {
+                    "exposure_cap" -> "Market exposure cap reached: size down or close some first"
+                    "venue_conflict" -> "You already hold this on another venue: close that first or switch venue"
+                    "network" -> "No answer from MFP. Check open orders before retrying. (${r.message})"
+                    else -> r.message
+                } + if (r.code !in setOf("exposure_cap", "venue_conflict", "network")) "  [${r.code}]" else "")
             }
         )
         refreshRiskSoon()

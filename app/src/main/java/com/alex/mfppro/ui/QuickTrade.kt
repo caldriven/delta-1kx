@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -57,14 +58,44 @@ import kotlinx.serialization.json.put
 import java.util.Locale
 import java.util.UUID
 
+/** Limit mode of the quick panel. Its price is a line on the chart that can be dragged. */
+class LimitDraft {
+    var on by mutableStateOf(false)
+    var price by mutableStateOf<Double?>(null)
+    var buy by mutableStateOf(true)
+    /** Price decimals picked for this market; null = the market's own tick. */
+    var decimals by mutableStateOf<Int?>(null)
+
+    /** [px] rounded to the picked decimals, never finer than the tick. */
+    fun snap(px: Double, m: Market): Double {
+        val d = decimals ?: return snapTick(px, m)
+        return if (d >= tickDecimals(m)) snapTick(px, m) else java.math.BigDecimal(px).setScale(d, java.math.RoundingMode.HALF_UP).toDouble()
+    }
+
+    /** One step of the − / + buttons at the picked decimals. */
+    fun step(m: Market, px: Double): Double {
+        val d = decimals
+        return if (d != null && d < tickDecimals(m)) Math.pow(10.0, -d.toDouble()) else if (m.tickSize > 0) m.tickSize else px * 0.0005
+    }
+}
+
+/** Decimals of the market's tick (0.001 -> 3); 6 when the market has none. */
+fun tickDecimals(m: Market): Int =
+    if (m.tickSize > 0) java.math.BigDecimal(m.tickSize.toString()).stripTrailingZeros().scale().coerceAtLeast(0) else 6
+
+/** Price snapped to the market's tick. */
+fun snapTick(px: Double, m: Market): Double =
+    if (m.tickSize > 0) java.math.BigDecimal(px / m.tickSize).setScale(0, java.math.RoundingMode.HALF_UP).toDouble() * m.tickSize
+    else java.math.BigDecimal(px).round(java.math.MathContext(6)).toDouble()
+
 /**
- * One-tap trading for the position-management view. Each button opens a market
- * position worth (available balance × leverage), shown on the button, at 1x,
- * half of max and max leverage. Plus reduce-only and a 25/50/100% close row
- * for the trading account's position in this market.
+ * One-tap trading for the position-management view. Each button opens a position
+ * worth (available balance × leverage), shown on the button, at market or, in Limit
+ * mode, as a limit order at the [draft] price. Plus reduce-only and a 25/50/100%
+ * close row for the trading account's position in this market.
  */
 @Composable
-fun QuickTrade(repo: Repo, market: Market) {
+fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     val marks by repo.market.marks.collectAsStateWithLifecycle()
     val books by repo.market.books.collectAsStateWithLifecycle()
     val acc = rememberTradeAccount(repo) ?: return
@@ -106,8 +137,11 @@ fun QuickTrade(repo: Repo, market: Market) {
     // Reduce only needs something to reduce: an open position, traded against.
     fun sideOk(buy: Boolean) = !reduceOnly || (held != null && buy != held.isLong)
 
+    LaunchedEffect(buySide) { draft.buy = buySide }
+    val limitPx = draft.price?.takeIf { draft.on }
+
     fun send(buy: Boolean, mult: Double) {
-        val px = (if (buy) book?.asks?.firstOrNull()?.px else book?.bids?.firstOrNull()?.px) ?: mark ?: return
+        val px = limitPx ?: (if (buy) book?.asks?.firstOrNull()?.px else book?.bids?.firstOrNull()?.px) ?: mark ?: return
         var size = roundSize(minOf(available * effMult(mult), capLeft ?: Double.MAX_VALUE) / px, market)
         // Reduce only can't exceed the open position.
         if (reduceOnly && held != null) size = minOf(size, held.size)
@@ -117,7 +151,9 @@ fun QuickTrade(repo: Repo, market: Market) {
         }
         // An open position keeps its leverage; the multiple only sets the size.
         val lev = held?.leverage?.toInt() ?: kotlin.math.ceil(mult).toInt()
-        val word = if (buy) "Long" else "Short"
+        val word = (if (limitPx != null) "Limit " else "") + if (buy) "Long" else "Short"
+        // A limit at or through the touch fills straight away; the server wants that acknowledged.
+        val crosses = limitPx != null && (if (buy) limitPx >= (book?.asks?.firstOrNull()?.px ?: Double.MAX_VALUE) else limitPx <= (book?.bids?.firstOrNull()?.px ?: 0.0))
         val run: suspend () -> Unit = {
             if (held == null) repo.prefs.setLeverage(market.marketId, lev)
             repo.placeOrder("$word ${market.symbol}", buildJsonObject {
@@ -126,13 +162,19 @@ fun QuickTrade(repo: Repo, market: Market) {
                 put("side", if (buy) "buy" else "sell"); put("size", size)
                 put("leverage", lev); put("margin_mode", held?.marginMode ?: repo.prefs.marginMode)
                 if (reduceOnly) put("reduce_only", true)
-                put("type", "market"); put("expected_price", px)
-                put("slippage_tolerance_bps", repo.prefs.slippageBps)
+                if (limitPx != null) {
+                    put("type", "limit"); put("limit_price", limitPx)
+                    if (crosses) put("marketable_limit_acknowledged", true)
+                } else {
+                    put("type", "market"); put("expected_price", px)
+                    put("slippage_tolerance_bps", repo.prefs.slippageBps)
+                }
             })
         }
         // How far price can move against this position before the account hits its floor.
         val breachMove = riskOf(acc, marks).room?.takeIf { usd > 0 }?.let { it / usd * 100 }
-        val detail = "Market ${if (buy) "buy" else "sell"} ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
+        val detail = (if (limitPx != null) "Limit ${if (buy) "buy" else "sell"} at ${fmtPrice(limitPx)}" + (if (crosses) " (crosses the book: fills now)" else "") else "Market ${if (buy) "buy" else "sell"}") +
+            " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
             (if (reduceOnly) ", reduce only" else "") + " on ${accountName(acc)}." +
             (if (!reduceOnly && breachMove != null) String.format(Locale.US, "\nA %.2f%% move against it reaches your drawdown floor.", breachMove) else "")
         if (repo.prefs.confirmOrders) ask = Triple("$word ${market.symbol} ≈ ${fmtUsd(usd)}", detail, run)
@@ -140,20 +182,51 @@ fun QuickTrade(repo: Repo, market: Market) {
     }
 
     Column(
-        Modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.panel)
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+        Modifier.padding(horizontal = 8.dp, vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        // Side switch with reduce-only beside it; margin in use lives under the account line.
+        // Row 1: Long | Short as one switch, both sides always visible.
+        SlideSwitch(listOf("Long", "Short"), if (buySide) 0 else 1, listOf(C.up, C.down), Modifier.fillMaxWidth(), height = 32.dp,
+            icons = listOf(Icons.AutoMirrored.Filled.TrendingUp, Icons.AutoMirrored.Filled.TrendingDown)) { buySide = it == 0 }
+        // Row 2: Market | Limit with reduce-only beside it.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) { SideToggle(buySide) { buySide = it } }
+            SlideSwitch(listOf("Market", "Limit"), if (draft.on) 1 else 0, listOf(C.accent, C.accent), Modifier.weight(1f), height = 28.dp) { i ->
+                if (i == 1 && draft.price == null) draft.price = ((if (buySide) book?.bids?.firstOrNull()?.px else book?.asks?.firstOrNull()?.px) ?: mark)?.let { draft.snap(it, market) }
+                draft.on = i == 1
+            }
             Spacer(Modifier.width(6.dp))
-            Box(Modifier.padding(top = 6.dp)) { ReduceChip(reduceOnly) { reduceOnly = !reduceOnly } }
+            ReduceChip(reduceOnly) { reduceOnly = !reduceOnly }
         }
-        Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        // Row 3, Limit only: price with − / + (or drag the line on the chart) and the decimals it snaps to.
+        if (draft.on) Row(verticalAlignment = Alignment.CenterVertically) {
+            val p = draft.price
+            val tickDec = tickDecimals(market)
+            val dec = draft.decimals ?: tickDec
+            Nudge("−") { p?.let { draft.price = draft.snap(it - draft.step(market, it), market) } }
+            Row(Modifier.weight(1f).padding(horizontal = 8.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.Center) {
+                Text(p?.let { java.math.BigDecimal(it).setScale(dec, java.math.RoundingMode.HALF_UP).toPlainString() } ?: "—",
+                    style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = if (buySide) C.up else C.down), maxLines = 1)
+                Spacer(Modifier.width(6.dp))
+                Text(p?.let { pp -> mark?.let { m -> fmtPct((pp / m - 1) * 100) } } ?: "", style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.padding(bottom = 2.dp))
+            }
+            Nudge("+") { p?.let { draft.price = draft.snap(it + draft.step(market, it), market) } }
+            Spacer(Modifier.width(6.dp))
+            // Decimals: the market's tick, then 1, 2, 3 fewer; remembered per market.
+            Text("${dec} dp", style = num.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (dec < tickDec) C.accent else C.text),
+                modifier = Modifier.height(28.dp).clip(RoundedCornerShape(8.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(8.dp))
+                    .clickable {
+                        val next = if (dec <= maxOf(0, tickDec - 3)) tickDec else dec - 1
+                        draft.decimals = next.takeIf { it < tickDec }
+                        repo.prefs.setPriceDecimals(market.marketId, draft.decimals)
+                        p?.let { draft.price = draft.snap(it, market) }
+                    }.wrapContentHeight(Alignment.CenterVertically).padding(horizontal = 10.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             val buy = buySide
             presets.forEach { mult ->
                 val sn = snap
-                val px = if (buy) sn?.ask else sn?.bid
+                val px = limitPx ?: if (buy) sn?.ask else sn?.bid
                 var usd = minOf((sn?.available ?: available) * effMult(mult), capLeft ?: Double.MAX_VALUE)
                 if (reduceOnly && held != null && px != null) usd = minOf(usd, held.size * px)
                 // Net exposure in this market after the fill decides where each floor is hit.
@@ -169,8 +242,8 @@ fun QuickTrade(repo: Repo, market: Market) {
                 ) { send(buy, mult) }
             }
         }
-        if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-        if (held != null) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp)
+        if (held != null) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             for (f in listOf(0.25, 0.5, 1.0)) {
                 val pct = (f * 100).toInt()
                 Act(if (f == 1.0) "Close all" else "Close $pct%", color = if (f == 1.0) Color.White else C.text, fill = if (f == 1.0) C.down.copy(alpha = 0.85f) else null,
@@ -205,69 +278,86 @@ private fun floorPrice(px: Double?, net: Double, room: Double): Double? {
 /** Size button: position value first, then the leverage multiple and where the floor would be hit. */
 @Composable
 private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    // Fixed height with the floor line always reserved, so every button in the row lines up.
+    // Value first and largest; the multiple sits beside it small, the floor price under it.
     Column(
-        modifier.clip(RoundedCornerShape(8.dp)).background(color.copy(alpha = if (enabled) 0.14f else 0.05f))
+        modifier.height(40.dp).clip(RoundedCornerShape(8.dp)).background(color.copy(alpha = if (enabled) 0.14f else 0.05f))
             .border(1.dp, color.copy(alpha = if (enabled) 0.55f else 0.2f), RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, onClick = onClick).padding(vertical = 5.dp),
+            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        Text(value, style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (enabled) C.text else C.muted), maxLines = 1)
-        Text(title, color = if (enabled) color else C.muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (enabled) C.text else C.muted), maxLines = 1)
+            Spacer(Modifier.width(4.dp))
+            Text(title, color = if (enabled) color else C.muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(bottom = 1.dp))
+        }
         // Whichever floor price is nearer is the one that breaches first.
         val near = listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "DD" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
-        near?.let { (k, v) -> Text("$k " + fmtPrice(v), style = num.copy(fontSize = 9.sp, color = C.down), maxLines = 1) }
+        Text(near?.let { (k, v) -> "$k " + fmtPrice(v) } ?: "no floor in reach", style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
     }
+}
+
+/**
+ * Two-way switch with both options always visible: a pill in the active option's colour slides
+ * under it. Tap a side, or swipe across, to change.
+ */
+@Composable
+fun SlideSwitch(
+    options: List<String>, selected: Int, colors: List<Color>, modifier: Modifier = Modifier,
+    height: androidx.compose.ui.unit.Dp = 40.dp, icons: List<androidx.compose.ui.graphics.vector.ImageVector>? = null, onSelect: (Int) -> Unit,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val pick by rememberUpdatedState(onSelect)
+    val cur by rememberUpdatedState(selected)
+    androidx.compose.foundation.layout.BoxWithConstraints(
+        modifier.height(height).clip(shape).background(C.bg).border(1.dp, C.line, shape).padding(3.dp)
+            .pointerInput(Unit) {
+                var acc = 0f
+                detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragEnd = {
+                    if (kotlin.math.abs(acc) > 40.dp.toPx()) pick(if (acc > 0) (cur + 1).coerceAtMost(1) else (cur - 1).coerceAtLeast(0))
+                }) { ch, dx -> ch.consume(); acc += dx }
+            },
+    ) {
+        val w = maxWidth / options.size
+        val x by androidx.compose.animation.core.animateDpAsState(w * selected, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 500f), label = "pill")
+        val col by androidx.compose.animation.animateColorAsState(colors[selected], label = "pillCol")
+        Box(Modifier.offset(x = x).width(w).fillMaxHeight().clip(RoundedCornerShape(8.dp)).background(col.copy(alpha = 0.22f)).border(1.dp, col.copy(alpha = 0.8f), RoundedCornerShape(8.dp)))
+        Row(Modifier.fillMaxSize()) {
+            options.forEachIndexed { i, label ->
+                val on = i == selected
+                val tint by androidx.compose.animation.animateColorAsState(if (on) colors[i] else C.muted, label = "optTint")
+                Row(
+                    Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(8.dp)).clickable { pick(i) },
+                    horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    icons?.getOrNull(i)?.let { Icon(it, null, tint = tint, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)) }
+                    Text(label, color = tint, fontSize = if (height >= 44.dp) 15.sp else 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+/** Small square − / + button for nudging a price by one tick. */
+@Composable
+private fun Nudge(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(8.dp)).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, color = C.text, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
 }
 
 @Composable
 private fun ReduceChip(on: Boolean, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(7.dp)
+    val shape = RoundedCornerShape(10.dp)
     Row(
-        Modifier.clip(shape).background(if (on) C.accent.copy(alpha = 0.18f) else C.panel2)
-            .border(1.dp, if (on) C.accent else C.line, shape).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 5.dp),
+        Modifier.height(28.dp).clip(shape).background(if (on) C.accent.copy(alpha = 0.18f) else C.panel2)
+            .border(1.dp, if (on) C.accent else C.line, shape).clickable(onClick = onClick).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Filled.UnfoldLess, null, tint = if (on) C.accent else C.muted, modifier = Modifier.size(14.dp))
         Spacer(Modifier.width(4.dp))
         Text("Reduce", color = if (on) C.accent else C.text, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
-/**
- * One swap button: shows the side you're on in its colour; tap (or swipe) flips
- * it, with the label sliding out and the other side sliding in.
- */
-@Composable
-private fun SideToggle(buy: Boolean, onChange: (Boolean) -> Unit) {
-    val shape = RoundedCornerShape(10.dp)
-    val col by androidx.compose.animation.animateColorAsState(if (buy) C.up else C.down, androidx.compose.animation.core.tween(220), label = "sideCol")
-    val change by androidx.compose.runtime.rememberUpdatedState(onChange)
-    val cur by androidx.compose.runtime.rememberUpdatedState(buy)
-    Box(
-        Modifier.padding(top = 6.dp).fillMaxWidth().height(40.dp).clip(shape).background(col.copy(alpha = 0.18f)).border(1.dp, col.copy(alpha = 0.75f), shape)
-            .pointerInput(Unit) { detectTapGestures { change(!cur) } }
-            .pointerInput(Unit) {
-                var acc = 0f
-                // A deliberate swipe (over a third of the button) is needed, so a brush while scrolling never flips the side.
-                detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragEnd = { if (kotlin.math.abs(acc) > maxOf(80.dp.toPx(), size.width / 3f)) change(!cur) }) { ch, dx -> ch.consume(); acc += dx }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        androidx.compose.animation.AnimatedContent(
-            buy, label = "side",
-            transitionSpec = {
-                val dir = if (targetState) -1 else 1
-                (androidx.compose.animation.slideInHorizontally { it * dir / 2 } + androidx.compose.animation.fadeIn())
-                    .togetherWith(androidx.compose.animation.slideOutHorizontally { -it * dir / 2 } + androidx.compose.animation.fadeOut())
-            },
-        ) { b ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (b) Icons.AutoMirrored.Filled.TrendingUp else Icons.AutoMirrored.Filled.TrendingDown, null, tint = if (b) C.up else C.down, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (b) "Long" else "Short", color = if (b) C.up else C.down, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-        // Swap hint at the right edge.
-        Text("⇄", color = col.copy(alpha = 0.8f), fontSize = 16.sp, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 14.dp))
     }
 }

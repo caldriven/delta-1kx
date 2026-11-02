@@ -269,6 +269,20 @@ fun MarketLogo(m: Market, cls: String, size: Dp = 34.dp) {
     RoundImage(Logos.ticker(m.symbol, cls), m.symbol, size)
 }
 
+/** Ticker logo from a coin alone, for rows (positions) that have no Market at hand. */
+@Composable
+fun CoinLogo(coin: String, provider: String, size: Dp = 18.dp) {
+    val tile = Logos.tile(coin)
+    if (tile != null) {
+        Box(Modifier.size(size).clip(CircleShape).background(Color(tile.bg)), contentAlignment = Alignment.Center) {
+            Text(tile.text, color = Color(tile.fg), fontWeight = FontWeight.Bold, fontSize = (size.value * if (tile.text.length > 2) 0.3f else 0.4f).sp, maxLines = 1)
+        }
+        return
+    }
+    // Ostium lists stocks and FX; everything else here is crypto.
+    RoundImage(Logos.ticker(coin, if (provider == "ostium") "Stocks" else "Crypto"), coin, size)
+}
+
 @Composable
 private fun RoundImage(url: String?, name: String, size: Dp) {
     val fallback = @Composable {

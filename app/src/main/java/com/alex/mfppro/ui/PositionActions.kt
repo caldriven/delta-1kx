@@ -3,6 +3,11 @@ package com.alex.mfppro.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -231,29 +236,141 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
         )
     }
 
-    if (limitOpen) {
-        var pxText by remember { mutableStateOf(mark?.let(::plain) ?: "") }
-        var pctText by remember { mutableStateOf("100") }
-        val px = pxText.toDoubleOrNull()
-        val frac = (pctText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0) / 100
-        AlertDialog(
-            onDismissRequest = { limitOpen = false }, containerColor = C.panel,
-            title = { Text("Limit close ${p.symbol}", color = C.text) },
-            text = {
-                Column {
-                    NumField("Price", pxText, { pxText = it }, Modifier.fillMaxWidth())
-                    NumField("% of position", pctText, { pctText = it }, Modifier.fillMaxWidth())
-                    px?.let { Info("PnL", fmtUsd(p.pnlAt(it) * frac, true), pnlColor(p.pnlAt(it))) }
+    if (limitOpen) LimitCloseDialog(repo, p, mark, onDismiss = { limitOpen = false }) { frac, px ->
+        limitOpen = false
+        scope.launch { busy = true; repo.closePosition(p, frac, limitPrice = px); busy = false }
+    }
+}
+
+/**
+ * Reduce-only limit close: how much (slider, snaps at quarters) and where (slider centred on the
+ * mid, ± a chosen range, or drag the line on the chart), with the estimated result after fees.
+ */
+@Composable
+private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: () -> Unit, onPlace: (Double, Double) -> Unit) {
+    val books by repo.market.books.collectAsStateWithLifecycle()
+    val book = books[p.feedKey]
+    val bid = book?.bids?.firstOrNull()?.px; val ask = book?.asks?.firstOrNull()?.px
+    val mid = if (bid != null && ask != null) (bid + ask) / 2 else mark ?: p.entryPrice
+    var frac by remember { mutableStateOf(1.0) }
+    var range by remember { mutableStateOf(2.0) }
+    // Start on the profit side of the mid, a quarter of the range out, so it rests rather than fills.
+    var offPct by remember { mutableStateOf(if (p.isLong) 0.5 else -0.5) }
+    val px = roundTick(mid * (1 + offPct / 100))
+    val closeSize = p.size * frac
+    // Fee rate as this position has paid so far (fees over entry notional), else a typical taker rate.
+    val feeRate = (p.fees / (p.size * p.entryPrice)).takeIf { it > 0 && it < 0.01 } ?: 0.0005
+    val gross = p.pnlAt(px) * frac
+    val fee = closeSize * px * feeRate
+    // The closed part's share of fees and swap already on the position.
+    val carried = (p.realizedPnl - p.fees + p.funding) * frac
+    val net = gross - fee + carried
+    // Closing a long with a sell below the bid (or a short with a buy above the ask) fills at once.
+    val crosses = if (p.isLong) bid != null && px <= bid else ask != null && px >= ask
+    val ok = frac > 0 && closeSize * px >= 1.0
+
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = C.panel,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Limit close", color = C.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(6.dp))
+                Text(ticker(p.symbol, p.provider), color = C.muted, fontSize = 14.sp)
+                Spacer(Modifier.width(6.dp))
+                Tag("Reduce only", C.accent)
+            }
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                val candles by repo.market.candles.collectAsStateWithLifecycle()
+                androidx.compose.runtime.DisposableEffect(p.feedKey) {
+                    val subs = listOf(com.alex.mfppro.data.Sub("candles", p.provider, p.coin, "5m"), com.alex.mfppro.data.Sub("books", p.provider, p.coin))
+                    subs.forEach { repo.market.acquire(it) }
+                    onDispose { subs.forEach { repo.market.release(it) } }
                 }
+                val col = if (gross >= 0) C.up else C.down
+                CandleChart(
+                    candles[com.alex.mfppro.data.candleKey(p.provider, p.coin, "5m")].orEmpty().withLive(mark),
+                    listOf(
+                        PriceLine(p.entryPrice, C.muted, "Entry", solid = true),
+                        PriceLine(px, col, "Close", parts = listOf("Close ${(frac * 100).toInt()}%", fmtUsd(gross, true)),
+                            drag = LineDrag({ v -> "Close ${fmtPrice(v)} · ${fmtUsd(p.pnlAt(v) * frac, true)}" to (if (p.pnlAt(v) >= 0) C.up else C.down) }) { v ->
+                                val o = (v / mid - 1) * 100
+                                if (kotlin.math.abs(o) > range) range = listOf(0.5, 2.0, 5.0, 10.0).firstOrNull { it >= kotlin.math.abs(o) } ?: 10.0
+                                offPct = o.coerceIn(-range, range)
+                            }),
+                    ),
+                    Modifier.fillMaxWidth().height(190.dp),
+                )
+
+                // ---- Amount ----
+                Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                    Text("Amount", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("${(frac * 100).toInt()}% · ${fmtUsd(closeSize * px)}", style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                }
+                PctSlider(frac.toFloat(), C.accent, Modifier.padding(top = 2.dp)) { frac = it.toDouble().coerceAtLeast(0.01) }
+
+                // ---- Price, centred on the mid ----
+                Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                    Text("Price", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(fmtPrice(px), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                    // Coloured by what it means for this position: profit side or loss side.
+                    Text("  " + fmtPct(offPct) + " mid", style = num.copy(fontSize = 11.sp, color = if (p.pnlAt(px) >= p.pnlAt(mid)) C.up else C.down))
+                }
+                CenterSlider((offPct / range).toFloat(), Modifier.padding(top = 4.dp)) { offPct = it * range }
+                Row(Modifier.fillMaxWidth()) {
+                    Text(fmtPct(-range), style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.weight(1f))
+                    Text("mid ${fmtPrice(mid)}", style = num.copy(fontSize = 10.sp, color = C.muted))
+                    Text(fmtPct(range), style = num.copy(fontSize = 10.sp, color = C.muted), textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.weight(1f))
+                }
+                Row(Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Range %", color = C.muted, fontSize = 11.sp, maxLines = 1)
+                    for (r in listOf(0.5, 2.0, 5.0, 10.0)) Seg("±" + (if (r < 1) "0.5" else r.toInt().toString()), range == r, C.accent) {
+                        range = r; offPct = offPct.coerceIn(-r, r)
+                    }
+                    Seg("Mid", false, C.text) { offPct = 0.0 }
+                }
+                if (crosses) Text("Crosses the book: fills now at market", color = C.accent, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+
+                // ---- Result ----
+                Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.bg).padding(10.dp)) {
+                    Info("PnL on closed part", fmtUsd(gross, true), pnlColor(gross))
+                    Info(String.format(java.util.Locale.US, "Est. close fee (%.3f%%)", feeRate * 100), fmtUsd(-fee, true), C.down)
+                    if (carried != 0.0) Info("Its share of fees, swap, banked", fmtUsd(carried, true), pnlColor(carried))
+                    Info("Est. net", fmtUsd(net, true), pnlColor(net))
+                    if (frac < 1) Info("Left open", "${((1 - frac) * 100).toInt()}% · ${fmtUsd(p.size * (1 - frac) * px)}")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = ok, onClick = { onPlace(frac, px) }) {
+                Text("Place ${(frac * 100).toInt()}% at ${fmtPrice(px)}", color = if (ok) C.accent else C.muted, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = C.muted) } },
+    )
+}
+
+/** Slider from −1 to +1 with the zero mark in the middle; tap or drag. */
+@Composable
+private fun CenterSlider(value: Float, modifier: Modifier = Modifier, onChange: (Float) -> Unit) {
+    val cb by androidx.compose.runtime.rememberUpdatedState(onChange)
+    val line = C.line; val up = C.up; val down = C.down; val text = C.text
+    androidx.compose.foundation.Canvas(
+        modifier.fillMaxWidth().height(30.dp)
+            .pointerInput(Unit) { detectTapGestures { cb(((it.x / size.width) * 2 - 1).coerceIn(-1f, 1f)) } }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { ch, _ -> ch.consume(); cb(((ch.position.x / size.width) * 2 - 1).coerceIn(-1f, 1f)) }
             },
-            confirmButton = {
-                TextButton(enabled = px != null && frac > 0, onClick = {
-                    limitOpen = false
-                    scope.launch { busy = true; repo.closePosition(p, frac, limitPrice = px); busy = false }
-                }) { Text("Place", color = C.accent) }
-            },
-            dismissButton = { TextButton(onClick = { limitOpen = false }) { Text("Cancel", color = C.muted) } },
-        )
+    ) {
+        val r = 9.dp.toPx(); val y = size.height / 2; val w = size.width - r * 2
+        val cx = r + w / 2; val x = r + w * (value.coerceIn(-1f, 1f) + 1) / 2
+        val col = if (value >= 0) up else down
+        drawLine(line, Offset(r, y), Offset(r + w, y), 4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(col, Offset(cx, y), Offset(x, y), 4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(text, Offset(cx, y - 8.dp.toPx()), Offset(cx, y + 8.dp.toPx()), 2.dp.toPx())
+        drawCircle(Color.White, r, Offset(x, y))
+        drawCircle(col, r - 3.dp.toPx(), Offset(x, y))
     }
 }
 

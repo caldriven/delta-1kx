@@ -134,6 +134,9 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
 
     val mark = marks[market.feedKey]
     val book = books[market.feedKey]
+    // Limit prices filled in for you use the decimals picked for this market (Trade view, "dp" chip).
+    val dec = repo.prefs.priceDecimals(market.marketId)
+    fun px(v: Double) = plain(if (dec != null && dec < tickDecimals(market)) java.math.BigDecimal(v).setScale(dec, java.math.RoundingMode.HALF_UP).toDouble() else v)
     val limitPx = priceText.toDoubleOrNull()
     val startPx = startText.toDoubleOrNull(); val endPx = endText.toDoubleOrNull()
     val triggerPx = triggerText.toDoubleOrNull(); val capPx = capText.toDoubleOrNull()
@@ -291,12 +294,18 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     Text(if (isolated) "Isolated" else "Cross", color = C.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     Text("⇅", color = C.muted)
                 }
-                Field(Modifier.weight(1f)) {
-                    Text("−", color = if (held == null) C.text else C.muted, fontSize = 18.sp,
-                        modifier = Modifier.clickable(enabled = held == null) { lev = (lev - 1).coerceAtLeast(1) }.padding(horizontal = 6.dp))
-                    Text("${lev}×", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold), textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
-                    Text("+", color = if (held == null) C.text else C.muted, fontSize = 18.sp,
-                        modifier = Modifier.clickable(enabled = held == null) { lev = (lev + 1).coerceAtMost(maxLev) }.padding(horizontal = 6.dp))
+                // Full-height − / + targets; with a position open the leverage is the position's and can't change.
+                Row(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(10.dp)).background(C.bg), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.width(48.dp).fillMaxHeight().clickable(enabled = held == null && lev > 1) { lev = (lev - 1).coerceAtLeast(1) }, contentAlignment = Alignment.Center) {
+                        Text("−", color = if (held == null && lev > 1) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("${lev}×", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold))
+                        Text(if (held != null) "position's" else "max ${maxLev}×", color = C.muted, fontSize = 9.sp)
+                    }
+                    Box(Modifier.width(48.dp).fillMaxHeight().clickable(enabled = held == null && lev < maxLev) { lev = (lev + 1).coerceAtMost(maxLev) }, contentAlignment = Alignment.Center) {
+                        Text("+", color = if (held == null && lev < maxLev) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
             if (held == null) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -307,7 +316,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
 
             Row(Modifier.padding(top = 10.dp)) {
                 UnderTab("Market", !limit && !scaled && !stop && !chase, Modifier.weight(1f)) { pick("market") }
-                UnderTab("Limit", limit && !scaled, Modifier.weight(1f)) { pick("limit"); if (priceText.isBlank()) priceText = mark?.let(::plain) ?: "" }
+                UnderTab("Limit", limit && !scaled, Modifier.weight(1f)) { pick("limit"); if (priceText.isBlank()) priceText = mark?.let(::px) ?: "" }
                 UnderTab("Stop", stop, Modifier.weight(1f)) {
                     pick("stop")
                     // Default trigger 0.5% beyond the price on the breakout side.
@@ -381,7 +390,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     // Join our own side of the book: best bid for a buy, best ask for a sell.
                     TextButton(onClick = {
                         val best = if (buy) book?.bids?.firstOrNull()?.px else book?.asks?.firstOrNull()?.px
-                        priceText = (best ?: mark)?.let(::plain) ?: ""
+                        priceText = (best ?: mark)?.let(::px) ?: ""
                     }) { Text("Best", color = C.accent) }
                 }
                 if (marketable) Text("Crosses the book: fills immediately as a market order", color = C.accent, fontSize = 11.sp)

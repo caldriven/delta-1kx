@@ -68,8 +68,18 @@ data class Position(
     val marginMode: String = "cross",
     val liquidationPrice: Double? = null,
     val openedAt: Double = 0.0,
+    // Running totals on the open position: PnL already banked by partial closes, fees paid, funding (swap) received (+) or paid (-).
+    val realizedPnl: Double = 0.0,
+    val fees: Double = 0.0,
+    val funding: Double = 0.0,
 ) {
     val isLong get() = side == "long"
+
+    /** Whole-trade result at [mark]: open PnL plus banked PnL, after fees and swap. */
+    fun netAt(mark: Double) = pnlAt(mark) + realizedPnl - fees + funding
+
+    /** Mark where [netAt] turns zero. */
+    val breakeven get() = (entryPrice + (fees - funding - realizedPnl) / size.coerceAtLeast(1e-12) * (if (isLong) 1 else -1)).takeIf { it > 0 }
 
     /** Positions may carry a differently formatted market_id; venue + coin is the reliable match. */
     fun inMarket(m: Market) = marketId == m.marketId || (provider == m.provider && coin == m.coin)

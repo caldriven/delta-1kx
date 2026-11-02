@@ -203,6 +203,25 @@ class Prefs(ctx: Context) {
     var pnlStepPct: Float
         get() = plain.getFloat("pnl_step_pct", 1f)
         set(v) = plain.edit().putFloat("pnl_step_pct", v).apply()
+    /** PnL step as % of account equity (0 = off). */
+    var pnlStepEq: Float
+        get() = plain.getFloat("pnl_step_eq", 0f)
+        set(v) = plain.edit().putFloat("pnl_step_eq", v).apply()
+    /** PnL step as % of the binding loss allowance, daily or max DD (0 = off). */
+    var pnlStepRisk: Float
+        get() = plain.getFloat("pnl_step_risk", 0f)
+        set(v) = plain.edit().putFloat("pnl_step_risk", v).apply()
+    /** "both", "loss" or "profit". */
+    var pnlSide: String
+        get() = plain.getString("pnl_side", "both") ?: "both"
+        set(v) = plain.edit().putString("pnl_side", v).apply()
+    /** Count PnL after fees and swap instead of price PnL. */
+    var pnlNet: Boolean
+        get() = plain.getBoolean("pnl_net", false)
+        set(v) = plain.edit().putBoolean("pnl_net", v).apply()
+    var pnlPreset: String
+        get() = plain.getString("pnl_preset", "custom") ?: "custom"
+        set(v) = plain.edit().putString("pnl_preset", v).apply()
 
     var pickerSort: String
         get() = plain.getString("picker_sort", "24h") ?: "24h"
@@ -217,6 +236,20 @@ class Prefs(ctx: Context) {
     var corrWindow: String
         get() = plain.getString("corr_window", "H1") ?: "H1"
         set(v) = plain.edit().putString("corr_window", v).apply()
+
+    /** Price decimals for limit prices in one market (fewer than its tick allows); null = the tick. */
+    fun priceDecimals(marketId: String): Int? = plain.getInt("dec_$marketId", -1).takeIf { it >= 0 }
+    fun setPriceDecimals(marketId: String, v: Int?) = plain.edit().apply { if (v == null) remove("dec_$marketId") else putInt("dec_$marketId", v) }.apply()
+
+    /** Chart layers turned off: pnl (position box), exits (TP/SL), floors (DLL/DD), target, orders, fills. */
+    var chartHidden: Set<String>
+        get() = plain.getString("chart_hidden", "")!!.split(',').filter { it.isNotBlank() }.toSet()
+        set(v) = plain.edit().putString("chart_hidden", v.joinToString(",")).apply()
+
+    /** Trade view account card unfolded (rule lines shown). */
+    var accountOpen: Boolean
+        get() = plain.getBoolean("account_open", false)
+        set(v) = plain.edit().putBoolean("account_open", v).apply()
 
     /** Analysis view: correlation or special trades. */
     var analysisView: String

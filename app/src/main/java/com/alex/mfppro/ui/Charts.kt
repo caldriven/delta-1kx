@@ -78,6 +78,9 @@ data class PriceLine(
  */
 class PosBox(val pnl: String, val tp: LineDrag, val sl: LineDrag, val onReverse: () -> Unit, val onClose: () -> Unit)
 
+/** One of your past fills, marked on its candle: ▲ under it for a buy, ▼ over it for a sell. */
+data class FillMark(val time: Long, val buy: Boolean, val price: Double)
+
 /** A touch target drawn on the chart: either dragged to a price or tapped. */
 private class Hit(val rect: Rect, val drag: LineDrag? = null, val tap: (() -> Unit)? = null)
 
@@ -113,6 +116,7 @@ fun CandleChart(
     vpSince: Long? = null,
     sessions: SessionOpts? = null,
     crossKey: Int = 0,
+    fills: List<FillMark> = emptyList(),
     overlay: @Composable BoxScope.() -> Unit = {},
 ) {
     val tm = rememberTextMeasurer()
@@ -289,6 +293,31 @@ fun CandleChart(
                     val h = max(1f, y(min(c.o, c.c)) - top)
                     val bw = max(1f, barW * 0.7f)
                     drawRect(col, Offset(x - bw / 2, top), Size(bw, h))
+                }
+                // Your fills: buys as ▲ under the candle, sells as ▼ over it; several on one candle stack outward.
+                if (fills.isNotEmpty() && slice.size >= 2) {
+                    val step = slice[1].openTime - slice[0].openTime
+                    val first = slice.first().openTime
+                    val tri = max(4.dp.toPx(), min(barW * 0.45f, 7.dp.toPx()))
+                    val stack = HashMap<Pair<Int, Boolean>, Int>()
+                    for (f in fills) {
+                        if (f.time < first || f.time >= slice.last().openTime + step) continue
+                        val i = ((f.time - first) / step).toInt().coerceIn(0, slice.size - 1)
+                        val c = slice[i]
+                        val x = chartW - (slice.size - i + gap) * barW + barW / 2
+                        val n = stack.merge(i to f.buy, 1, Int::plus)!! - 1
+                        val pad = 4.dp.toPx() + n * (tri * 1.6f)
+                        val path = androidx.compose.ui.graphics.Path()
+                        if (f.buy) {
+                            val yTop = y(c.l) + pad
+                            path.moveTo(x, yTop); path.lineTo(x - tri, yTop + tri * 1.4f); path.lineTo(x + tri, yTop + tri * 1.4f)
+                        } else {
+                            val yBot = y(c.h) - pad
+                            path.moveTo(x, yBot); path.lineTo(x - tri, yBot - tri * 1.4f); path.lineTo(x + tri, yBot - tri * 1.4f)
+                        }
+                        path.close()
+                        drawPath(path, if (f.buy) C.up else C.down)
+                    }
                 }
             }
             val maxVol = slice.maxOf { it.v }.coerceAtLeast(1e-12)
