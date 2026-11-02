@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.HorizontalRule
+import androidx.compose.material.icons.filled.Reorder
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.StackedLineChart
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -173,6 +174,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         if (repo.prefs.confirmOrders || repo.prefs.confirmCloseAll) confirmAsk = a else tradeScope.launch { a.run() }
     }
     var showOpens by remember { mutableStateOf(repo.prefs.showOpens) }
+    var showPivots by remember { mutableStateOf(repo.prefs.showPivots) }
     var showVp by remember { mutableStateOf(repo.prefs.showVp) }
     var showPoc by remember { mutableStateOf(repo.prefs.showPoc) }
     var showSess by remember { mutableStateOf(repo.prefs.showSessions) }
@@ -218,6 +220,16 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             PriceLine(px, col, "Limit", parts = listOf(if (draft.buy) "Limit buy · draft" else "Limit sell · draft", pctAway(px)),
                 drag = LineDrag({ p -> "Limit ${fmtPrice(draft.snap(p, market))} · ${pctAway(p)}" to col }) { p -> draft.price = draft.snap(p, market) })
         })
+    // Daily pivots on intraday candles; weekly once a candle is 4h or longer, where daily levels crowd together.
+    val weeklyPivots = interval in listOf("4h", "1d", "1w", "1M")
+    val pivotLines = if (showPivots) Opens.pivots(days, weeklyPivots)?.let { pv ->
+        val tag = if (weeklyPivots) "W" else "D"
+        listOf(
+            PriceLine(pv.r3, PIVOT_R, " R3", ref = true), PriceLine(pv.r2, PIVOT_R, " R2", ref = true), PriceLine(pv.r1, PIVOT_R, " R1", ref = true),
+            PriceLine(pv.p, PIVOT_P, " P", ref = true),
+            PriceLine(pv.s1, PIVOT_S, " S1", ref = true), PriceLine(pv.s2, PIVOT_S, " S2", ref = true), PriceLine(pv.s3, PIVOT_S, " S3", ref = true),
+        )
+    }.orEmpty() else emptyList()
     val chartLines = orderLines + (if (showPos) myPositions else emptyList()).flatMap { p ->
         val acc = accounts[p.accountId] ?: return@flatMap emptyList()
         val r = riskOf(acc, marks)
@@ -258,11 +270,11 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 px.takeIf { it > 0 }?.let { PriceLine(it, PASS, "Pass target", parts = listOfNotNull("Pass target", away(it), "+" + fmtUsd(need), tag.ifBlank { null })) }
             } },
         )
-    } + if (showOpens) listOfNotNull(
+    } + (if (showOpens) listOfNotNull(
         mOpen?.let { PriceLine(it, OPEN_M, "M open", ref = true) },
         wOpen?.let { PriceLine(it, OPEN_W, "W open", ref = true) },
         dOpen?.let { PriceLine(it, OPEN_D, "D open", ref = true) },
-    ) else emptyList()
+    ) else emptyList()) + pivotLines
 
     Column(Modifier.fillMaxSize().background(C.bg)) {
     // Chart view scrolls only while a section is open (or on the data view, which is a long list).
@@ -348,6 +360,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPosPick = !showPos; repo.prefs.showPosLines = showPosPick }
                     if (repo.prefs.chipOpens) OverlayChip("D/W/M", showOpens, Icons.Filled.HorizontalRule) { showOpens = !showOpens; repo.prefs.showOpens = showOpens }
+                    if (repo.prefs.chipPivots) OverlayChip("Pivots", showPivots, Icons.Filled.Reorder) { showPivots = !showPivots; repo.prefs.showPivots = showPivots }
                     if (repo.prefs.chipVp) OverlayChip("VP", showVp, Icons.AutoMirrored.Filled.Notes) { showVp = !showVp; repo.prefs.showVp = showVp }
                     if (repo.prefs.chipPoc) OverlayChip("POC", showPoc, Icons.Filled.Adjust) { showPoc = !showPoc; repo.prefs.showPoc = showPoc }
                     if (repo.prefs.chipSess) OverlayChip("Sess", showSess, Icons.Filled.Schedule) { showSess = !showSess; repo.prefs.showSessions = showSess }
@@ -511,6 +524,10 @@ private val PASS = Color(0xFF22D3EE)
 private val OPEN_D get() = C.openD
 private val OPEN_W = Color(0xFF38BDF8)
 private val OPEN_M = Color(0xFFF472B6)
+// Pivots: resistance red-ish, support green-ish, P amber; muted so they sit behind your own lines.
+private val PIVOT_R = Color(0xFFF87171)
+private val PIVOT_S = Color(0xFF4ADE80)
+private val PIVOT_P = Color(0xFFFBBF24)
 
 @Composable
 private fun HeadStat(label: String, value: String, color: Color = C.text) {

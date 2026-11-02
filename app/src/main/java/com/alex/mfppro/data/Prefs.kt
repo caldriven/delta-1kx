@@ -165,6 +165,12 @@ class Prefs(ctx: Context) {
     var chipOpens: Boolean
         get() = plain.getBoolean("chip_opens", true)
         set(v) = plain.edit().putBoolean("chip_opens", v).apply()
+    var chipPivots: Boolean
+        get() = plain.getBoolean("chip_pivots", true)
+        set(v) = plain.edit().putBoolean("chip_pivots", v).apply()
+    var showPivots: Boolean
+        get() = plain.getBoolean("show_pivots", false)
+        set(v) = plain.edit().putBoolean("show_pivots", v).apply()
     var chipVp: Boolean
         get() = plain.getBoolean("chip_vp", true)
         set(v) = plain.edit().putBoolean("chip_vp", v).apply()

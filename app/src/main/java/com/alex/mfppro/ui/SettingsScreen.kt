@@ -191,6 +191,8 @@ fun SettingsScreen(repo: Repo) {
             Toggle("Position lines", "Net PnL box, TP/SL, DLL, Max DD and pass target", ps, DATA) { ps = it; repo.prefs.chipPos = it; if (!it) repo.prefs.showPosLines = true }
             var o by remember { mutableStateOf(repo.prefs.chipOpens) }
             Toggle("D/W/M opens", "Daily, weekly, monthly open lines", o, DATA) { o = it; repo.prefs.chipOpens = it }
+            var pv by remember { mutableStateOf(repo.prefs.chipPivots) }
+            Toggle("Pivot points", "Classic P, R1–R3, S1–S3 from yesterday (last week on 4h+)", pv, DATA) { pv = it; repo.prefs.chipPivots = it }
             var v by remember { mutableStateOf(repo.prefs.chipVp) }
             Toggle("Volume profile", "Session VP with value area", v, DATA) { v = it; repo.prefs.chipVp = it }
             var pc by remember { mutableStateOf(repo.prefs.chipPoc) }
