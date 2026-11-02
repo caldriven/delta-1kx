@@ -117,7 +117,12 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
                     step("u", pos.id, pnl, p.pnlStepUsd.toDouble())?.let { "${fmtSigned(it)} step" },
                     step("p", pos.id, pct, p.pnlStepPct.toDouble())?.let { String.format(Locale.US, "%+.2f%% of position", it) },
                     step("e", pos.id, eqPct, p.pnlStepEq.toDouble())?.let { String.format(Locale.US, "%+.2f%% of equity", it) },
-                    riskPct?.let { step("r", pos.id, it, p.pnlStepRisk.toDouble()) }?.let { String.format(Locale.US, "%+.0f%% of loss limit", it) },
+                    // Loss limit: only losses use it up, so this step only speaks when the position is red.
+                    riskPct?.let { step("r", pos.id, it, p.pnlStepRisk.toDouble()) }?.takeIf { it < 0 && allowance != null }?.let {
+                        val used = -it
+                        String.format(Locale.US, "Used %.0f%% of %s limit (%s of %s)", used, if (r.bindingIsDaily) "daily loss" else "max drawdown",
+                            fmt(allowance!! * used / 100), fmt(allowance))
+                    },
                 )
                 val sideOk = when (p.pnlSide) { "loss" -> pnl < 0; "profit" -> pnl > 0; else -> true }
                 if (p.notifyPnl && hits.isNotEmpty() && sideOk) {

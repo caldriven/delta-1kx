@@ -364,8 +364,10 @@ private fun PnlAlertSettings(repo: Repo) {
                 StepHint(worth(risk?.equity, se) ?: "Share of account equity")
             }
             Column(Modifier.weight(1f)) {
-                AppInput("Every % of loss limit", sr, { sr = it; custom(); p.pnlStepRisk = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
-                StepHint(worth(allowance, sr) ?: "Share of daily loss / max DD")
+                AppInput("Loss limit used, every %", sr, { sr = it; custom(); p.pnlStepRisk = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
+                StepHint(sr.toDoubleOrNull()?.takeIf { it > 0 && allowance != null }?.let { v ->
+                    "${fmtUsd(allowance!! * v / 100)} of ${fmtUsd(allowance)} ${if (risk?.bindingIsDaily == true) "daily" else "max DD"}"
+                } ?: "Losing trades only")
             }
         }
     }
