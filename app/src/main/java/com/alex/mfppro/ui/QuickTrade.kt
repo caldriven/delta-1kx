@@ -275,6 +275,21 @@ private fun floorPrice(px: Double?, net: Double, room: Double): Double? {
     return p.takeIf { it > 0 }
 }
 
+/**
+ * Floor price rounded to a coarse step, always towards the current price [ref], so the number shown
+ * is hit a little before the real breach: 0.05 steps, or ~4 significant digits on cheap coins.
+ */
+private fun safeFloor(v: Double, ref: Double?): Double {
+    if (v <= 0) return v
+    val e = kotlin.math.floor(kotlin.math.log10(v)).toInt()
+    val step = minOf(0.05, 5 * Math.pow(10.0, (e - 3).toDouble()))
+    val n = v / step
+    // Below the price (long side floor): the next step up. Above (short side): the next step down.
+    // Always a full step past the exact floor, so even an exact multiple keeps some margin.
+    val r = if (ref == null || v < ref) kotlin.math.floor(n) + 1 else kotlin.math.ceil(n) - 1
+    return r * step
+}
+
 /** Size button: position value first, then the leverage multiple and where the floor would be hit. */
 @Composable
 private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
@@ -294,7 +309,7 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
         }
         // Whichever floor price is nearer is the one that breaches first.
         val near = listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "DD" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
-        Text(near?.let { (k, v) -> "$k " + fmtPrice(v) } ?: "no floor in reach", style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
+        Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)) } ?: "no floor in reach", style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
     }
 }
 
