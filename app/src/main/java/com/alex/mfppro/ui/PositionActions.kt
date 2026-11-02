@@ -164,7 +164,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     // Mini chart: drag the TP and SL lines; the fields below follow.
-                    val candles by repo.market.candles.collectAsStateWithLifecycle()
+                    val candles by repo.market.candles.collectThrottled(500)
                     androidx.compose.runtime.DisposableEffect(p.feedKey) {
                         val sub = com.alex.mfppro.data.Sub("candles", p.provider, p.coin, "5m")
                         repo.market.acquire(sub)
@@ -248,7 +248,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
  */
 @Composable
 private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: () -> Unit, onPlace: (Double, Double) -> Unit) {
-    val books by repo.market.books.collectAsStateWithLifecycle()
+    val books by repo.market.books.collectThrottled(250)
     val book = books[p.feedKey]
     val bid = book?.bids?.firstOrNull()?.px; val ask = book?.asks?.firstOrNull()?.px
     val mid = if (bid != null && ask != null) (bid + ask) / 2 else mark ?: p.entryPrice
@@ -282,7 +282,7 @@ private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: 
         },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                val candles by repo.market.candles.collectAsStateWithLifecycle()
+                val candles by repo.market.candles.collectThrottled(500)
                 androidx.compose.runtime.DisposableEffect(p.feedKey) {
                     val subs = listOf(com.alex.mfppro.data.Sub("candles", p.provider, p.coin, "5m"), com.alex.mfppro.data.Sub("books", p.provider, p.coin))
                     subs.forEach { repo.market.acquire(it) }

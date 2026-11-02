@@ -108,7 +108,7 @@ private fun ScreenHeader(repo: Repo, title: String, onSettings: (() -> Unit)? = 
 fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: () -> Unit) {
     val accounts by repo.account.accounts.collectAsStateWithLifecycle()
     val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val venue by repo.market.venueMarks.collectAsStateWithLifecycle()
+    val venue by repo.market.venueMarks.collectThrottled(500)
     val tradeAcc = rememberTradeAccount(repo)
     var dashAll by remember { mutableStateOf(repo.prefs.dashAll) }
     var closeAllFor by remember { mutableStateOf<AccountState?>(null) }

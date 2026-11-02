@@ -128,19 +128,20 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     }
 
     val key = market.feedKey
-    val stats by repo.market.stats.collectAsStateWithLifecycle()
+    // Only this market's stats, book, candles and OI recompose the screen. Marks stay live (every
+    // flush) because positions and risk across accounts need them. Collecting the whole maps rebuilt
+    // the entire screen on every book, candle and stats update from any market.
+    val s by repo.market.stats.collectKey(key, 1000)
     val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val venue by repo.market.venueMarks.collectAsStateWithLifecycle()
-    val candles by repo.market.candles.collectAsStateWithLifecycle()
-    val oi by repo.market.oi.collectAsStateWithLifecycle()
+    val venue by repo.market.venueMarks.collectThrottled(500)
+    val chartCandles by repo.market.candles.collectKey(candleKey(market.provider, market.coin, interval), 250)
+    val oiHere by repo.market.oi.collectKey(key, 1000)
     val accounts by repo.account.accounts.collectAsStateWithLifecycle()
     val connected by repo.market.live.collectAsStateWithLifecycle()
     val classes by repo.classes.collectAsStateWithLifecycle()
-    val s = stats[key]
     val mark = marks[key] ?: s?.markPx
     // The book updates every 150 ms and leads the candle feed; use its mid as the live price.
-    val books by repo.market.books.collectAsStateWithLifecycle()
-    val book = books[key]
+    val book by repo.market.books.collectKey(key, 200)
     val bestBid = book?.bids?.firstOrNull()?.px
     val bestAsk = book?.asks?.firstOrNull()?.px
     val live = if (bestBid != null && bestAsk != null) (bestBid + bestAsk) / 2 else mark
@@ -381,11 +382,11 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val sized = if (!compact && !scrolls) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
         run {
             when (view) {
-                1 -> TradingData(repo, market, s?.openInterestUsd, mark, oi[key].orEmpty())
+                1 -> TradingData(repo, market, s?.openInterestUsd, mark, oiHere.orEmpty())
                 3 -> FlowChart(repo, key, sized.padding(start = 2.dp, top = 2.dp))
                 2 -> DepthChart(book, sized.padding(horizontal = 8.dp, vertical = 4.dp))
                 else -> androidx.compose.runtime.key(market.marketId, interval) { CandleChart(
-                    candles[candleKey(market.provider, market.coin, interval)].orEmpty().withLive(live), chartLines,
+                    chartCandles.orEmpty().withLive(live), chartLines,
                     sized.padding(start = 2.dp, top = 2.dp),
                     showVp = showVp,
                     showPoc = showPoc,
@@ -463,7 +464,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 
     // Landscape chart is drawn by MainActivity over the whole app (bottom bar included).
     if (landscape) {
-        val lc = candles[candleKey(market.provider, market.coin, interval)].orEmpty().withLive(live)
+        val lc = chartCandles.orEmpty().withLive(live)
         val lines = chartLines
         val since = if (interval in listOf("1m", "5m", "15m", "1h")) Opens.dayStart() else null
         androidx.compose.runtime.SideEffect {
@@ -557,7 +558,7 @@ private fun OverlayChip(label: String, on: Boolean, icon: androidx.compose.ui.gr
 
 @Composable
 private fun OrderBook(repo: Repo, key: String, onPrice: (Double, Boolean) -> Unit) {
-    val books by repo.market.books.collectAsStateWithLifecycle()
+    val books by repo.market.books.collectThrottled(200)
     val b: Book = books[key] ?: run { Text("Waiting for book…", color = C.muted, modifier = Modifier.padding(16.dp)); return }
     val depth = 12
     val asks = b.asks.take(depth)

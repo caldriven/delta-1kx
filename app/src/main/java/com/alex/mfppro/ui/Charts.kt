@@ -123,7 +123,9 @@ fun CandleChart(
     overlay: @Composable BoxScope.() -> Unit = {},
 ) {
     val axisDp = if (compactAxis) 40.dp else 56.dp
-    val tm = rememberTextMeasurer()
+    // Room for every label a busy chart draws (axis, tags, pills, crosshair box): the default 8 kept
+    // missing and measuring all text again each frame.
+    val tm = rememberTextMeasurer(cacheSize = 96)
     var visible by remember { mutableFloatStateOf(70f) }
     // Bars scrolled back from the newest; negative leaves empty space right of the last candle.
     var offset by remember { mutableFloatStateOf(RIGHT_GAP) }
@@ -611,7 +613,9 @@ private fun DrawScope.volumeProfile(all: List<Candle>, slice: List<Candle>, sinc
 /** Open interest over the samples received since the market was opened. */
 @Composable
 fun OiSparkline(points: List<OiPoint>, modifier: Modifier = Modifier) {
-    val tm = rememberTextMeasurer()
+    // Room for every label a busy chart draws (axis, tags, pills, crosshair box): the default 8 kept
+    // missing and measuring all text again each frame.
+    val tm = rememberTextMeasurer(cacheSize = 96)
     Canvas(modifier) {
         if (points.size < 2) {
             label(tm, "Collecting open interest…", Offset(8.dp.toPx(), size.height / 2 - 6.dp.toPx()), axisStyle)
@@ -715,7 +719,9 @@ private fun DrawScope.label(tm: TextMeasurer, s: String, at: Offset, style: Text
 /** Cumulative depth: bids stepping down to the left of mid, asks stepping up to the right. */
 @Composable
 fun DepthChart(book: com.alex.mfppro.data.Book?, modifier: Modifier = Modifier) {
-    val tm = rememberTextMeasurer()
+    // Room for every label a busy chart draws (axis, tags, pills, crosshair box): the default 8 kept
+    // missing and measuring all text again each frame.
+    val tm = rememberTextMeasurer(cacheSize = 96)
     Canvas(modifier) {
         val b = book ?: return@Canvas
         val bids = b.bids.take(50); val asks = b.asks.take(50)

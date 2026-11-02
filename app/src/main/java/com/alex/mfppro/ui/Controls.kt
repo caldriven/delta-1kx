@@ -30,7 +30,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.sample
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.drawText
@@ -378,6 +380,20 @@ fun BrandMark(modifier: Modifier = Modifier) {
         val t = tm.measure("1KX", androidx.compose.ui.text.TextStyle(brush = grad, fontFamily = Inter, fontWeight = FontWeight.Bold, fontSize = (h * 0.3f / density).sp, letterSpacing = (-0.5).sp))
         drawText(t, topLeft = androidx.compose.ui.geometry.Offset(w / 2 - t.size.width / 2, h * 0.84f - t.size.height))
     }
+}
+
+/**
+ * One entry of a keyed feed: recomposes only when that key's value changes, not on every update to
+ * any key. With [ms] > 0 it also emits at most that often.
+ */
+@OptIn(kotlinx.coroutines.FlowPreview::class)
+@Composable
+fun <K, V> kotlinx.coroutines.flow.StateFlow<Map<K, V>>.collectKey(key: K, ms: Long = 0): androidx.compose.runtime.State<V?> {
+    val f = androidx.compose.runtime.remember(this, key, ms) {
+        val one = map { it[key] }.distinctUntilChanged()
+        if (ms > 0) kotlinx.coroutines.flow.flow { emit(value[key]); emitAll(one.sample(ms)) } else one
+    }
+    return f.collectAsStateWithLifecycle(initialValue = value[key])
 }
 
 /** Collects a fast-ticking flow at most every [ms], for screens that don't need every price tick. */

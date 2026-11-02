@@ -54,7 +54,7 @@ fun MultiChart(repo: Repo, onOpenMarket: (String) -> Unit) {
     val classes by repo.classes.collectAsStateWithLifecycle()
     val stats by repo.market.stats.collectThrottled(1000)
     val marks by repo.market.marks.collectThrottled(500)
-    val candles by repo.market.candles.collectAsStateWithLifecycle()
+    val candles by repo.market.candles.collectThrottled(500)
     var interval by remember { mutableStateOf(repo.prefs.multiInterval) }
     var ids by remember { mutableStateOf(repo.prefs.multiCharts) }
     var picking by remember { mutableStateOf<Int?>(null) }

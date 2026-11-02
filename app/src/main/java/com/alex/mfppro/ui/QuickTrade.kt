@@ -97,7 +97,8 @@ fun snapTick(px: Double, m: Market): Double =
 @Composable
 fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val books by repo.market.books.collectAsStateWithLifecycle()
+    // Only this market's book, at full speed: it prices the size buttons and market orders.
+    val book by repo.market.books.collectKey(market.feedKey)
     val acc = rememberTradeAccount(repo) ?: return
     val scope = rememberCoroutineScope()
     val held = acc.positions.values.firstOrNull { it.inMarket(market) }
@@ -110,7 +111,6 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     var busy by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf<Triple<String, String, suspend () -> Unit>?>(null) }
 
-    val book = books[market.feedKey]
     val mark = marks[market.feedKey]
     val margin = acc.positions.values.sumOf { it.marginAt() }
     // Keep a little back for fees and slippage so the order isn't rejected for margin.

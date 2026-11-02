@@ -91,7 +91,8 @@ object OrderPanel {
 fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: () -> Unit) {
     val accounts by repo.account.accounts.collectAsStateWithLifecycle()
     val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val books by repo.market.books.collectAsStateWithLifecycle()
+    val bookState = repo.market.books.collectKey(market.feedKey)
+    val book = bookState.value
     val scope = rememberCoroutineScope()
 
     val list = accounts.values.filter { it.account.status == "active" }.sortedBy { it.account.name }
@@ -133,7 +134,6 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     var busy by remember { mutableStateOf(false) }
 
     val mark = marks[market.feedKey]
-    val book = books[market.feedKey]
     // Limit prices filled in for you use the decimals picked for this market (Trade view, "dp" chip).
     val dec = repo.prefs.priceDecimals(market.marketId)
     fun px(v: Double) = plain(if (dec != null && dec < tickDecimals(market)) java.math.BigDecimal(v).setScale(dec, java.math.RoundingMode.HALF_UP).toDouble() else v)
@@ -254,7 +254,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
 
     SidePanel(onDismiss) {
         // 1-minute chart of this market above the form.
-        val candles by repo.market.candles.collectAsStateWithLifecycle()
+        val candles by repo.market.candles.collectThrottled(500)
         androidx.compose.runtime.DisposableEffect(market.marketId) {
             val subs = listOf(com.alex.mfppro.data.Sub("candles", market.provider, market.coin, "1m"), com.alex.mfppro.data.Sub("books", market.provider, market.coin))
             subs.forEach { repo.market.acquire(it) }
@@ -270,7 +270,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.Clear, "Close", tint = C.muted,
                 modifier = Modifier.clip(RoundedCornerShape(50)).clickable(onClick = onDismiss).padding(8.dp).size(20.dp))
         }
-        val mid = books[market.feedKey]?.let { b -> val bb = b.bids.firstOrNull()?.px; val aa = b.asks.firstOrNull()?.px; if (bb != null && aa != null) (bb + aa) / 2 else null } ?: mark
+        val mid = book?.let { b -> val bb = b.bids.firstOrNull()?.px; val aa = b.asks.firstOrNull()?.px; if (bb != null && aa != null) (bb + aa) / 2 else null } ?: mark
         CandleChart(
             candles[com.alex.mfppro.data.candleKey(market.provider, market.coin, "1m")].orEmpty().withLive(mid),
             listOfNotNull(held?.let { PriceLine(it.entryPrice, if (it.isLong) C.up else C.down, if (it.isLong) "Long" else "Short", solid = true) }),

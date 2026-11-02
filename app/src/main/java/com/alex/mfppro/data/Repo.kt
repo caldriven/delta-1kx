@@ -84,14 +84,17 @@ class Repo(ctx: Context) {
 
     private var pauseJob: Job? = null
     private var riskJob: Job? = null
+    /** App on screen. In the background the monitor keeps mark ticks only and checks less often. */
+    private val _visible = MutableStateFlow(true)
+    val visible = _visible.asStateFlow()
 
     init {
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = onForeground()
-            override fun onStop(owner: LifecycleOwner) = onBackground()
+            override fun onStart(owner: LifecycleOwner) { _visible.value = true; onForeground() }
+            override fun onStop(owner: LifecycleOwner) { _visible.value = false; onBackground() }
         })
         // A new default network (Wi-Fi <-> mobile) leaves old sockets dead: reconnect at once.
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
@@ -370,9 +373,11 @@ class Repo(ctx: Context) {
     private fun trackPositionMarks() = scope.launch {
         market.realtime = prefs.realtimePnl
         var held = emptySet<Sub>()
-        kotlinx.coroutines.flow.combine(account.accounts, _realtime) { m, rt ->
+        // Order books only while the app is on screen: in the background mark ticks are enough for alerts,
+        // and every held market's full book is the heaviest feed there is.
+        kotlinx.coroutines.flow.combine(account.accounts, _realtime, _visible) { m, rt, vis ->
             m.values.flatMap { it.positions.values }.flatMap {
-                listOfNotNull(Sub("ticks", it.provider, it.coin), if (rt) Sub("books", it.provider, it.coin) else null)
+                listOfNotNull(Sub("ticks", it.provider, it.coin), if (rt && vis) Sub("books", it.provider, it.coin) else null)
             }.toSet()
         }
             .distinctUntilChanged()

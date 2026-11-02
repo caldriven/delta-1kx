@@ -43,7 +43,8 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         nm.createNotificationChannel(NotificationChannel(CH_TRADES, "Fills and PnL", NotificationManager.IMPORTANCE_HIGH))
         repo.scope.launch {
             while (isActive) {
-                delay(2_000)
+                // Every 2 s on screen; every 5 s in the background, where it only feeds notifications.
+                delay(if (repo.visible.value) 2_000 else 5_000)
                 if (repo.prefs.alertsEnabled) check()
                 runCatching { checkAccounts() }
             }
