@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.Locale
+import kotlin.math.roundToInt
 import java.util.UUID
 import kotlin.math.abs
 
@@ -399,8 +400,9 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
     val risk = acc?.let { riskOf(it, marks) }
     val heldA = a?.let { m -> acc?.positions?.values?.firstOrNull { it.inMarket(m) } }
     val heldB = b?.let { m -> acc?.positions?.values?.firstOrNull { it.inMarket(m) } }
-    val maxLev = minOf(a?.maxLeverage ?: 1.0, b?.maxLeverage ?: 1.0).toInt().coerceAtLeast(1)
-    var lev by remember(aId, bId) { mutableStateOf(minOf(repo.prefs.leverage(aId, 5), maxLev).coerceAtLeast(1)) }
+    val pol = acc?.account?.id?.let { policies[it] }
+    val maxLev = minOf(a?.let { com.alex.mfppro.data.maxLeverage(it, acc?.account, pol) } ?: 1, b?.let { com.alex.mfppro.data.maxLeverage(it, acc?.account, pol) } ?: 1)
+    var lev by remember(aId, bId, maxLev) { mutableStateOf(minOf(repo.prefs.leverage(aId, 5), maxLev).coerceAtLeast(1)) }
     var isolated by remember { mutableStateOf(repo.prefs.marginMode == "isolated") }
     var beta by remember { mutableStateOf(true) }
     var usdText by remember { mutableStateOf("") }
@@ -454,10 +456,10 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
         busy = true; orphan = null
         scope.launch {
             val r1 = repo.placeOrder("Pair ${if (longA) "long" else "short"} ${ma.symbol}", bodyA)
-            if (r1 !is TradeResult.Ok) { busy = false; return@launch }
+            if (!r1.accepted) { busy = false; return@launch }
             val r2 = repo.placeOrder("Pair ${if (longA) "short" else "long"} ${mb.symbol}", bodyB)
             busy = false
-            if (r2 is TradeResult.Ok) onDismiss() else orphan = ma.marketId
+            if (r2.accepted) onDismiss() else orphan = ma.marketId
         }
     }
 
@@ -536,8 +538,8 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
             NumField("Size, both legs (USD)", usdText, { usdText = it }, Modifier.fillMaxWidth())
             val pct = if (maxGross > 0) (gross / maxGross).coerceIn(0.0, 1.0) else 0.0
             Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                PctSlider(pct.toFloat(), C.accent, Modifier.weight(1f)) { f -> usdText = String.format(Locale.US, "%.2f", f * maxGross) }
-                Text("${(pct * 100).toInt()}%", style = num.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold), textAlign = TextAlign.End, modifier = Modifier.width(52.dp))
+                PctSlider(pct.toFloat(), C.accent, Modifier.weight(1f)) { f -> usdText = String.format(Locale.US, "%.0f", f * maxGross) }
+                Text("${(pct * 100).roundToInt()}%", style = num.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold), textAlign = TextAlign.End, modifier = Modifier.width(52.dp))
             }
             Text("Buying power ${fmtUsd(maxGross)}", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

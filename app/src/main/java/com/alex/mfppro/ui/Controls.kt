@@ -104,7 +104,11 @@ fun AppInput(
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) Text(placeholder.ifEmpty { if (numeric) "0.00" else "" }, color = C.muted.copy(alpha = 0.6f), style = if (numeric) num.copy(fontSize = 15.sp) else TextStyle(fontSize = 14.sp))
                 BasicTextField(
-                    value, { s -> onChange(if (numeric) s.replace(',', '.').filter { it.isDigit() || it == '.' } else s) },
+                    value, { s ->
+                        // Numbers: digits and one decimal point; a second point is ignored rather than accepted.
+                        if (!numeric) onChange(s)
+                        else s.replace(',', '.').filter { it.isDigit() || it == '.' }.takeIf { t -> t.count { it == '.' } <= 1 }?.let(onChange)
+                    },
                     singleLine = true,
                     textStyle = (if (numeric) num.copy(fontSize = 15.sp) else TextStyle(fontFamily = Inter, fontSize = 14.sp)).copy(color = C.text),
                     cursorBrush = SolidColor(C.accent),
@@ -311,6 +315,8 @@ fun ConfirmDialog(
     note: String? = null,
     confirm: String = "Confirm",
     onDismiss: () -> Unit,
+    /** Extra choices shown under the rows, e.g. how a TP or SL executes. */
+    extra: (@Composable () -> Unit)? = null,
     onConfirm: () -> Unit,
 ) {
     androidx.compose.ui.window.Dialog(onDismiss) {
@@ -326,6 +332,7 @@ fun ConfirmDialog(
                     }
                 }
             }
+            extra?.let { Box(Modifier.padding(top = 10.dp)) { it() } }
             note?.let { Text(it, color = C.text.copy(alpha = 0.8f), fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp)) }
             Row(Modifier.padding(top = 16.dp).fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
                 Box(
@@ -402,4 +409,36 @@ fun <K, V> kotlinx.coroutines.flow.StateFlow<Map<K, V>>.collectKey(key: K, ms: L
 fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectThrottled(ms: Long): androidx.compose.runtime.State<T> {
     val f = androidx.compose.runtime.remember(this, ms) { kotlinx.coroutines.flow.flow { emit(value); emitAll(this@collectThrottled.sample(ms)) } }
     return f.collectAsStateWithLifecycle(initialValue = value)
+}
+
+/** What a venue's TP/SL triggers watch (MFP trading guide: conditional trigger policy). */
+fun triggerSource(provider: String): String = when (provider) {
+    "veranta", "ostium" -> "the venue mid price"
+    "binance", "bybit", "hyperliquid" -> "the last traded price"
+    else -> "the chart price"
+}
+
+/**
+ * Market vs limit for a take profit ([tp]) or stop loss, with a line on what
+ * each does and which price triggers it.
+ */
+@Composable
+fun ExitExecPicker(tp: Boolean, exec: String, provider: String, onChange: (String) -> Unit) {
+    val col = if (tp) C.up else C.down
+    Column {
+        Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg(if (tp) "TP market" else "Stop market", exec == "market", col) { onChange("market") }
+            Seg(if (tp) "TP limit · reduce only" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
+        }
+        val src = triggerSource(provider)
+        Text(
+            when {
+                tp && exec == "market" -> "Triggers when $src reaches it, then closes at market."
+                tp -> "Triggers on $src, then a reduce-only limit at your price: never a worse fill, but a quick touch may not fill."
+                exec == "market" -> "Triggers when $src reaches it, then closes at market: fills in a fast move, with slippage."
+                else -> "Triggers on $src, then a reduce-only limit at your price: no slippage, but a gap past it leaves you open."
+            },
+            color = C.muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp),
+        )
+    }
 }

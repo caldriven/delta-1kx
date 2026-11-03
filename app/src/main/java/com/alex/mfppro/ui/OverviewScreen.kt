@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +56,15 @@ import com.alex.mfppro.data.Sub
 
 private enum class SortKey(val label: String) { VOL("Volume"), CHG("24h"), WEEK("7d"), OI("OI"), OIC("OI 24h"), FUND("Funding"), NAME("Name") }
 
+/** Where the market list was, so opening a chart and coming back lands on the same rows. */
+private object ListMemory {
+    var query = ""
+    var key: Any? = null
+    var order: List<String> = emptyList()
+    var index = 0
+    var offset = 0
+}
+
 /** Sortable market overview: every MFP market with 24h (from the UTC open) and 7d change, OI, OI change and funding. */
 @Composable
 fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String) -> Unit) {
@@ -62,7 +72,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     val stats by repo.market.stats.collectThrottled(500)
     val classes by repo.classes.collectAsStateWithLifecycle()
     val extras by repo.extras.collectAsStateWithLifecycle()
-    var query by remember { mutableStateOf("") }
+    var query by remember { mutableStateOf(ListMemory.query) }
     var cls by remember { mutableStateOf(repo.prefs.overviewClass) }
     var sort by remember {
         val (k, d) = repo.prefs.overviewSort.split(":").let { it[0] to (it.getOrNull(1) != "asc") }
@@ -117,10 +127,23 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     // Freeze the order between refreshes: re-sorting on every 50 ms tick made rows jump while scrolling.
     // A new sort/filter takes effect at once and starts at the top.
     val latest by androidx.compose.runtime.rememberUpdatedState(live)
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    var order by remember(sort, activeCls, q) { mutableStateOf(live.map { it.marketId }) }
+    val listKey = listOf(sort, activeCls, q, analysis)
+    // Same list as last time: come back to its rows and scroll position instead of the top.
+    val returning = remember { ListMemory.key == listKey && ListMemory.order.isNotEmpty() }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState(
+        if (returning) ListMemory.index else 0, if (returning) ListMemory.offset else 0)
+    var order by remember(sort, activeCls, q) {
+        mutableStateOf(if (ListMemory.key == listKey && ListMemory.order.isNotEmpty()) ListMemory.order else live.map { it.marketId })
+    }
+    LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (i, o) -> ListMemory.index = i; ListMemory.offset = o }
+    }
+    SideEffect { ListMemory.key = listKey; ListMemory.order = order; ListMemory.query = query }
+    // The first run after coming back keeps the restored position; a new sort, filter or search starts at the top.
+    var restoring by remember { mutableStateOf(returning) }
     LaunchedEffect(sort, activeCls, q) {
-        listState.scrollToItem(0)
+        if (restoring) restoring = false else listState.scrollToItem(0)
         // Re-sort every second while stats are still arriving, then every 5 s.
         var n = 0
         while (true) {

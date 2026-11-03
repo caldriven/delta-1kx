@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
                 enableEdgeToEdge(statusBarStyle = bar, navigationBarStyle = bar)
             }
             MfpTheme {
+                com.alex.mfppro.ui.TermsGate(repo)
                 var tab by rememberSaveable { mutableStateOf(0) }
                 var marketId by rememberSaveable { mutableStateOf(repo.prefs.lastMarketId) }
                 var compact by rememberSaveable { mutableStateOf(false) }

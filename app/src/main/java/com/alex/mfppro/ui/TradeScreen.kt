@@ -170,8 +170,24 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     var confirmAsk by remember { mutableStateOf<ChartAsk?>(null) }
     val tradeScope = rememberCoroutineScope()
     // Chart-box actions confirm when the settings ask for it, otherwise go straight away.
+    // One at a time: a double tap on the box must not flip or close twice.
+    var chartBusy by remember { mutableStateOf(false) }
+    fun runChart(a: ChartAsk) {
+        if (chartBusy) return
+        chartBusy = true
+        tradeScope.launch { try { a.run() } finally { chartBusy = false } }
+    }
     fun chartAct(a: ChartAsk) {
-        if (repo.prefs.confirmOrders || repo.prefs.confirmCloseAll) confirmAsk = a else tradeScope.launch { a.run() }
+        if (repo.prefs.confirmOrders || repo.prefs.confirmCloseAll) confirmAsk = a else runChart(a)
+    }
+    // A TP or SL dropped from the chart: snapped to the tick, and only on its own side of the price,
+    // since a stop through the price would close the position at once.
+    fun askExit(p: com.alex.mfppro.data.Position, tp: Boolean, raw: Double, tp0: Double?, sl0: Double?) {
+        val px = repo.market(p.marketId)?.let { snapTick(raw, it) } ?: raw
+        val now = mark ?: p.entryPrice
+        val wrong = if (tp == p.isLong) px <= now else px >= now
+        if (wrong) repo.postMessage(if (tp) "TP must be ${if (p.isLong) "above" else "below"} the price" else "SL must be ${if (p.isLong) "below" else "above"} the price")
+        else exitAsk = ExitAsk(p, tp, px, tp0, sl0)
     }
     var showOpens by remember { mutableStateOf(repo.prefs.showOpens) }
     var showPivots by remember { mutableStateOf(repo.prefs.showPivots) }
@@ -245,8 +261,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             else PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "", solid = true,
                 box = PosBox(
                     fmtUsd(pnl, true),
-                    tp = LineDrag({ exitPreview(p, it, "TP") }) { px -> exitAsk = ExitAsk(p, true, px, tp, sl) },
-                    sl = LineDrag({ exitPreview(p, it, "SL") }) { px -> exitAsk = ExitAsk(p, false, px, tp, sl) },
+                    tp = LineDrag({ exitPreview(p, it, "TP") }) { px -> askExit(p, true, px, tp, sl) },
+                    sl = LineDrag({ exitPreview(p, it, "SL") }) { px -> askExit(p, false, px, tp, sl) },
                     onReverse = {
                         if (repo.prefs.locked()) repo.postMessage("Night lock: no reversing until ${repo.prefs.lockEnd}:00")
                         else chartAct(ChartAsk("Reverse", "Flip to ${if (p.isLong) "short" else "long"}", C.accent,
@@ -258,9 +274,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     },
                 )),
             tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> exitAsk = ExitAsk(p, true, px, tp, sl) }) },
+                drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> askExit(p, true, px, tp, sl) }) },
             sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(p.pnlAt(it), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> exitAsk = ExitAsk(p, false, px, tp, sl) }) },
+                drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> askExit(p, false, px, tp, sl) }) },
             // Where this position takes the account onto each floor, with % away from the last price.
             mark?.takeIf { shows("floors") }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             mark?.takeIf { shows("floors") }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
@@ -302,7 +318,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 Spacer(Modifier.width(8.dp))
                 Text(market.symbol, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = C.text)
                 Icon(Icons.Filled.ArrowDropDown, null, tint = C.muted, modifier = Modifier.size(18.dp))
-                Text("${market.maxLeverage.toInt()}x", color = C.muted, fontSize = 10.sp)
+                val pols by repo.policies.collectAsStateWithLifecycle()
+                Text("${com.alex.mfppro.data.maxLeverage(market, tradeAcc?.account, tradeAcc?.account?.id?.let { pols[it] })}x", color = C.muted, fontSize = 10.sp)
                 if (!connected) Text("  ●", color = C.accent, fontSize = 10.sp)
             }
             VenueSwap(market, venues.ifEmpty { markets }, onPickMarket)
@@ -422,7 +439,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     val pm = marks[p.feedKey]
                     val br = pm?.let { mk -> tradeAcc?.let { riskOf(it, marks).room }?.let { breachPrice(p, mk, it) } }
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
-                        PositionRow(p, pm, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { onPickMarket(p.marketId) }
+                        PositionRow(p, pm, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl"), market = repo.market(p.marketId)) { onPickMarket(p.marketId) }
                         PositionActions(repo, p, pm)
                     }
                 }
@@ -450,7 +467,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     val pm = marks[p.feedKey]
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
                         val br = accounts[p.accountId]?.let { a -> pm?.let { mk -> riskOf(a, marks).room?.let { breachPrice(p, mk, it) } } }
-                        PositionRow(p, pm, accounts[p.accountId]?.let(::accountName) ?: "", showAccount = multi, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { repo.setTradeAccount(p.accountId); onPickMarket(p.marketId) }
+                        PositionRow(p, pm, accounts[p.accountId]?.let(::accountName) ?: "", showAccount = multi, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl"), market = repo.market(p.marketId)) { repo.setTradeAccount(p.accountId); onPickMarket(p.marketId) }
                         PositionActions(repo, p, pm)
                     }
                 } }
@@ -490,25 +507,31 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 
     confirmAsk?.let { a ->
         ConfirmDialog(a.title, a.headline, a.color, a.rows, confirm = a.confirm, onDismiss = { confirmAsk = null }) {
-            confirmAsk = null; tradeScope.launch { a.run() }
+            confirmAsk = null; runChart(a)
         }
     }
 
     exitAsk?.let { e ->
         val p = e.p
+        val em = repo.market(p.marketId)
+        // How this exit executes: what it already uses, else the last choice.
+        var exec by remember(e) { mutableStateOf(repo.exitsOf(p).firstOrNull { it.exitGroup == (if (e.tp) "tp" else "sl") }?.exitExecution
+            ?: if (e.tp) repo.prefs.tpExecution else repo.prefs.slExecution) }
         val pnl = p.pnlAt(e.price)
         val pct = (e.price / p.entryPrice - 1) * 100 * (if (p.isLong) 1 else -1)
         ConfirmDialog(
-            if (e.tp) "Set take profit" else "Set stop loss", (if (e.tp) "TP " else "SL ") + fmtPrice(e.price), if (e.tp) C.up else C.down,
+            if (e.tp) "Set take profit" else "Set stop loss", (if (e.tp) "TP " else "SL ") + fmtPrice(e.price, em), if (e.tp) C.up else C.down,
             listOf(
                 ConfirmRow("Position", "${if (p.isLong) "Long" else "Short"} ${fmtUsd(p.size * p.entryPrice)} ${p.symbol}"),
-                ConfirmRow("Entry", fmtPrice(p.entryPrice)),
+                ConfirmRow("Entry", fmtPrice(p.entryPrice, em)),
                 ConfirmRow("Est. PnL", String.format(Locale.US, "%+.2f%%  %s", pct, fmtUsd(pnl, true)), pnlColor(pnl)),
             ),
             confirm = if (e.tp) "Set TP" else "Set SL", onDismiss = { exitAsk = null },
+            extra = { ExitExecPicker(e.tp, exec, p.provider) { exec = it } },
         ) {
             exitAsk = null
-            tradeScope.launch { repo.setTpSl(p, if (e.tp) e.price else e.tp0, if (e.tp) e.sl0 else e.price) }
+            if (e.tp) repo.prefs.tpExecution = exec else repo.prefs.slExecution = exec
+            tradeScope.launch { repo.setTpSl(p, if (e.tp) e.price else e.tp0, if (e.tp) e.sl0 else e.price, tpExec = exec.takeIf { e.tp }, slExec = exec.takeIf { !e.tp }) }
         }
     }
 
@@ -587,7 +610,7 @@ private fun OrderBook(repo: Repo, key: String, onPrice: (Double, Boolean) -> Uni
         asks.asReversed().forEach { BookRow(it.px, it.sz, maxSz, C.down) { onPrice(it.px, false) } }
         val spread = if (asks.isNotEmpty() && bids.isNotEmpty()) asks.first().px - bids.first().px else null
         Text(
-            "Spread ${fmtPrice(spread)}" + (spread?.let { "  (" + String.format(Locale.US, "%.3f%%", it / bids.first().px * 100) + ")" } ?: ""),
+            "Spread ${spread?.let { String.format(Locale.US, "%,.${priceDecimals(bids.first().px)}f", it) } ?: "—"}" + (spread?.let { "  (" + String.format(Locale.US, "%.3f%%", it / bids.first().px * 100) + ")" } ?: ""),
             style = num.copy(fontSize = 11.sp, color = C.muted), modifier = Modifier.padding(vertical = 4.dp),
         )
         bids.forEach { BookRow(it.px, it.sz, maxSz, C.up) { onPrice(it.px, true) } }
@@ -833,7 +856,7 @@ private fun TopOfBook(b: Book?) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Spread", color = C.muted, fontSize = 10.sp)
                 val sp = if (bid != null && ask != null) ask.px - bid.px else null
-                Text(fmtPrice(sp), style = num.copy(fontSize = 12.sp))
+                Text(sp?.let { String.format(Locale.US, "%,.${priceDecimals(bid!!.px)}f", it) } ?: "—", style = num.copy(fontSize = 12.sp))
             }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
                 Text("Ask", color = C.muted, fontSize = 10.sp)

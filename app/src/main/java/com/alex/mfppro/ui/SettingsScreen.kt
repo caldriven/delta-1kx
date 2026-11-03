@@ -21,33 +21,46 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.AlternateEmail
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.material.icons.filled.Bedtime
-import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.Palette
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.alex.mfppro.data.NotifyRules
+import com.alex.mfppro.data.PNL_PRESETS
 import com.alex.mfppro.data.Repo
 import kotlinx.coroutines.launch
+import java.util.Locale
 
-// One colour per section so the page scans at a glance.
+// One colour per section so the pages scan at a glance.
 private val API = Color(0xFF3B82F6)
 private val DISPLAY = Color(0xFFA78BFA)
 private val DATA = Color(0xFF22D3EE)
@@ -55,193 +68,164 @@ private val ORDERS = Color(0xFF10B981)
 private val RULES = Color(0xFFF43F5E)
 private val ALERTS = Color(0xFFF59E0B)
 private val PNL = Color(0xFF14B8A6)
+private val ABOUT = Color(0xFF94A3B8)
 
+/**
+ * Settings: a short list of categories, each opening its own page. Notification
+ * rules live under Notifications, per account, with PnL steps a page of their own.
+ * Pages: home, api, about, license, oss, oss:<i>, trading, risk, notify, rules:<id|default>,
+ * pnl:<id|default>, chart, display.
+ */
 @Composable
 fun SettingsScreen(repo: Repo) {
+    var page by rememberSaveable { mutableStateOf("home") }
+    var resetAsk by remember { mutableStateOf(false) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val askNotify = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
+    fun ask() { if (android.os.Build.VERSION.SDK_INT >= 33) askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
+
+    // Back walks up one level: PnL steps -> its rules page -> Notifications -> home.
+    fun up() {
+        page = when {
+            page.startsWith("pnl:") -> "rules:" + page.removePrefix("pnl:")
+            page.startsWith("rules:") -> "notify"
+            page.startsWith("oss:") -> "oss"
+            page == "license" || page == "oss" -> "about"
+            else -> "home"
+        }
+    }
+    androidx.activity.compose.BackHandler(enabled = page != "home") { up() }
+
+    // Each page starts at its top.
+    androidx.compose.runtime.key(page) { Column(
+        Modifier.fillMaxSize().background(C.bg).imePadding().verticalScroll(rememberScrollState())
+            .padding(horizontal = 10.dp).padding(bottom = 24.dp),
+    ) {
+        when {
+            page == "home" -> Home(repo) { page = it }
+            page == "api" -> Page("Account & API key", ::up) { ApiPage(repo) { page = it } }
+            page == "about" -> Page("About Delta 1kx", ::up) { AboutPage(repo) { page = it } }
+            page == "license" -> Page("License & terms", ::up) { LicensePage() }
+            page == "oss" -> Page("Open source licenses", ::up) { OssPage { page = it } }
+            page.startsWith("oss:") -> OSS.getOrNull(page.removePrefix("oss:").toInt())?.let { o -> Page(o.name, ::up) { OssLicensePage(o) } }
+            page == "trading" -> Page("Trading", ::up) { TradingPage(repo) }
+            page == "risk" -> Page("Risk guard", ::up) { RiskPage(repo) }
+            page == "notify" -> Page("Notifications", ::up) { NotifyPage(repo, ::ask) { page = it } }
+            page.startsWith("rules:") -> page.removePrefix("rules:").let { t ->
+                Page(targetName(repo, t), ::up) { RulesPage(repo, t.takeIf { it != "default" }, ::ask) { page = "pnl:$t" } }
+            }
+            page.startsWith("pnl:") -> page.removePrefix("pnl:").let { t ->
+                Page("PnL steps · " + targetName(repo, t), ::up) { PnlPage(repo, t.takeIf { it != "default" }, ::ask) }
+            }
+            page == "chart" -> Page("Chart", ::up) { ChartPage(repo) }
+            page == "display" -> Page("Display", ::up) { DisplayPage(repo) }
+        }
+        if (page == "home") Section("Reset", RULES, Icons.Filled.Refresh) {
+            Note("Puts every setting back to default. Your API key stays.")
+            Act("Reset settings", color = C.down, modifier = Modifier.padding(top = 8.dp).fillMaxWidth()) { resetAsk = true }
+        }
+    } }
+
+    if (resetAsk) ConfirmDialog("Reset settings", "Back to defaults", C.down, note = "Theme, alerts, chart and order settings reset. The API key is kept.",
+        confirm = "Reset", onDismiss = { resetAsk = false }) {
+        resetAsk = false
+        repo.prefs.resetUi()
+        // Live state that isn't re-read on restart.
+        repo.setRealtime(repo.prefs.realtimePnl)
+        com.alex.mfppro.data.MonitorService.setEnabled(ctx, repo.prefs.monitorBackground)
+        // Restart so every screen picks up the defaults.
+        (ctx as? android.app.Activity)?.recreate()
+    }
+}
+
+private fun targetName(repo: Repo, t: String) =
+    if (t == "default") "All accounts" else repo.account.accounts.value[t]?.let(::accountName) ?: "Account"
+
+@Composable
+private fun Home(repo: Repo, open: (String) -> Unit) {
+    val key by repo.apiKey.collectAsStateWithLifecycle()
+    val p = repo.prefs
+    Text("Settings", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(4.dp, 8.dp, 4.dp, 4.dp))
+    Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        NavRow("Account & API key", key?.let { (if (it.startsWith("fp_test_")) "Sandbox" else "Live") + " key …" + it.takeLast(4) } ?: "No key yet", API, Icons.Filled.Key) { open("api") }
+        NavRow("About Delta 1kx", "Alpha ${appVersion(androidx.compose.ui.platform.LocalContext.current)} · by $CREATOR · terms and licenses", ABOUT, Icons.Filled.Info) { open("about") }
+        NavRow("Trading", "Confirmations, slippage, quick sizes, TP/SL type", ORDERS, Icons.Filled.TouchApp) { open("trading") }
+        NavRow("Risk guard", if (p.lockEnabled) "Night lock ${p.lockStart}:00–${p.lockEnd}:00 Oslo" else "Night lock off", RULES, Icons.Filled.Bedtime) { open("risk") }
+        NavRow("Notifications", notifySummary(repo), ALERTS, Icons.Filled.NotificationsActive) { open("notify") }
+        NavRow("Chart", "Sessions, killzones, indicator bar", DATA, Icons.Filled.Bolt) { open("chart") }
+        NavRow("Display", "${Palette.theme.label} theme · profit split ${Split.pct}%", DISPLAY, Icons.Filled.Palette, last = true) { open("display") }
+    }
+}
+
+private fun notifySummary(repo: Repo): String {
+    val ids = activeAccounts(repo.account.accounts.value, includeComp = true).map { it.account.id }
+    val own = ids.count { repo.prefs.notifyOverride(it) != null }
+    val muted = ids.count { repo.prefs.notifyFor(it).muted }
+    return listOfNotNull(
+        if (repo.prefs.monitorBackground) "Background on" else "In app only",
+        own.takeIf { it > 0 }?.let { "$it with own rules" },
+        muted.takeIf { it > 0 }?.let { "$it muted" },
+    ).joinToString(" · ")
+}
+
+// ---- pages ------------------------------------------------------------
+
+@Composable
+private fun ApiPage(repo: Repo, open: (String) -> Unit) {
     val key by repo.apiKey.collectAsStateWithLifecycle()
     val conn by repo.account.conn.collectAsStateWithLifecycle()
-    val realtime by repo.realtime.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var removeAsk by remember { mutableStateOf(false) }
-    var resetAsk by remember { mutableStateOf(false) }
+    var termsAsk by remember { mutableStateOf(false) }
+    var license by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val askNotify = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
-
-    Column(
-        Modifier.fillMaxSize().background(C.bg).imePadding().verticalScroll(rememberScrollState())
-            .padding(horizontal = 10.dp).padding(bottom = 24.dp),
-    ) {
-        Text("Settings", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(4.dp, 8.dp, 4.dp, 4.dp))
-
-        Section("API key", API, androidx.compose.material.icons.Icons.Filled.Key) {
-            if (key != null) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text((if (key!!.startsWith("fp_test_")) "Sandbox" else "Live") + " key …" + key!!.takeLast(4), color = C.text, fontSize = 14.sp)
-                        Spacer(Modifier.height(2.dp))
-                        ConnBadge(conn)
-                    }
-                    Act("Remove key", color = C.down, modifier = Modifier.width(100.dp)) { removeAsk = true }
-                }
-            } else {
-                AppInput("", input, { input = it.trim() }, Modifier.fillMaxWidth(), secret = true, placeholder = "fp_live_… or fp_test_…")
-                Spacer(Modifier.height(8.dp))
-                SolidBtn(
-                    if (busy) "Checking…" else "Save and test", API, Modifier.fillMaxWidth(),
-                    enabled = !busy && (input.startsWith("fp_live_") || input.startsWith("fp_test_")),
-                ) {
-                    busy = true; status = null
-                    scope.launch {
-                        runCatching { repo.rest.accounts(input) }
-                            .onSuccess { repo.setApiKey(input); input = ""; status = "Connected: ${it.size} account(s)" }
-                            .onFailure { status = "Rejected: ${it.message}" }
-                        busy = false
-                    }
-                }
-                Note("Stored encrypted on this phone. Needs a Read And Trade key.")
-            }
-            status?.let { Text(it, color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
-        }
-
-        Section("Orders", ORDERS, androidx.compose.material.icons.Icons.Filled.TouchApp) {
-            var confirm by remember { mutableStateOf(repo.prefs.confirmOrders) }
-            Toggle("Confirm orders", "Off = one tap", confirm, ORDERS) { confirm = it; repo.prefs.confirmOrders = it }
-            var confirmAll by remember { mutableStateOf(repo.prefs.confirmCloseAll) }
-            Toggle("Confirm full closes", "Close, close all, hold to close", confirmAll, ORDERS) { confirmAll = it; repo.prefs.confirmCloseAll = it }
-            var slip by remember { mutableStateOf((repo.prefs.slippageBps / 100.0).toString()) }
-            var quick by remember { mutableStateOf(repo.prefs.quickSizes.joinToString(", ")) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppInput("Max slippage %", slip, {
-                    slip = it
-                    it.toDoubleOrNull()?.takeIf { v -> v > 0 && v <= 5 }?.let { v -> repo.prefs.slippageBps = (v * 100).toInt().coerceAtLeast(1) }
-                }, Modifier.weight(1f), numeric = true)
-                AppInput("Quick sizes $", quick, { quick = it; repo.prefs.quickSizes = it.split(",").mapNotNull { s -> s.trim().toIntOrNull() }.take(4) }, Modifier.weight(1f))
-            }
-        }
-
-        Section("Risk", RULES, androidx.compose.material.icons.Icons.Filled.Bedtime) {
-            var lock by remember { mutableStateOf(repo.prefs.lockEnabled) }
-            val locked = repo.prefs.locked()
-            // Can't switch the rule off (or move its hours) while it's in force.
-            Toggle("Night lock", if (locked) "Active now; locked until it ends" else "No new trades in these Oslo hours; closing works", lock, RULES, enabled = !locked) {
-                lock = it; repo.prefs.lockEnabled = it
-            }
-            if (lock && !locked) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                var from by remember { mutableStateOf(repo.prefs.lockStart.toString()) }
-                var to by remember { mutableStateOf(repo.prefs.lockEnd.toString()) }
-                AppInput("From", from, { from = it; it.toIntOrNull()?.takeIf { h -> h in 0..23 }?.let { h -> repo.prefs.lockStart = h } }, Modifier.weight(1f), numeric = true)
-                AppInput("Until", to, { to = it; it.toIntOrNull()?.takeIf { h -> h in 0..23 }?.let { h -> repo.prefs.lockEnd = h } }, Modifier.weight(1f), numeric = true)
-            }
-            Divider()
-            var alerts by remember { mutableStateOf(repo.prefs.alertsEnabled) }
-            Toggle("Drawdown alerts", "Notify + vibrate when room runs low", alerts, RULES) {
-                alerts = it; repo.prefs.alertsEnabled = it
-                if (it && android.os.Build.VERSION.SDK_INT >= 33) askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-            }
-            if (alerts) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                var usd by remember { mutableStateOf(repo.prefs.alertRoomUsd.toString()) }
-                var pct by remember { mutableStateOf(repo.prefs.alertRoomPct.toString()) }
-                AppInput("Below $ left", usd, { usd = it; repo.prefs.alertRoomUsd = it.toDoubleOrNull()?.toInt() ?: 0 }, Modifier.weight(1f), numeric = true)
-                AppInput("Or below % left", pct, { pct = it; repo.prefs.alertRoomPct = it.toDoubleOrNull()?.toInt()?.coerceIn(0, 100) ?: 0 }, Modifier.weight(1f), numeric = true)
-            }
-            var bg by remember { mutableStateOf(repo.prefs.monitorBackground) }
-            Toggle("Watch in background", "Keeps alerts live with the app closed", bg, RULES) {
-                bg = it; repo.prefs.monitorBackground = it
-                if (it && android.os.Build.VERSION.SDK_INT >= 33) askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                com.alex.mfppro.data.MonitorService.setEnabled(ctx, it)
-            }
-        }
-
-        Section("Notifications", ALERTS, androidx.compose.material.icons.Icons.Filled.NotificationsActive) {
-            fun ask() { if (android.os.Build.VERSION.SDK_INT >= 33) askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
-            var nf by remember { mutableStateOf(repo.prefs.notifyFills) }
-            Toggle("Fills", "Every open and close, with PnL", nf, ALERTS) { nf = it; repo.prefs.notifyFills = it; if (it) ask() }
-            var ns by remember { mutableStateOf(repo.prefs.notifyStops) }
-            Toggle("Stop loss hit", "Loud alert when a stop fills", ns, ALERTS) { ns = it; repo.prefs.notifyStops = it; if (it) ask() }
-            var nb by remember { mutableStateOf(repo.prefs.notifyBreach) }
-            Toggle("Breach / liquidation", "Account failed, no room left, liquidated", nb, ALERTS) { nb = it; repo.prefs.notifyBreach = it; if (it) ask() }
-            var nm by remember { mutableStateOf(repo.prefs.notifyMargin) }
-            Toggle("Margin call", "Margin used above the % below", nm, ALERTS) { nm = it; repo.prefs.notifyMargin = it; if (it) ask() }
-            if (nm) {
-                var mp by remember { mutableStateOf(repo.prefs.marginAlertPct.toString()) }
-                AppInput("Margin used %", mp, { mp = it; it.toIntOrNull()?.takeIf { v -> v in 10..100 }?.let { v -> repo.prefs.marginAlertPct = v } }, Modifier.fillMaxWidth(), numeric = true)
-            }
-            var np by remember { mutableStateOf(repo.prefs.notifyPnl) }
-            Toggle("PnL steps", "Each position, when PnL moves a step", np, ALERTS) { np = it; repo.prefs.notifyPnl = it; if (it) ask() }
-            if (np) PnlAlertSettings(repo)
-        }
-
-        Section("Chart", DATA, androidx.compose.material.icons.Icons.Filled.Bolt) {
-            Toggle("Real-time position value", "Live order book instead of slower mark", realtime, DATA) { repo.setRealtime(it) }
-            var sess by remember { mutableStateOf(repo.prefs.showSessions) }
-            Toggle("Session shading", "Asia and US hours, open/close lines", sess, DATA) { sess = it; repo.prefs.showSessions = it }
-            var eu by remember { mutableStateOf(repo.prefs.sessionEu) }
-            Toggle("EU session", "Shade London hours too", eu, DATA) { eu = it; repo.prefs.sessionEu = it }
-            var kz by remember { mutableStateOf(repo.prefs.killzones) }
-            Toggle("Killzones", "Asia, London, NY AM/PM strip on top", kz, DATA) { kz = it; repo.prefs.killzones = it }
-        }
-
-        Section("Chart indicators", DATA, androidx.compose.material.icons.Icons.Filled.Build) {
-            Note("Which toggles show in the bar above the chart.")
-            var ps by remember { mutableStateOf(repo.prefs.chipPos) }
-            Toggle("Position lines", "Net PnL box, TP/SL, DLL, Max DD and pass target", ps, DATA) { ps = it; repo.prefs.chipPos = it; if (!it) repo.prefs.showPosLines = true }
-            var o by remember { mutableStateOf(repo.prefs.chipOpens) }
-            Toggle("D/W/M opens", "Daily, weekly, monthly open lines", o, DATA) { o = it; repo.prefs.chipOpens = it }
-            var pv by remember { mutableStateOf(repo.prefs.chipPivots) }
-            Toggle("Pivot points", "Classic P, R1–R3, S1–S3 from yesterday (last week on 4h+)", pv, DATA) { pv = it; repo.prefs.chipPivots = it }
-            var v by remember { mutableStateOf(repo.prefs.chipVp) }
-            Toggle("Volume profile", "Session VP with value area", v, DATA) { v = it; repo.prefs.chipVp = it }
-            var pc by remember { mutableStateOf(repo.prefs.chipPoc) }
-            Toggle("Session POC", "Busiest price of the session", pc, DATA) { pc = it; repo.prefs.chipPoc = it }
-            var se by remember { mutableStateOf(repo.prefs.chipSess) }
-            Toggle("Sessions", "Asia/US shading, killzones, opens/closes", se, DATA) { se = it; repo.prefs.chipSess = it }
-        }
-
-        Section("Display", DISPLAY, androidx.compose.material.icons.Icons.Filled.Palette) {
-            Label("Theme")
-            // Each chip shows the theme's own background, panel and accent.
-            Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppTheme.entries.forEach { t ->
-                    val on = Palette.theme == t
-                    Column(
-                        Modifier.clip(RoundedCornerShape(10.dp)).background(Color(t.bg))
-                            .border(if (on) 2.dp else 1.dp, if (on) Color(t.accent) else Color(t.line), RoundedCornerShape(10.dp))
-                            .clickable { Palette.theme = t; repo.prefs.theme = t.name }.padding(horizontal = 10.dp, vertical = 8.dp),
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            for (c in listOf(t.panel2, t.up, t.down, t.accent)) Box(Modifier.size(10.dp).clip(CircleShape).background(Color(c)))
-                        }
-                        Text(t.label, color = Color(t.text), fontSize = 11.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.padding(top = 4.dp))
-                    }
-                }
-            }
-            Toggle("Colour-blind mode", "Blue up, orange down", Palette.colorBlind, DISPLAY) {
-                Palette.colorBlind = it; repo.prefs.colorBlind = it
-            }
-            var hideComp by remember { mutableStateOf(repo.prefs.hideComp) }
-            Toggle("Hide competition accounts", "Out of Positions, Accounts and totals", hideComp, DISPLAY) {
-                hideComp = it; repo.prefs.hideComp = it; Comp.hide = it
-            }
-            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Profit split", color = C.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text("Your share of positive PnL", color = C.muted, fontSize = 11.sp)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    for (v in listOf(100, 90, 80)) Seg("$v%", Split.pct == v, PNL) { Split.pct = v; repo.prefs.profitSplit = v }
-                }
-            }
-        }
-
-        Section("Reset", RULES, androidx.compose.material.icons.Icons.Filled.Refresh) {
-            Note("Puts every setting back to default. Your API key stays.")
-            Act("Reset settings", color = C.down, modifier = Modifier.padding(top = 8.dp).fillMaxWidth()) { resetAsk = true }
+    fun test() {
+        busy = true; status = null
+        scope.launch {
+            runCatching { repo.rest.accounts(input) }
+                .onSuccess { repo.setApiKey(input); input = ""; status = "Connected: ${it.size} account(s)" }
+                .onFailure { status = "Rejected: ${it.message}" }
+            busy = false
         }
     }
+    Section("API key", API, Icons.Filled.Key) {
+        if (key != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text((if (key!!.startsWith("fp_test_")) "Sandbox" else "Live") + " key …" + key!!.takeLast(4), color = C.text, fontSize = 14.sp)
+                    Spacer(Modifier.height(2.dp))
+                    ConnBadge(conn)
+                }
+                Act("Remove key", color = C.down, modifier = Modifier.width(100.dp)) { removeAsk = true }
+            }
+        } else {
+            AppInput("", input, { input = it.trim() }, Modifier.fillMaxWidth(), secret = true, placeholder = "fp_live_… or fp_test_…")
+            Spacer(Modifier.height(8.dp))
+            SolidBtn(
+                if (busy) "Checking…" else "Save and test", API, Modifier.fillMaxWidth(),
+                enabled = !busy && (input.startsWith("fp_live_") || input.startsWith("fp_test_")),
+            ) { termsAsk = true }
+            Note("Stored encrypted on this phone and only sent to the MFP API. Needs a Read And Trade key.")
+            Note("Adding a key means you accept the alpha tester terms: Delta 1kx is an alpha app, not related to MFP, and used at your own risk.")
+        }
+        status?.let { Text(it, color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+        if (key != null) repo.prefs.termsAcceptedAt.takeIf { it > 0 }?.let {
+            Note("Alpha tester terms accepted " + java.text.SimpleDateFormat("d MMM yyyy", Locale.US).format(java.util.Date(it)) + ".")
+        }
+    }
+    Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        NavRow("About Delta 1kx", "Alpha app by $CREATOR · x.com/caldriven", ABOUT, Icons.Filled.Info) { open("about") }
+        NavRow("License & terms", "Private alpha tester license, as is, own risk", ABOUT, Icons.Filled.Gavel, last = true) { open("license") }
+    }
+
+    if (termsAsk) TermsDialog(
+        title = "Add your MFP API key", confirm = "Agree and connect", dismiss = "Cancel",
+        onLicense = { license = true }, onDismiss = { termsAsk = false },
+    ) { termsAsk = false; repo.prefs.acceptTerms(TERMS_VERSION); test() }
+    if (license) LicenseDialog { license = false }
 
     // Removing the key needs "ok" typed: it logs the app out of every account.
     if (removeAsk) {
@@ -263,28 +247,399 @@ fun SettingsScreen(repo: Repo) {
             dismissButton = { androidx.compose.material3.TextButton(onClick = { removeAsk = false }) { Text("Cancel", color = C.muted) } },
         )
     }
-    if (resetAsk) ConfirmDialog("Reset settings", "Back to defaults", C.down, note = "Theme, alerts, chart and order settings reset. The API key is kept.",
-        confirm = "Reset", onDismiss = { resetAsk = false }) {
-        resetAsk = false
-        repo.prefs.resetUi()
-        // Live state that isn't re-read on restart.
-        repo.setRealtime(repo.prefs.realtimePnl)
-        com.alex.mfppro.data.MonitorService.setEnabled(ctx, repo.prefs.monitorBackground)
-        // Restart so every screen picks up the defaults.
-        (ctx as? android.app.Activity)?.recreate()
+}
+
+@Composable
+private fun TradingPage(repo: Repo) {
+    val p = repo.prefs
+    Section("Confirmations", ORDERS, Icons.Filled.TouchApp) {
+        var confirm by remember { mutableStateOf(p.confirmOrders) }
+        Toggle("Confirm orders", "Off = one tap", confirm, ORDERS) { confirm = it; p.confirmOrders = it }
+        var confirmAll by remember { mutableStateOf(p.confirmCloseAll) }
+        Toggle("Confirm full closes", "Close, close all, hold to close", confirmAll, ORDERS) { confirmAll = it; p.confirmCloseAll = it }
+    }
+    Section("Market orders", ORDERS, Icons.Filled.TouchApp) {
+        var slip by remember { mutableStateOf(p.slippageBps) }
+        ChipPick("Max slippage", listOf(5, 10, 20, 50, 100), slip, ORDERS, { String.format(Locale.US, "%.2f%%", it / 100.0).replace(".00%", "%") }) {
+            slip = it; p.slippageBps = it
+        }
+        var quick by remember { mutableStateOf(p.quickSizes.joinToString(", ")) }
+        AppInput("Quick sizes $ (up to 4, comma separated)", quick, { quick = it; p.quickSizes = it.split(",").mapNotNull { s -> s.trim().toIntOrNull() }.take(4) },
+            Modifier.fillMaxWidth().padding(top = 6.dp))
+    }
+    Section("Take profit / stop loss", ORDERS, Icons.Filled.TouchApp) {
+        Note("Default for new exits. The TP/SL dialogs let you switch per order.")
+        var tp by remember { mutableStateOf(p.tpExecution) }
+        Label("Take profit")
+        Box(Modifier.padding(top = 4.dp)) { ExitExecPicker(true, tp, "binance") { tp = it; p.tpExecution = it } }
+        var sl by remember { mutableStateOf(p.slExecution) }
+        Label("Stop loss")
+        Box(Modifier.padding(top = 4.dp)) { ExitExecPicker(false, sl, "binance") { sl = it; p.slExecution = it } }
+        Note("Triggers watch the last traded price on Binance, Bybit and Hyperliquid, and the venue mid price on Veranta (forex) and Ostium.")
+    }
+}
+
+@Composable
+private fun RiskPage(repo: Repo) {
+    val p = repo.prefs
+    Section("Night lock", RULES, Icons.Filled.Bedtime) {
+        var lock by remember { mutableStateOf(p.lockEnabled) }
+        val locked = p.locked()
+        // Can't switch the rule off (or move its hours) while it's in force.
+        Toggle("Night lock", if (locked) "Active now; locked until it ends" else "No new trades in these Oslo hours; closing works", lock, RULES, enabled = !locked) {
+            lock = it; p.lockEnabled = it
+        }
+        if (lock && !locked) {
+            var from by remember { mutableStateOf(p.lockStart) }
+            var to by remember { mutableStateOf(p.lockEnd) }
+            ChipPick("From", listOf(20, 21, 22, 23, 0, 1, 2), from, RULES, { String.format(Locale.US, "%02d:00", it) }) { from = it; p.lockStart = it }
+            ChipPick("Until", listOf(5, 6, 7, 8, 9, 10), to, RULES, { String.format(Locale.US, "%02d:00", it) }) { to = it; p.lockEnd = it }
+        }
+    }
+}
+
+@Composable
+private fun NotifyPage(repo: Repo, ask: () -> Unit, open: (String) -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val accounts by repo.account.accounts.collectAsStateWithLifecycle()
+    Section("Delivery", ALERTS, Icons.Filled.NotificationsActive) {
+        var bg by remember { mutableStateOf(repo.prefs.monitorBackground) }
+        Toggle("Watch in background", "Keeps alerts live with the app closed", bg, ALERTS) {
+            bg = it; repo.prefs.monitorBackground = it
+            if (it) ask()
+            com.alex.mfppro.data.MonitorService.setEnabled(ctx, it)
+        }
+    }
+    Text("RULES", color = C.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, modifier = Modifier.padding(6.dp, 10.dp, 6.dp, 4.dp))
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        NavRow("All accounts (default)", rulesSummary(repo.prefs.notifyDefaults), ALERTS, Icons.Filled.NotificationsActive) { open("rules:default") }
+        val list = activeAccounts(accounts, includeComp = true)
+        list.forEachIndexed { i, s ->
+            val own = repo.prefs.notifyOverride(s.account.id)
+            val sub = when {
+                own == null -> "Uses the default"
+                own.muted -> "Muted"
+                else -> "Own rules · " + rulesSummary(own)
+            }
+            NavRow(accountName(s), sub, if (own?.muted == true) C.muted else if (own != null) ALERTS else C.text, null, last = i == list.lastIndex) { open("rules:" + s.account.id) }
+        }
+    }
+    Note("Each account follows the default until you give it its own rules or mute it.")
+}
+
+private fun rulesSummary(r: NotifyRules): String = if (r.muted) "Muted" else listOfNotNull(
+    "fills".takeIf { r.fills }, "stops".takeIf { r.stops }, "breach".takeIf { r.breach },
+    "room < ${if (r.roomUsd > 0) "$" + r.roomUsd else "${r.roomPct}%"}".takeIf { r.room },
+    "margin ${r.marginPct}%".takeIf { r.margin },
+    "PnL ${if (r.pnlPreset == "custom") "custom" else r.pnlPreset.lowercase()}".takeIf { r.pnl },
+).joinToString(", ").ifEmpty { "Nothing on" }
+
+/** Rules editor for one account, or the default set when [accountId] is null. */
+@Composable
+private fun RulesPage(repo: Repo, accountId: String?, ask: () -> Unit, openPnl: () -> Unit) {
+    val p = repo.prefs
+    var own by remember(accountId) { mutableStateOf(accountId?.let { p.notifyOverride(it) }) }
+    var r by remember(accountId) { mutableStateOf(accountId?.let { p.notifyFor(it) } ?: p.notifyDefaults) }
+    fun save(v: NotifyRules) {
+        r = v
+        if (accountId == null) p.notifyDefaults = v else { own = v; p.setNotifyOverride(accountId, v) }
+    }
+    if (accountId != null) Section("This account", ALERTS, Icons.Filled.NotificationsActive) {
+        Toggle("Use the default rules", "Off = tune this account on its own", own == null, ALERTS) { useDefault ->
+            if (useDefault) { own = null; p.setNotifyOverride(accountId, null); r = p.notifyDefaults }
+            else save(p.notifyDefaults)
+        }
+        Toggle("Mute this account", "No notifications from it at all", r.muted, C.down) { save(r.copy(muted = it)) }
+    }
+    // Following the default: show it, but edit it on the default page.
+    if (accountId != null && own == null) {
+        Note("Following the default: ${rulesSummary(r)}.")
+        return
+    }
+    if (r.muted) return
+    Section("Trades", ALERTS, Icons.Filled.NotificationsActive) {
+        Toggle("Fills", "Every open and close, with PnL", r.fills, ALERTS) { save(r.copy(fills = it)); if (it) ask() }
+        Toggle("Stop loss hit", "Loud alert when a stop fills", r.stops, ALERTS) { save(r.copy(stops = it)); if (it) ask() }
+    }
+    Section("Risk", RULES, Icons.Filled.NotificationsActive) {
+        Toggle("Breach / liquidation", "Account failed, no room left, liquidated", r.breach, RULES) { save(r.copy(breach = it)); if (it) ask() }
+        Divider()
+        Toggle("Drawdown running low", "Notify + vibrate once; re-arms when room recovers", r.room, RULES) { save(r.copy(room = it)); if (it) ask() }
+        if (r.room) {
+            ChipPick("When room left is below", listOf(0, 100, 200, 300, 500, 1000), r.roomUsd, RULES, { if (it == 0) "Off" else "$$it" }) { save(r.copy(roomUsd = it)) }
+            ChipPick("Or below this share of the allowance", listOf(0, 10, 25, 50), r.roomPct, RULES, { if (it == 0) "Off" else "$it%" }) { save(r.copy(roomPct = it)) }
+        }
+        Divider()
+        Toggle("Margin call", "Margin used as a share of equity", r.margin, RULES) { save(r.copy(margin = it)); if (it) ask() }
+        if (r.margin) ChipPick("Alert at", listOf(50, 70, 80, 90, 95), r.marginPct, RULES, { "$it%" }) { save(r.copy(marginPct = it)) }
+    }
+    Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        NavRow("PnL steps", if (!r.pnl) "Off" else pnlSummary(r), PNL, Icons.Filled.Bolt, last = true, onClick = openPnl)
+    }
+}
+
+private fun pnlSummary(r: NotifyRules): String {
+    val parts = listOfNotNull(
+        r.pnlUsd.takeIf { it > 0 }?.let { "every $$it" },
+        r.pnlPct.takeIf { it > 0 }?.let { "${fmtStep(it)}% of position" },
+        r.pnlEq.takeIf { it > 0 }?.let { "${fmtStep(it)}% of equity" },
+        r.pnlRisk.takeIf { it > 0 }?.let { "${fmtStep(it)}% of loss limit" },
+    )
+    val name = if (r.pnlPreset == "custom") "Custom" else r.pnlPreset
+    return "$name · " + parts.joinToString(", ").ifEmpty { "no steps" }
+}
+
+private fun fmtStep(v: Float) = if (v % 1f == 0f) v.toInt().toString() else v.toString()
+
+/** PnL step alerts: a preset, then optional fine-tuning by tapping values. */
+@Composable
+private fun PnlPage(repo: Repo, accountId: String?, ask: () -> Unit) {
+    val p = repo.prefs
+    var r by remember(accountId) { mutableStateOf(accountId?.let { p.notifyFor(it) } ?: p.notifyDefaults) }
+    fun save(v: NotifyRules) {
+        r = v
+        if (accountId == null) p.notifyDefaults = v else p.setNotifyOverride(accountId, v)
+    }
+    Section("PnL steps", PNL, Icons.Filled.Bolt) {
+        Toggle("Notify on PnL steps", "Each open position, every time its PnL moves a step", r.pnl, PNL) { save(r.copy(pnl = it)); if (it) ask() }
+    }
+    if (!r.pnl) return
+
+    // What each step is worth right now: this account's largest position, or for the default the trading
+    // account's, then any non-competition account's (a competition's huge book makes a poor example).
+    val marks = repo.market.marks.value
+    val all = activeAccounts(repo.account.accounts.value, includeComp = true)
+    val pools = if (accountId != null) listOf(all.filter { it.account.id == accountId })
+        else listOf(all.filter { it.account.id == repo.prefs.tradeAccountId }, all.filter { !isComp(it) }, all)
+    fun largest(pool: List<com.alex.mfppro.data.AccountState>) =
+        pool.flatMap { s -> s.positions.values.map { s to it } }.maxByOrNull { (_, pos) -> pos.size * (marks[pos.feedKey] ?: pos.entryPrice) }
+    val big = pools.firstNotNullOfOrNull { largest(it) }
+    val acct = big?.first ?: pools.firstNotNullOfOrNull { it.firstOrNull() }
+    val risk = acct?.let { com.alex.mfppro.data.riskOf(it, marks) }
+    val cost = big?.second?.let { it.size * it.entryPrice }
+    val allowance = risk?.let { (if (it.bindingIsDaily) it.dailyAllowance else it.ddAllowance)?.takeIf { a -> a > 0 } }
+
+    Section("How often", PNL, Icons.Filled.Bolt) {
+        for (preset in PNL_PRESETS) {
+            val on = r.pnlPreset == preset.name
+            Column(
+                Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(if (on) PNL.copy(alpha = 0.14f) else C.bg)
+                    .border(1.dp, if (on) PNL else C.line, RoundedCornerShape(10.dp))
+                    .clickable { save(r.withPreset(preset)) }.padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(preset.name, color = if (on) PNL else C.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(preset.about, color = C.muted, fontSize = 11.sp, lineHeight = 15.sp)
+            }
+        }
+        if (r.pnlPreset == "custom") Note("Custom: your own mix below.")
+    }
+    Section("Fine-tune", PNL, Icons.Filled.Bolt) {
+        Note("Tap a value; Off drops that measure. Any measure that is on can fire.")
+        fun worth(base: Double?, pct: Float) = if (pct > 0 && base != null) "≈ " + fmtUsd(base * pct / 100) else null
+        ChipPick("Every fixed dollar amount", listOf(0, 25, 50, 100, 250, 500), r.pnlUsd, PNL, { if (it == 0) "Off" else "$$it" }) {
+            save(r.copy(pnlUsd = it, pnlPreset = "custom"))
+        }
+        ChipPick("Every % of the position", listOf(0f, 0.5f, 1f, 2f, 5f), r.pnlPct, PNL, { if (it == 0f) "Off" else fmtStep(it) + "%" },
+            hint = worth(cost, r.pnlPct)) { save(r.copy(pnlPct = it, pnlPreset = "custom")) }
+        ChipPick("Every % of account equity", listOf(0f, 0.1f, 0.25f, 0.5f, 1f, 2f), r.pnlEq, PNL, { if (it == 0f) "Off" else fmtStep(it) + "%" },
+            hint = worth(risk?.equity, r.pnlEq)) { save(r.copy(pnlEq = it, pnlPreset = "custom")) }
+        ChipPick("Every % of the loss limit used (losses only)", listOf(0f, 2.5f, 5f, 10f, 25f, 50f), r.pnlRisk, PNL, { if (it == 0f) "Off" else fmtStep(it) + "%" },
+            hint = if (r.pnlRisk > 0 && allowance != null) "${fmtUsd(allowance * r.pnlRisk / 100)} of ${fmtUsd(allowance)} ${if (risk?.bindingIsDaily == true) "daily" else "max DD"}" else null,
+        ) { save(r.copy(pnlRisk = it, pnlPreset = "custom")) }
+        if (big != null) Note("≈ values use ${big.second.symbol} (${fmtUsd(cost ?: 0.0)}) on ${accountName(big.first)}, equity ${fmtUsd(risk?.equity ?: 0.0)}.")
+    }
+    Section("Which moves", PNL, Icons.Filled.Bolt) {
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Seg("Both", r.pnlSide == "both", PNL) { save(r.copy(pnlSide = "both")) }
+            Seg("Losses only", r.pnlSide == "loss", C.down) { save(r.copy(pnlSide = "loss")) }
+            Seg("Profits only", r.pnlSide == "profit", C.up) { save(r.copy(pnlSide = "profit")) }
+        }
+        Toggle("Net PnL", "Count after fees and swap, not price PnL", r.pnlNet, PNL) { save(r.copy(pnlNet = it)) }
+    }
+}
+
+@Composable
+private fun ChartPage(repo: Repo) {
+    val p = repo.prefs
+    val realtime by repo.realtime.collectAsStateWithLifecycle()
+    Section("Chart", DATA, Icons.Filled.Bolt) {
+        Toggle("Real-time position value", "Live order book instead of slower mark", realtime, DATA) { repo.setRealtime(it) }
+        var sess by remember { mutableStateOf(p.showSessions) }
+        Toggle("Session shading", "Asia and US hours, open/close lines", sess, DATA) { sess = it; p.showSessions = it }
+        var eu by remember { mutableStateOf(p.sessionEu) }
+        Toggle("EU session", "Shade London hours too", eu, DATA) { eu = it; p.sessionEu = it }
+        var kz by remember { mutableStateOf(p.killzones) }
+        Toggle("Killzones", "Asia, London, NY AM/PM strip on top", kz, DATA) { kz = it; p.killzones = it }
+    }
+    Section("Indicator bar", DATA, Icons.Filled.Bolt) {
+        Note("Which toggles show in the bar above the chart.")
+        var ps by remember { mutableStateOf(p.chipPos) }
+        Toggle("Position lines", "Net PnL box, TP/SL, DLL, Max DD and pass target", ps, DATA) { ps = it; p.chipPos = it; if (!it) p.showPosLines = true }
+        var o by remember { mutableStateOf(p.chipOpens) }
+        Toggle("D/W/M opens", "Daily, weekly, monthly open lines", o, DATA) { o = it; p.chipOpens = it }
+        var pv by remember { mutableStateOf(p.chipPivots) }
+        Toggle("Pivot points", "Classic P, R1–R3, S1–S3 from yesterday (last week on 4h+)", pv, DATA) { pv = it; p.chipPivots = it }
+        var v by remember { mutableStateOf(p.chipVp) }
+        Toggle("Volume profile", "Session VP with value area", v, DATA) { v = it; p.chipVp = it }
+        var pc by remember { mutableStateOf(p.chipPoc) }
+        Toggle("Session POC", "Busiest price of the session", pc, DATA) { pc = it; p.chipPoc = it }
+        var se by remember { mutableStateOf(p.chipSess) }
+        Toggle("Sessions", "Asia/US shading, killzones, opens/closes", se, DATA) { se = it; p.chipSess = it }
+    }
+}
+
+@Composable
+private fun DisplayPage(repo: Repo) {
+    Section("Theme", DISPLAY, Icons.Filled.Palette) {
+        // Each chip shows the theme's own background, panel and accent.
+        Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppTheme.entries.forEach { t ->
+                val on = Palette.theme == t
+                Column(
+                    Modifier.clip(RoundedCornerShape(10.dp)).background(Color(t.bg))
+                        .border(if (on) 2.dp else 1.dp, if (on) Color(t.accent) else Color(t.line), RoundedCornerShape(10.dp))
+                        .clickable { Palette.theme = t; repo.prefs.theme = t.name }.padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        for (c in listOf(t.panel2, t.up, t.down, t.accent)) Box(Modifier.size(10.dp).clip(CircleShape).background(Color(c)))
+                    }
+                    Text(t.label, color = Color(t.text), fontSize = 11.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        }
+        Toggle("Colour-blind mode", "Blue up, orange down", Palette.colorBlind, DISPLAY) {
+            Palette.colorBlind = it; repo.prefs.colorBlind = it
+        }
+    }
+    Section("Accounts", DISPLAY, Icons.Filled.Palette) {
+        var hideComp by remember { mutableStateOf(repo.prefs.hideComp) }
+        Toggle("Hide competition accounts", "Out of Positions, Accounts and totals", hideComp, DISPLAY) {
+            hideComp = it; repo.prefs.hideComp = it; Comp.hide = it
+        }
+        ChipPick("Profit split (your share of positive PnL)", listOf(100, 90, 80), Split.pct, PNL, { "$it%" }) { Split.pct = it; repo.prefs.profitSplit = it }
+    }
+}
+
+@Composable
+private fun AboutPage(repo: Repo, open: (String) -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    Column(Modifier.padding(4.dp, 6.dp, 4.dp, 8.dp)) {
+        Text("Delta 1kx", color = C.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Mobile trading terminal · alpha ${appVersion(ctx)} · by $CREATOR", color = C.muted, fontSize = 12.sp)
+    }
+    Section("Alpha testing", ALERTS, Icons.Filled.Info) {
+        Text(ALPHA_ABOUT, color = C.text, fontSize = 13.sp, lineHeight = 18.sp)
+        Note("Report bugs and wrong numbers to $CREATOR on X.")
+    }
+    Section("Made by", ABOUT, Icons.Filled.AlternateEmail) {
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { openUrl(ctx, CREATOR_X) }.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(CREATOR, color = C.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("x.com/caldriven", color = API, fontSize = 12.sp)
+            }
+            Icon(Icons.Filled.ChevronRight, null, tint = C.muted, modifier = Modifier.size(20.dp))
+        }
+    }
+    Section("Not affiliated with MFP", RULES, Icons.Filled.Gavel) {
+        Text(NOT_AFFILIATED, color = C.text, fontSize = 13.sp, lineHeight = 18.sp)
+        Note("Nothing in the app is financial advice. Orders placed here are real orders on your account.")
+    }
+    Section("Data sources", DATA, Icons.Filled.Public) { Note(DATA_SOURCES) }
+    Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        val at = repo.prefs.termsAcceptedAt
+        NavRow("License & terms", if (at > 0) "Private alpha tester license · accepted " +
+            java.text.SimpleDateFormat("d MMM yyyy", Locale.US).format(java.util.Date(at)) else "Private alpha tester license", ABOUT, Icons.Filled.Gavel) { open("license") }
+        NavRow("Open source licenses", "${OSS.size} libraries and fonts", ABOUT, Icons.Filled.Code, last = true) { open("oss") }
+    }
+}
+
+@Composable
+private fun LicensePage() {
+    Section("Alpha tester license", ABOUT, Icons.Filled.Gavel) {
+        Text(LICENSE_TEXT, color = C.text, fontSize = 12.sp, lineHeight = 17.sp)
+    }
+}
+
+@Composable
+private fun OssPage(open: (String) -> Unit) {
+    Note("Delta 1kx is built with these open source components. Tap one for its license text.")
+    Column(Modifier.padding(vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        OSS.forEachIndexed { i, o -> NavRow(o.name, "${o.by} · ${o.license}", ABOUT, null, last = i == OSS.lastIndex) { open("oss:$i") } }
+    }
+}
+
+@Composable
+private fun OssLicensePage(o: OssItem) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val text = remember(o.file) { runCatching { rawText(ctx, o.file) }.getOrDefault("") }
+    Section(o.license, ABOUT, Icons.Filled.Code) {
+        Text("Copyright ${o.by}", color = C.text, fontSize = 13.sp)
+        Text(o.url, color = API, fontSize = 12.sp, modifier = Modifier.clickable { openUrl(ctx, o.url) }.padding(vertical = 4.dp))
+        Divider()
+        Text(text, color = C.muted, fontSize = 11.sp, lineHeight = 15.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+    }
+}
+
+// ---- building blocks --------------------------------------------------
+
+/** Sub-page frame: back arrow and title, then the page. */
+@Composable
+private fun Page(title: String, onBack: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    Row(Modifier.padding(top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = C.text,
+            modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(8.dp).size(20.dp))
+        Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = C.text, maxLines = 1)
+    }
+    Column(content = content)
+}
+
+/** A row that opens a sub-page: icon, title, one-line summary and a chevron. */
+@Composable
+private fun NavRow(title: String, sub: String, color: Color, icon: ImageVector?, last: Boolean = false, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (icon != null) {
+            Box(Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)).background(color.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
+                Icon(icon, null, tint = color, modifier = Modifier.size(17.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, color = C.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            Text(sub, color = if (icon == null && color != C.text) color else C.muted, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2)
+        }
+        Icon(Icons.Filled.ChevronRight, null, tint = C.muted, modifier = Modifier.size(20.dp))
+    }
+    if (!last) Box(Modifier.padding(start = if (icon != null) 52.dp else 12.dp).fillMaxWidth().height(1.dp).background(C.line))
+}
+
+/** Pick one value from a short row of chips, with an optional line under it. */
+@Composable
+private fun <T : Comparable<T>> ChipPick(label: String, options: List<T>, value: T, color: Color, text: (T) -> String, hint: String? = null, onPick: (T) -> Unit) {
+    Column(Modifier.padding(top = 8.dp)) {
+        Text(label, color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        Row(Modifier.padding(top = 5.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // A value set elsewhere that isn't one of the chips still shows, selected.
+            val all = if (value in options) options else (options + value).sorted()
+            all.forEach { o -> Seg(text(o), o == value, color) { onPick(o) } }
+        }
+        hint?.let { Text(it, color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 2.dp, top = 3.dp)) }
     }
 }
 
 /** Card with a tinted icon + title. */
 @Composable
-private fun Section(title: String, color: Color, icon: androidx.compose.ui.graphics.vector.ImageVector, content: @Composable ColumnScope.() -> Unit) {
+private fun Section(title: String, color: Color, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
     Column(
         Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 4.dp)) {
             Box(Modifier.size(26.dp).clip(RoundedCornerShape(7.dp)).background(color.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
-                androidx.compose.material3.Icon(icon, null, tint = color, modifier = Modifier.size(16.dp))
+                Icon(icon, null, tint = color, modifier = Modifier.size(16.dp))
             }
             Spacer(Modifier.width(8.dp))
             Text(title.uppercase(), color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
@@ -312,79 +667,3 @@ private fun Note(text: String) = Text(text, color = C.muted, fontSize = 11.sp, l
 
 @Composable
 private fun Divider() = Box(Modifier.padding(vertical = 6.dp).fillMaxWidth().height(1.dp).background(C.line))
-/** Ready-made step sets, from few alerts to many. Values: $, % of position, % of equity, % of loss limit. */
-private val PNL_PRESETS = listOf(
-    "Calm" to listOf(0f, 0f, 1f, 25f),
-    "Normal" to listOf(0f, 2f, 0.5f, 10f),
-    "Active" to listOf(0f, 1f, 0.25f, 5f),
-    "Scalp" to listOf(0f, 0.5f, 0.1f, 2.5f),
-)
-
-@Composable
-private fun PnlAlertSettings(repo: Repo) {
-    val p = repo.prefs
-    var preset by remember { mutableStateOf(p.pnlPreset) }
-    // Bumped when a preset is applied, so the inputs pick up the new values.
-    var ver by remember { mutableStateOf(0) }
-    Note("Steps are counted per position. Any step that is on can fire; 0 turns it off.")
-    Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for ((name, v) in PNL_PRESETS) Seg(name, preset == name, ALERTS) {
-            p.pnlStepUsd = v[0].toInt(); p.pnlStepPct = v[1]; p.pnlStepEq = v[2]; p.pnlStepRisk = v[3]
-            preset = name; p.pnlPreset = name; ver++
-        }
-        Seg("Custom", preset == "custom", ALERTS) { preset = "custom"; p.pnlPreset = "custom" }
-    }
-    fun custom() { if (preset != "custom") { preset = "custom"; p.pnlPreset = "custom" } }
-
-    // Largest open position, to show what each step is worth in dollars right now.
-    val marks = repo.market.marks.value
-    val big = activeAccounts(repo.account.accounts.value, includeComp = true).flatMap { s -> s.positions.values.map { s to it } }
-        .maxByOrNull { (_, pos) -> pos.size * (marks[pos.feedKey] ?: pos.entryPrice) }
-    val risk = big?.let { com.alex.mfppro.data.riskOf(it.first, marks) }
-    val cost = big?.second?.let { it.size * it.entryPrice }
-    val allowance = risk?.let { (if (it.bindingIsDaily) it.dailyAllowance else it.ddAllowance)?.takeIf { a -> a > 0 } }
-    fun worth(base: Double?, pct: String) = pct.toDoubleOrNull()?.takeIf { it > 0 && base != null }?.let { "≈ " + fmtUsd(base!! * it / 100) }
-
-    androidx.compose.runtime.key(ver) {
-        var su by remember { mutableStateOf(p.pnlStepUsd.toString()) }
-        var sp by remember { mutableStateOf(p.pnlStepPct.toString()) }
-        var se by remember { mutableStateOf(p.pnlStepEq.toString()) }
-        var sr by remember { mutableStateOf(p.pnlStepRisk.toString()) }
-        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Column(Modifier.weight(1f)) {
-                AppInput("Every $", su, { su = it; custom(); p.pnlStepUsd = it.toDoubleOrNull()?.toInt()?.coerceAtLeast(0) ?: 0 }, Modifier.fillMaxWidth(), numeric = true)
-                StepHint("Fixed dollars")
-            }
-            Column(Modifier.weight(1f)) {
-                AppInput("Every % of position", sp, { sp = it; custom(); p.pnlStepPct = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
-                StepHint(worth(cost, sp) ?: "Price move on entry value")
-            }
-        }
-        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Column(Modifier.weight(1f)) {
-                AppInput("Every % of equity", se, { se = it; custom(); p.pnlStepEq = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
-                StepHint(worth(risk?.equity, se) ?: "Share of account equity")
-            }
-            Column(Modifier.weight(1f)) {
-                AppInput("Loss limit used, every %", sr, { sr = it; custom(); p.pnlStepRisk = it.toFloatOrNull()?.coerceAtLeast(0f) ?: 0f }, Modifier.fillMaxWidth(), numeric = true)
-                StepHint(sr.toDoubleOrNull()?.takeIf { it > 0 && allowance != null }?.let { v ->
-                    "${fmtUsd(allowance!! * v / 100)} of ${fmtUsd(allowance)} ${if (risk?.bindingIsDaily == true) "daily" else "max DD"}"
-                } ?: "Losing trades only")
-            }
-        }
-    }
-    if (big != null) Note("≈ values use ${big.second.symbol} (${fmtUsd(cost ?: 0.0)}) on ${accountName(big.first)}, equity ${fmtUsd(risk?.equity ?: 0.0)}.")
-
-    Label("Notify on")
-    var side by remember { mutableStateOf(p.pnlSide) }
-    Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Seg("Both", side == "both", ALERTS) { side = "both"; p.pnlSide = "both" }
-        Seg("Losses only", side == "loss", C.down) { side = "loss"; p.pnlSide = "loss" }
-        Seg("Profits only", side == "profit", C.up) { side = "profit"; p.pnlSide = "profit" }
-    }
-    var net by remember { mutableStateOf(p.pnlNet) }
-    Toggle("Net PnL", "Count after fees and swap, not price PnL", net, ALERTS) { net = it; p.pnlNet = it }
-}
-
-@Composable
-private fun StepHint(text: String) = Text(text, color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 4.dp, top = 2.dp))

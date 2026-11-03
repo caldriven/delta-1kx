@@ -37,6 +37,9 @@ data class Quote(
 sealed class TradeResult {
     data class Ok(val order: Order?, val queued: Boolean = false) : TradeResult()
     data class Rejected(val code: String, val message: String) : TradeResult()
+
+    /** Accepted by the API and not turned down by the engine afterwards. */
+    val accepted: Boolean get() = this is Ok && order?.status?.lowercase() !in setOf("rejected", "canceled", "cancelled", "expired")
 }
 
 /**

@@ -153,7 +153,7 @@ class Repo(ctx: Context) {
                         else -> TradeEvent(what, true, when (st) {
                             "filled" -> "Filled"; "open", "new", "resting" -> "Placed"; "partially_filled" -> "Partly filled"
                             "triggered", "pending" -> "Pending"; null -> "Done"; else -> st.replace('_', ' ').replaceFirstChar { it.uppercase() }
-                        }, r.order?.let { o -> listOfNotNull(o.side.uppercase().ifBlank { null }, o.type.replace('_', ' ').ifBlank { null }, (o.limitPrice ?: o.triggerPrice)?.let { "@ " + String.format(java.util.Locale.US, "%s", java.math.BigDecimal(it).stripTrailingZeros().toPlainString()) }).joinToString(" ") } ?: "")
+                        }, r.order?.let { o -> listOfNotNull(o.side.uppercase().ifBlank { null }, o.type.replace('_', ' ').ifBlank { null }, (o.limitPrice ?: o.triggerPrice)?.let { "@ " + com.alex.mfppro.ui.fmtPrice(it) }).joinToString(" ") } ?: "")
                     }
                 }
                 // Plain words for the rejections a trader can act on.
@@ -179,21 +179,45 @@ class Repo(ctx: Context) {
         return report(label, trade.placeOrder(key, body))
     }
 
-    /** Market close of [fraction] of the position, or a limit close at [limitPrice]. */
-    suspend fun closePosition(p: Position, fraction: Double = 1.0, limitPrice: Double? = null): TradeResult {
+    /**
+     * Market close of [fraction] of the position, or a limit close at [limitPrice].
+     * With [postOnly] the limit must rest: MFP rejects it instead of filling it at market
+     * when it would cross the book.
+     */
+    suspend fun closePosition(p: Position, fraction: Double = 1.0, limitPrice: Double? = null, postOnly: Boolean = false): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val m = market(p.marketId)
         val body = buildJsonObject {
             if (fraction < 1.0) put("size", roundSize(p.size * fraction, m))
             if (limitPrice != null) {
-                put("type", "limit"); put("limit_price", limitPrice); put("marketable_limit_acknowledged", true)
+                put("type", "limit"); put("limit_price", m?.let { com.alex.mfppro.ui.snapTick(limitPrice, it) } ?: limitPrice)
+                if (!postOnly) put("marketable_limit_acknowledged", true)
             } else {
                 put("type", "market")
                 market.marks.value[p.feedKey]?.let { put("expected_price", it) }
             }
         }
-        val what = if (fraction < 1.0) "Close ${(fraction * 100).toInt()}% ${p.symbol}" else "Close ${p.symbol}"
+        val what = if (fraction < 1.0) "Close ${kotlin.math.round(fraction * 100).toInt()}% ${p.symbol}" else "Close ${p.symbol}"
         return report(what, trade.closePosition(key, p.id, body))
+    }
+
+    /**
+     * Reduce-only chase close: rests at the best ask (closing a long) or bid (closing a short),
+     * [offset] further out in price, and follows the touch on MFP's server until filled.
+     * [cap] is the worst price it may follow to.
+     */
+    suspend fun chaseClose(p: Position, fraction: Double, offset: Double, cap: Double?): TradeResult {
+        val m = market(p.marketId)
+        val what = if (fraction < 1.0) "Chase close ${kotlin.math.round(fraction * 100).toInt()}% ${p.symbol}" else "Chase close ${p.symbol}"
+        return placeOrder(what, buildJsonObject {
+            put("type", "chase"); put("account_id", p.accountId); put("market_id", p.marketId)
+            put("side", if (p.isLong) "sell" else "buy")
+            put("size", roundSize(p.size * fraction, m))
+            put("leverage", p.leverage); put("margin_mode", p.marginMode)
+            put("reduce_only", true)
+            put("chase_offset", offset)
+            cap?.let { put("chase_cap_price", it) }
+        })
     }
 
     /** Flip a position: one market order for twice its size on the other side. */
@@ -211,22 +235,37 @@ class Repo(ctx: Context) {
         account.accounts.value[p.accountId]?.orders?.values.orEmpty()
             .filter { it.marketId == p.marketId && it.exitGroup != null }
 
-    /** Set (or with null remove) the position's TP and SL in one atomic batch. */
-    suspend fun setTpSl(p: Position, tp: Double?, sl: Double?, label: String = "TP/SL ${p.symbol}"): TradeResult {
+    /**
+     * Set (or with null remove) the position's TP and SL in one atomic batch.
+     * [tpExec] / [slExec] pick "market" (trigger, then market close) or "limit" (a resting
+     * reduce-only limit at the price); null keeps what an existing exit uses, or the saved default.
+     */
+    suspend fun setTpSl(
+        p: Position, tp: Double?, sl: Double?, label: String = "TP/SL ${p.symbol}",
+        tpExec: String? = null, slExec: String? = null,
+    ): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val current = exitsOf(p)
         val ops = mutableListOf<JsonObject>()
         val placed = mutableMapOf<String, Int>()
-        for ((group, price) in listOf("tp" to tp, "sl" to sl)) {
+        // Every exit price lands on the market's tick (breakeven at an average entry, guard stops, drags).
+        val m = market(p.marketId)
+        fun snap(v: Double?) = v?.let { x -> m?.let { com.alex.mfppro.ui.snapTick(x, it) } ?: x }
+        for ((group, price) in listOf("tp" to snap(tp), "sl" to snap(sl))) {
             val existing = current.filter { it.exitGroup == group }
+            val asked = if (group == "tp") tpExec else slExec
+            val exec = asked ?: existing.firstOrNull()?.exitExecution ?: if (group == "tp") prefs.tpExecution else prefs.slExecution
+            // Modify can't change how an exit executes; switching means cancel and place again.
+            val keep = existing.firstOrNull()?.takeIf { it.exitExecution == exec }
             if (price == null) {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
-            } else if (existing.isNotEmpty()) {
-                ops += buildJsonObject { put("kind", "modify"); put("order_id", existing[0].id); put("price", price); put("size", p.size) }
-                existing.drop(1).forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
+            } else if (keep != null) {
+                ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
+                existing.filter { it !== keep }.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else {
+                existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
                 placed[group] = ops.size
-                ops += buildJsonObject { put("kind", "place"); put("group", group); put("execution_type", "market"); put("price", price); put("size", p.size) }
+                ops += buildJsonObject { put("kind", "place"); put("group", group); put("execution_type", exec); put("price", price); put("size", p.size) }
             }
         }
         // Pair a freshly placed TP and SL as OCO so one filling cancels the other.
@@ -417,7 +456,10 @@ class Repo(ctx: Context) {
         val acc = runCatching { rest.account(key, id) }.onFailure { Log.w(TAG, "account $id: ${it.message}") }.getOrNull() ?: return
         account.mergeRisk(acc)
         if (acc.status == "active" && System.currentTimeMillis() - (policyAt[id] ?: 0) > 600_000) {
-            runCatching { rest.tradingPolicy(key, id) }.onSuccess { pol -> policyAt[id] = System.currentTimeMillis(); _policies.update { it + (id to pol) } }
+            runCatching { rest.tradingPolicy(key, id) }.onSuccess { pol ->
+                policyAt[id] = System.currentTimeMillis(); _policies.update { it + (id to pol) }
+                Competitions.ids = if (pol.competition != null) Competitions.ids + id else Competitions.ids - id
+            }
         }
         if (acc.status == "active") runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it) }
     }

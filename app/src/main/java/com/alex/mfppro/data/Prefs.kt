@@ -18,6 +18,12 @@ class Prefs(ctx: Context) {
         get() = secure.getString("api_key", null)
         set(v) = secure.edit().putString("api_key", v).apply()
 
+    /** Alpha terms version accepted with the key, and when; kept through a settings reset. */
+    val termsAccepted: Int get() = secure.getInt("terms_version", 0)
+    val termsAcceptedAt: Long get() = secure.getLong("terms_at", 0L)
+    fun acceptTerms(version: Int) =
+        secure.edit().putInt("terms_version", version).putLong("terms_at", System.currentTimeMillis()).apply()
+
     /** Empty means "all accounts". */
     var selectedAccounts: Set<String>
         get() = plain.getStringSet("selected_accounts", emptySet())!!.toSet()
@@ -229,6 +235,32 @@ class Prefs(ctx: Context) {
         get() = plain.getString("pnl_preset", "custom") ?: "custom"
         set(v) = plain.edit().putString("pnl_preset", v).apply()
 
+    /** Notification rules every account uses unless it has its own. The first read carries the old single settings over. */
+    var notifyDefaults: NotifyRules
+        get() = plain.getString("notify_rules", null)?.let { runCatching { notifyJson.decodeFromString(NotifyRules.serializer(), it) }.getOrNull() }
+            ?: NotifyRules(
+                fills = notifyFills, stops = notifyStops, breach = notifyBreach,
+                room = alertsEnabled, roomUsd = alertRoomUsd, roomPct = alertRoomPct,
+                margin = notifyMargin, marginPct = marginAlertPct,
+                pnl = notifyPnl, pnlUsd = if (plain.contains("pnl_step_usd")) pnlStepUsd else 0,
+                pnlPct = if (plain.contains("pnl_step_pct")) pnlStepPct else 0f,
+                pnlEq = if (plain.contains("pnl_step_eq")) pnlStepEq else 1f,
+                pnlRisk = if (plain.contains("pnl_step_risk")) pnlStepRisk else 25f,
+                pnlSide = pnlSide, pnlNet = pnlNet,
+                pnlPreset = if (plain.contains("pnl_preset")) pnlPreset else "Calm",
+            )
+        set(v) = plain.edit().putString("notify_rules", notifyJson.encodeToString(NotifyRules.serializer(), v)).apply()
+
+    /** An account's own rules, or null when it follows the defaults. */
+    fun notifyOverride(accountId: String): NotifyRules? =
+        plain.getString("notify_rules_$accountId", null)?.let { runCatching { notifyJson.decodeFromString(NotifyRules.serializer(), it) }.getOrNull() }
+
+    fun setNotifyOverride(accountId: String, v: NotifyRules?) = plain.edit().apply {
+        if (v == null) remove("notify_rules_$accountId") else putString("notify_rules_$accountId", notifyJson.encodeToString(NotifyRules.serializer(), v))
+    }.apply()
+
+    fun notifyFor(accountId: String): NotifyRules = notifyOverride(accountId) ?: notifyDefaults
+
     var pickerSort: String
         get() = plain.getString("picker_sort", "24h") ?: "24h"
         set(v) = plain.edit().putString("picker_sort", v).apply()
@@ -244,6 +276,14 @@ class Prefs(ctx: Context) {
         set(v) = plain.edit().putString("corr_window", v).apply()
 
     /** Price decimals for limit prices in one market (fewer than its tick allows); null = the tick. */
+    /** How new TP and SL exits execute: "market" (trigger, then market) or "limit" (resting reduce-only limit). */
+    var tpExecution: String
+        get() = plain.getString("tp_exec", "market") ?: "market"
+        set(v) = plain.edit().putString("tp_exec", v).apply()
+    var slExecution: String
+        get() = plain.getString("sl_exec", "market") ?: "market"
+        set(v) = plain.edit().putString("sl_exec", v).apply()
+
     fun priceDecimals(marketId: String): Int? = plain.getInt("dec_$marketId", -1).takeIf { it >= 0 }
     fun setPriceDecimals(marketId: String, v: Int?) = plain.edit().apply { if (v == null) remove("dec_$marketId") else putInt("dec_$marketId", v) }.apply()
 

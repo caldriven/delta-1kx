@@ -102,6 +102,8 @@ data class Order(
     val size: Double = 0.0,
     val triggerPrice: Double? = null,
     val limitPrice: Double? = null,
+    val chaseOffset: Double? = null,
+    val chaseCapPrice: Double? = null,
     val reduceOnly: Boolean = false,
     val status: String = "",
     val bracketRole: String? = null,
@@ -185,7 +187,19 @@ data class FillPage(val data: List<Fill> = emptyList(), val hasMore: Boolean = f
 data class PolicyLimits(val maxPositionValueUsd: Double? = null, val maxOpenPositions: Double? = null)
 
 @Serializable
-data class TradingPolicy(val limits: PolicyLimits? = null, val maximumTotalNotionalUsd: Double? = null)
+data class PolicyRule(val id: String = "")
+
+@Serializable
+data class PolicyCompetition(val openingExposureRestricted: Boolean = false)
+
+@Serializable
+data class TradingPolicy(
+    val limits: PolicyLimits? = null,
+    val maximumTotalNotionalUsd: Double? = null,
+    val accountRules: List<PolicyRule> = emptyList(),
+    /** Present only on competition accounts. */
+    val competition: PolicyCompetition? = null,
+)
 
 /** A closed position from GET /v1/positions?status=closed: one whole trade with its fees and funding. */
 @Serializable

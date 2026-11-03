@@ -162,7 +162,9 @@ fun CandleChart(
                         val down = awaitFirstDown(requireUnconsumed = false)
                         // 0 undecided, 1 time pan, 2 price-axis scale, 3 free pan, -1 page scroll, 4 pinch,
                         // 5 line drag, 6 pressing a chart button (tap or start of a drag)
-                        val hit = hits.firstOrNull { it.rect.inflate(6.dp.toPx()).contains(down.position) }
+                        // An exact hit wins over a neighbour's padding, so ⇅ and ✕ side by side never swap.
+                        val hit = hits.firstOrNull { it.rect.contains(down.position) }
+                            ?: hits.firstOrNull { it.rect.inflate(6.dp.toPx()).contains(down.position) }
                         var mode = when {
                             hit != null -> { down.consume(); 6 }
                             // While the crosshair is up, every one-finger drag moves it and never the chart,
@@ -664,7 +666,8 @@ private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, chartW: Fl
         Triple("✕", style.copy(color = C.text), 5),
     )
     val layouts = segs.map { tm.measure(it.first, it.second) }
-    val widths = layouts.map { it.size.width + padX * 2 }
+    // Reverse and close get wider targets than the labels.
+    val widths = layouts.mapIndexed { i, l -> l.size.width + padX * (if (segs[i].third >= 4) 4 else 2) }
     var x = chartW - widths.sum() - 6.dp.toPx()
     val left = x
     drawRoundRect(C.bg, Offset(left, top), Size(widths.sum(), h), androidx.compose.ui.geometry.CornerRadius(5f, 5f))
@@ -672,7 +675,7 @@ private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, chartW: Fl
         val w = widths[i]
         if (sg.third == 0) drawRoundRect(col, Offset(x, top), Size(w, h), androidx.compose.ui.geometry.CornerRadius(5f, 5f))
         else drawLine(col.copy(alpha = 0.5f), Offset(x, top + 3f), Offset(x, top + h - 3f), 1f)
-        drawText(layouts[i], topLeft = Offset(x + padX, top + (h - layouts[i].size.height) / 2))
+        drawText(layouts[i], topLeft = Offset(x + (w - layouts[i].size.width) / 2, top + (h - layouts[i].size.height) / 2))
         val r = Rect(x, top, x + w, top + h)
         when (sg.third) {
             2 -> hits += Hit(r, drag = b.tp)

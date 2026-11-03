@@ -258,7 +258,8 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val label = 46.dp
             val cell = (maxWidth - label) / n
-            val showNum = cell >= 24.dp
+            // The number always sits in its square, sized to fit (".85" / "-.42" is four characters).
+            val numSize = (cell.value * 0.3f).coerceIn(6f, 11f).sp
             // Lower triangle only: each pair once, with the symbol on the diagonal.
             Column {
                 for (i in 0 until n) Row(verticalAlignment = Alignment.CenterVertically) {
@@ -275,8 +276,8 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
                             contentAlignment = Alignment.Center,
                         ) {
                             if (i == j) Text(mx.markets[i].symbol.take(4), color = C.muted, fontSize = 8.sp, maxLines = 1)
-                            else if (showNum && c != null) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
-                                style = num.copy(fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = onColor(bg)))
+                            else if (c != null) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
+                                style = num.copy(fontSize = numSize, fontWeight = FontWeight.SemiBold, color = onColor(bg)), maxLines = 1, softWrap = false)
                         }
                     }
                 }

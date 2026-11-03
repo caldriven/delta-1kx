@@ -66,6 +66,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alex.mfppro.data.Market
 import com.alex.mfppro.data.OSLO
+import com.alex.mfppro.data.maxLeverage
 import com.alex.mfppro.data.riskOf
 import com.alex.mfppro.data.Quote
 import com.alex.mfppro.data.Repo
@@ -120,9 +121,11 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     var dist by remember { mutableStateOf("flat") }
     var priceText by remember { mutableStateOf(request.limitPrice?.let(::plain) ?: "") }
     var usdText by remember { mutableStateOf("") }
-    val maxLev = market.maxLeverage.toInt().coerceAtLeast(1)
+    val policies by repo.policies.collectAsStateWithLifecycle()
+    // The account's own cap: Elite accounts get more on some indices and commodities.
+    val maxLev = maxLeverage(market, acc?.account, accountId?.let { policies[it] })
     // Follow the account: its position in this market sets leverage and margin mode.
-    var lev by remember(accountId) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev))) }
+    var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
     var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginMode) == "isolated") }
     var reduceOnly by remember { mutableStateOf(false) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }
@@ -136,7 +139,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     val mark = marks[market.feedKey]
     // Limit prices filled in for you use the decimals picked for this market (Trade view, "dp" chip).
     val dec = repo.prefs.priceDecimals(market.marketId)
-    fun px(v: Double) = plain(if (dec != null && dec < tickDecimals(market)) java.math.BigDecimal(v).setScale(dec, java.math.RoundingMode.HALF_UP).toDouble() else v)
+    fun px(v: Double) = plain(naturalDecimals(market, v).let { n -> roundDec(v, minOf(dec ?: n, n)) })
     val limitPx = priceText.toDoubleOrNull()
     val startPx = startText.toDoubleOrNull(); val endPx = endText.toDoubleOrNull()
     val triggerPx = triggerText.toDoubleOrNull(); val capPx = capText.toDoubleOrNull()
@@ -152,7 +155,6 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     val size = if (refPx != null && refPx > 0) roundSize(usd / refPx, market) else 0.0
     val margin = acc?.positions?.values?.sumOf { it.marginAt() } ?: 0.0
     val available = ((acc?.account?.balance ?: 0.0) - margin).coerceAtLeast(0.0)
-    val policies by repo.policies.collectAsStateWithLifecycle()
     val capLeft = acc?.let { exposureLeft(policies[it.account.id], it, marks, market.marketId) }
     // Buying power, limited by MFP's exposure caps.
     val maxNotional = minOf(available * lev, capLeft ?: Double.MAX_VALUE)
@@ -195,44 +197,21 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         }
     }
 
+    // Prices go out on the market's tick, as the confirmation shows them.
+    fun snapPx(v: Double) = snapTick(v, market)
+
     fun submit() {
         val a = acc ?: return
         repo.prefs.tradeAccountId = a.account.id
         repo.prefs.setLeverage(market.marketId, lev)
         repo.prefs.marginMode = if (isolated) "isolated" else "cross"
-        val body = buildJsonObject {
-            put("client_order_id", "mfppro-" + UUID.randomUUID().toString().take(13))
-            put("account_id", a.account.id); put("market_id", market.marketId)
-            put("side", if (buy) "buy" else "sell"); put("size", size)
-            put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
-            if (reduceOnly) put("reduce_only", true)
-            if (stop) {
-                put("type", if (stopLimit) "stop_limit" else "stop_market"); put("trigger_price", triggerPx!!)
-                if (stopLimit) put("limit_price", limitPx!!)
-            } else if (chase) {
-                put("type", "chase")
-                put("chase_offset", (refPx ?: 0.0) * chasePct / 100)
-                capPx?.let { put("chase_cap_price", it) }
-            } else if (limit) {
-                put("type", "limit"); put("limit_price", limitPx!!)
-                if (marketable) put("marketable_limit_acknowledged", true)
-            } else {
-                put("type", "market")
-                put("expected_price", quote?.estimatedFillPrice ?: refPx ?: 0.0)
-                put("slippage_tolerance_bps", repo.prefs.slippageBps)
-            }
-            if (!reduceOnly) {
-                tp?.let { put("take_profit_price", it) }
-                sl?.let { put("stop_loss_price", it) }
-                if (tp != null || sl != null) put("replace_overlapping_exits", true)
-            }
-        }
-        busy = true
+        // Scaled ladders go their own way; the single-order body below would need a limit price.
         if (scaled) {
+            busy = true
             val ladder = buildJsonObject {
                 put("account_id", a.account.id); put("market_id", market.marketId)
                 put("side", if (buy) "buy" else "sell"); put("size", size)
-                put("start_price", startPx!!); put("end_price", endPx!!)
+                put("start_price", snapPx(startPx!!)); put("end_price", snapPx(endPx!!))
                 put("rung_count", rungs); put("distribution", dist)
                 put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
                 if (reduceOnly) put("reduce_only", true)
@@ -241,14 +220,42 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             scope.launch {
                 val r = repo.placeScaled("Scaled $sideWord ${market.symbol}", ladder)
                 busy = false
-                if (r is TradeResult.Ok) onDismiss()
+                if (r.accepted) onDismiss()
             }
             return
         }
+        val body = buildJsonObject {
+            put("client_order_id", "mfppro-" + UUID.randomUUID().toString().take(13))
+            put("account_id", a.account.id); put("market_id", market.marketId)
+            put("side", if (buy) "buy" else "sell"); put("size", size)
+            put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
+            if (reduceOnly) put("reduce_only", true)
+            if (stop) {
+                put("type", if (stopLimit) "stop_limit" else "stop_market"); put("trigger_price", snapPx(triggerPx!!))
+                if (stopLimit) put("limit_price", snapPx(limitPx!!))
+            } else if (chase) {
+                put("type", "chase")
+                put("chase_offset", if (chasePct > 0) snapTick((refPx ?: 0.0) * chasePct / 100, market) else 0.0)
+                capPx?.let { put("chase_cap_price", snapPx(it)) }
+            } else if (limit) {
+                put("type", "limit"); put("limit_price", snapPx(limitPx!!))
+                if (marketable) put("marketable_limit_acknowledged", true)
+            } else {
+                put("type", "market")
+                put("expected_price", quote?.estimatedFillPrice ?: refPx ?: 0.0)
+                put("slippage_tolerance_bps", repo.prefs.slippageBps)
+            }
+            if (!reduceOnly) {
+                tp?.let { put("take_profit_price", snapPx(it)) }
+                sl?.let { put("stop_loss_price", snapPx(it)) }
+                if (tp != null || sl != null) put("replace_overlapping_exits", true)
+            }
+        }
+        busy = true
         scope.launch {
             val r = repo.placeOrder("$sideWord ${market.symbol}", body)
             busy = false
-            if (r is TradeResult.Ok) onDismiss()
+            if (r.accepted) onDismiss()
         }
     }
 
@@ -309,7 +316,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 }
             }
             if (held == null) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(1, 2, 3, 5, 10, 20, 50).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
+                listOf(1, 2, 3, 5, 10, 20, 25, 40, 50).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
                     Seg("${l}×", l == lev, C.accent) { lev = l }
                 }
             }
@@ -321,14 +328,14 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     pick("stop")
                     // Default trigger 0.5% beyond the price on the breakout side.
                     val m = mark
-                    if (m != null && triggerText.isBlank()) triggerText = plain(java.math.BigDecimal(if (buy) m * 1.005 else m * 0.995).round(java.math.MathContext(6)).toDouble())
+                    if (m != null && triggerText.isBlank()) triggerText = plain(snapPx(if (buy) m * 1.005 else m * 0.995))
                 }
                 UnderTab("Chase", chase, Modifier.weight(1f)) { pick("chase") }
                 UnderTab("Scaled", scaled, Modifier.weight(1f)) {
                     pick("scaled"); limit = true
                     // Default ladder: from the touch to 1% away on our side.
                     val m = mark
-                    if (m != null && startText.isBlank()) { startText = plain(m); endText = plain(java.math.BigDecimal(if (buy) m * 0.99 else m * 1.01).round(java.math.MathContext(6)).toDouble()) }
+                    if (m != null && startText.isBlank()) { startText = plain(m); endText = plain(snapPx(if (buy) m * 0.99 else m * 1.01)) }
                 }
             }
             Row(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.bg).padding(3.dp)) {
@@ -354,7 +361,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     }
                 }
                 NumField(if (buy) "Max price (optional)" else "Min price (optional)", capText, { capText = it }, Modifier.fillMaxWidth())
-                Text("Rests at the best ${if (buy) "bid" else "ask"}${if (chasePct > 0) " minus the offset" else ""} and follows it until filled" +
+                Text("Rests at the best ${if (buy) "bid" else "ask"}${if (chasePct > 0) (if (buy) " minus" else " plus") + " the offset" else ""} and follows it until filled" +
                     (capPx?.let { ", never past ${fmtPrice(it)}" } ?: ""), color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
             } else if (scaled) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -399,7 +406,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             // Size as a share of buying power (available × leverage).
             val pct = if (maxNotional > 0) (usd / maxNotional).coerceIn(0.0, 1.0) else 0.0
             Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                PctSlider(pct.toFloat(), sideCol, Modifier.weight(1f)) { f -> usdText = String.format(Locale.US, "%.2f", f * maxNotional) }
+                PctSlider(pct.toFloat(), sideCol, Modifier.weight(1f)) { f -> usdText = String.format(Locale.US, "%.0f", f * maxNotional) }
                 Text("${(pct * 100).roundToInt()}%", style = num.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
                     textAlign = TextAlign.End, modifier = Modifier.width(52.dp))
             }
@@ -489,17 +496,20 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         "$sideWord ${market.symbol}", fmtUsd(usd), sideCol,
         listOfNotNull(
             ConfirmRow("Type", when {
-                stop -> (if (stopLimit) "Stop limit ${fmtPrice(limitPx)}" else "Stop market") + " · trigger ${fmtPrice(triggerPx)}"
-                chase -> "Chase" + (if (chasePct > 0) String.format(Locale.US, " −%.2f%%", chasePct) else " at touch") + (capPx?.let { " · cap ${fmtPrice(it)}" } ?: "")
-                scaled -> "Scaled ${fmtPrice(startPx)} → ${fmtPrice(endPx)} · $rungs rungs"
-                limit -> "Limit @ ${fmtPrice(limitPx)}"
+                stop -> (if (stopLimit) "Stop limit ${fmtPrice(limitPx?.let(::snapPx), market)}" else "Stop market") + " · trigger ${fmtPrice(triggerPx?.let(::snapPx), market)}"
+                chase -> "Chase" + (if (chasePct > 0) String.format(Locale.US, " %s%.2f%%", if (buy) "−" else "+", chasePct) else " at touch") + (capPx?.let { " · cap ${fmtPrice(snapPx(it), market)}" } ?: "")
+                scaled -> "Scaled ${fmtPrice(startPx?.let(::snapPx), market)} → ${fmtPrice(endPx?.let(::snapPx), market)} · $rungs rungs"
+                limit -> "Limit @ ${fmtPrice(limitPx?.let(::snapPx), market)}"
                 else -> "Market"
             }),
+            if (!limit && !stop && !chase && !scaled) ConfirmRow("Size", "${fmtSize(size)} ${market.symbol}") else null,
+            if (!limit && !stop && !chase && !scaled) quote?.estimatedFillPrice?.let { ConfirmRow("Est. fill", fmtPrice(it, market)) } else null,
+            if (!limit && !stop && !chase && !scaled) ConfirmRow("Max slippage", String.format(Locale.US, "%.2f%%", repo.prefs.slippageBps / 100.0)) else null,
             ConfirmRow("Leverage", "${lev}x ${if (isolated) "isolated" else "cross"}"),
             ConfirmRow("Account", acc?.account?.name ?: ""),
             if (reduceOnly) ConfirmRow("Reduce only", "yes") else null,
-            tp?.let { ConfirmRow("Take profit", fmtPrice(it), C.up) },
-            sl?.let { ConfirmRow("Stop loss", fmtPrice(it), C.down) },
+            tp?.let { ConfirmRow("Take profit", fmtPrice(snapPx(it), market), C.up) },
+            sl?.let { ConfirmRow("Stop loss", fmtPrice(snapPx(it), market), C.down) },
         ),
         confirm = sideWord, onDismiss = { confirm = false },
     ) { confirm = false; submit() }
@@ -518,9 +528,10 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
 }
 
 /** Plain decimal text without grouping, for editable fields. */
-fun plain(v: Double): String = java.math.BigDecimal(v).stripTrailingZeros().let {
-    if (it.scale() > 8) it.setScale(8, java.math.RoundingMode.HALF_UP).stripTrailingZeros() else it
-}.toPlainString()
+fun plain(v: Double): String = java.math.BigDecimal.valueOf(v).let {
+    // About six significant digits, like prices on the chart.
+    if (it.scale() > priceDecimals(v)) it.setScale(priceDecimals(v), java.math.RoundingMode.HALF_UP) else it
+}.stripTrailingZeros().toPlainString()
 
 @Composable
 fun NumField(label: String, value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier) {

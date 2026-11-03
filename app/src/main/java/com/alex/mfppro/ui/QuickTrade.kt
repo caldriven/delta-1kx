@@ -63,36 +63,50 @@ class LimitDraft {
     var on by mutableStateOf(false)
     var price by mutableStateOf<Double?>(null)
     var buy by mutableStateOf(true)
-    /** Price decimals picked for this market; null = the market's own tick. */
+    /** Fewer price decimals picked for this market; null = what suits its price (as the chart shows it). */
     var decimals by mutableStateOf<Int?>(null)
 
-    /** [px] rounded to the picked decimals, never finer than the tick. */
-    fun snap(px: Double, m: Market): Double {
-        val d = decimals ?: return snapTick(px, m)
-        return if (d >= tickDecimals(m)) snapTick(px, m) else java.math.BigDecimal(px).setScale(d, java.math.RoundingMode.HALF_UP).toDouble()
-    }
+    /** Decimals in use at [px]: the picked ones, never finer than the price's own. */
+    fun dec(m: Market, px: Double): Int = naturalDecimals(m, px).let { n -> minOf(decimals ?: n, n) }
 
-    /** One step of the − / + buttons at the picked decimals. */
-    fun step(m: Market, px: Double): Double {
-        val d = decimals
-        return if (d != null && d < tickDecimals(m)) Math.pow(10.0, -d.toDouble()) else if (m.tickSize > 0) m.tickSize else px * 0.0005
-    }
+    fun snap(px: Double, m: Market): Double = if (decimalTick(m)) roundDec(px, dec(m, px)) else snapTick(px, m)
+
+    /** One − / + step: about 0.01 % of the price on a 1-2-5 scale, never finer than the decimals shown. */
+    fun step(m: Market, px: Double): Double = maxOf(Math.pow(10.0, -dec(m, px).toDouble()), niceStep(px * 0.0001))
 }
 
 /** Decimals of the market's tick (0.001 -> 3); 6 when the market has none. */
 fun tickDecimals(m: Market): Int =
     if (m.tickSize > 0) java.math.BigDecimal(m.tickSize.toString()).stripTrailingZeros().scale().coerceAtLeast(0) else 6
 
-/** Price snapped to the market's tick. */
-fun snapTick(px: Double, m: Market): Double =
-    if (m.tickSize > 0) java.math.BigDecimal(px / m.tickSize).setScale(0, java.math.RoundingMode.HALF_UP).toDouble() * m.tickSize
-    else java.math.BigDecimal(px).round(java.math.MathContext(6)).toDouble()
+/** Decimals a price needs to read well (as [fmtPrice] shows it), never finer than the market's tick. */
+fun naturalDecimals(m: Market, px: Double): Int = minOf(priceDecimals(px), tickDecimals(m))
+
+/** [px] rounded to [d] decimals, without binary noise (627.93, not 627.92999995). */
+fun roundDec(px: Double, d: Int): Double = java.math.BigDecimal.valueOf(px).setScale(d.coerceAtLeast(0), java.math.RoundingMode.HALF_UP).toDouble()
+
+/** Largest 1, 2 or 5 × 10^k at or below [v]. */
+fun niceStep(v: Double): Double {
+    if (v <= 0) return 0.0
+    val p = Math.pow(10.0, kotlin.math.floor(kotlin.math.log10(v)))
+    return p * (if (v / p >= 5) 5 else if (v / p >= 2) 2 else 1)
+}
+
+/** True for a tick of 1, 0.1, 0.01 …; false for one like 0.25 or 5, where dropping decimals leaves the tick. */
+fun decimalTick(m: Market): Boolean =
+    m.tickSize <= 0 || java.math.BigDecimal.valueOf(m.tickSize).stripTrailingZeros().unscaledValue() == java.math.BigInteger.ONE
+
+/** Price snapped to the market's tick, then to the decimals that suit it (only where that stays on the tick). */
+fun snapTick(px: Double, m: Market): Double {
+    val t = if (m.tickSize > 0) java.math.BigDecimal.valueOf(m.tickSize).multiply(java.math.BigDecimal.valueOf(px / m.tickSize).setScale(0, java.math.RoundingMode.HALF_UP)).toDouble()
+        else px
+    return roundDec(t, if (decimalTick(m)) naturalDecimals(m, px) else tickDecimals(m))
+}
 
 /**
  * One-tap trading for the position-management view. Each button opens a position
  * worth (available balance × leverage), shown on the button, at market or, in Limit
- * mode, as a limit order at the [draft] price. Plus reduce-only and a 25/50/100%
- * close row for the trading account's position in this market.
+ * mode, as a limit order at the [draft] price. Closing lives on the position card below.
  */
 @Composable
 fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
@@ -103,7 +117,8 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     val scope = rememberCoroutineScope()
     val held = acc.positions.values.firstOrNull { it.inMarket(market) }
 
-    val maxLev = market.maxLeverage.toInt().coerceAtLeast(1)
+    val policies by repo.policies.collectAsStateWithLifecycle()
+    val maxLev = com.alex.mfppro.data.maxLeverage(market, acc.account, policies[acc.account.id])
     // Four sizes: 1x..4x on low-leverage markets, otherwise quarters of the max (10x -> 2.5/5/7.5/10).
     val presets = if (maxLev <= 4) (1..maxLev).map { it.toDouble() } else (1..4).map { maxLev * it / 4.0 }
     var buySide by remember { mutableStateOf(true) }
@@ -121,16 +136,19 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     val risk = riskOf(acc, marks)
     val live = Snap(book?.bids?.firstOrNull()?.px ?: mark, book?.asks?.firstOrNull()?.px ?: mark, risk.dailyRoom, risk.ddRoom, available)
     val latest by rememberUpdatedState(live)
-    var snap by remember(market.marketId) { mutableStateOf<Snap?>(null) }
-    LaunchedEffect(market.marketId) {
+    // Re-read at once when the account or its positions change, not only every 15 s.
+    val snapKey = Triple(market.marketId, acc.account.id, acc.positions.size)
+    var snap by remember(snapKey) { mutableStateOf<Snap?>(null) }
+    LaunchedEffect(snapKey) {
         while (true) {
             val l = latest
             if (l.bid != null && l.ask != null) { snap = l; delay(15_000) } else delay(1_000)
         }
     }
     val heldSigned = held?.let { if (it.isLong) it.size else -it.size } ?: 0.0
-    // An open position keeps its leverage, so free margin only buys that much more.
-    val policies by repo.policies.collectAsStateWithLifecycle()
+    // Reduce only on an open position: the buttons are 25/50/75/100 % of it, on the closing side.
+    val reducing = reduceOnly && held != null
+    LaunchedEffect(reducing) { if (reducing && held != null) buySide = !held.isLong }
     // MFP's exposure caps limit what a new order can add.
     val capLeft = if (reduceOnly) null else exposureLeft(policies[acc.account.id], acc, marks, market.marketId)
     fun effMult(mult: Double) = if (held != null && !reduceOnly) minOf(mult, held.leverage.coerceAtLeast(1.0)) else mult
@@ -140,9 +158,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     LaunchedEffect(buySide) { draft.buy = buySide }
     val limitPx = draft.price?.takeIf { draft.on }
 
-    fun send(buy: Boolean, mult: Double) {
+    /** [frac] set: reduce the open position by that share instead of sizing from [mult]. */
+    fun send(buy: Boolean, mult: Double, frac: Double? = null) {
         val px = limitPx ?: (if (buy) book?.asks?.firstOrNull()?.px else book?.bids?.firstOrNull()?.px) ?: mark ?: return
-        var size = roundSize(minOf(available * effMult(mult), capLeft ?: Double.MAX_VALUE) / px, market)
+        var size = if (frac != null && held != null) (if (frac >= 1.0) held.size else roundSize(held.size * frac, market))
+            else roundSize(minOf(available * effMult(mult), capLeft ?: Double.MAX_VALUE) / px, market)
         // Reduce only can't exceed the open position.
         if (reduceOnly && held != null) size = minOf(size, held.size)
         val usd = size * px
@@ -201,18 +221,18 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         // Row 3, Limit only: price with − / + (or drag the line on the chart) and the decimals it snaps to.
         if (draft.on) Row(verticalAlignment = Alignment.CenterVertically) {
             val p = draft.price
-            val tickDec = tickDecimals(market)
-            val dec = draft.decimals ?: tickDec
-            Nudge("−") { p?.let { draft.price = draft.snap(it - draft.step(market, it), market) } }
+            val tickDec = p?.let { naturalDecimals(market, it) } ?: tickDecimals(market)
+            val dec = p?.let { draft.dec(market, it) } ?: tickDec
+            Nudge("−") { draft.price?.let { draft.price = draft.snap(it - draft.step(market, it), market) } }
             Row(Modifier.weight(1f).padding(horizontal = 8.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.Center) {
-                Text(p?.let { java.math.BigDecimal(it).setScale(dec, java.math.RoundingMode.HALF_UP).toPlainString() } ?: "—",
+                Text(p?.let { java.math.BigDecimal.valueOf(it).setScale(dec, java.math.RoundingMode.HALF_UP).toPlainString() } ?: "—",
                     style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = if (buySide) C.up else C.down), maxLines = 1)
                 Spacer(Modifier.width(6.dp))
                 Text(p?.let { pp -> mark?.let { m -> fmtPct((pp / m - 1) * 100) } } ?: "", style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.padding(bottom = 2.dp))
             }
-            Nudge("+") { p?.let { draft.price = draft.snap(it + draft.step(market, it), market) } }
+            Nudge("+") { draft.price?.let { draft.price = draft.snap(it + draft.step(market, it), market) } }
             Spacer(Modifier.width(6.dp))
-            // Decimals: the market's tick, then 1, 2, 3 fewer; remembered per market.
+            // Decimals: what suits the price, then 1, 2, 3 fewer; remembered per market.
             Text("${dec} dp", style = num.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (dec < tickDec) C.accent else C.text),
                 modifier = Modifier.height(28.dp).clip(RoundedCornerShape(8.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(8.dp))
                     .clickable {
@@ -224,7 +244,19 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             val buy = buySide
-            presets.forEach { mult ->
+            if (reducing && held != null) for (f in listOf(0.25, 0.5, 0.75, 1.0)) {
+                val sn = snap
+                val px = limitPx ?: if (buy) sn?.ask else sn?.bid
+                val size = held.size * f
+                // What's left open after this reduce decides where the floors are.
+                val net = heldSigned * (1 - f)
+                QuickBtn(
+                    if (f >= 1.0) "All" else "${(f * 100).toInt()}%", "$" + fmtCompact(size * (px ?: held.entryPrice)),
+                    sn?.dailyRoom?.let { floorPrice(px, net, it) }, sn?.ddRoom?.let { floorPrice(px, net, it) }, px,
+                    if (buy) C.up else C.down, enabled = !busy && sideOk(buy), modifier = Modifier.weight(1f),
+                    empty = if (f >= 1.0) "flat after" else "no floor in reach",
+                ) { send(buy, 1.0, f) }
+            } else presets.forEach { mult ->
                 val sn = snap
                 val px = limitPx ?: if (buy) sn?.ask else sn?.bid
                 var usd = minOf((sn?.available ?: available) * effMult(mult), capLeft ?: Double.MAX_VALUE)
@@ -243,17 +275,6 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
             }
         }
         if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp)
-        if (held != null) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            for (f in listOf(0.25, 0.5, 1.0)) {
-                val pct = (f * 100).toInt()
-                Act(if (f == 1.0) "Close all" else "Close $pct%", color = if (f == 1.0) Color.White else C.text, fill = if (f == 1.0) C.down.copy(alpha = 0.85f) else null,
-                    enabled = !busy, modifier = Modifier.weight(1f)) {
-                    val run: suspend () -> Unit = { repo.closePosition(held, f) }
-                    if (repo.prefs.confirmOrders || (f == 1.0 && repo.prefs.confirmCloseAll)) ask = Triple("Close $pct% ${held.symbol}", "Market close ${fmtUsd(held.size * f * (mark ?: held.entryPrice))} of ${held.symbol}", run)
-                    else scope.launch { busy = true; run(); busy = false }
-                }
-            }
-        }
     }
 
     ask?.let { (headline, detail, run) ->
@@ -292,7 +313,7 @@ private fun safeFloor(v: Double, ref: Double?): Double {
 
 /** Size button: position value first, then the leverage multiple and where the floor would be hit. */
 @Composable
-private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, empty: String = "no floor in reach", onClick: () -> Unit) {
     // Fixed height with the floor line always reserved, so every button in the row lines up.
     // Value first and largest; the multiple sits beside it small, the floor price under it.
     Column(
@@ -309,7 +330,7 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
         }
         // Whichever floor price is nearer is the one that breaches first.
         val near = listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "DD" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
-        Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)) } ?: "no floor in reach", style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
+        Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)) } ?: empty, style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
     }
 }
 
@@ -357,8 +378,23 @@ fun SlideSwitch(
 /** Small square − / + button for nudging a price by one tick. */
 @Composable
 private fun Nudge(label: String, onClick: () -> Unit) {
+    val cb by rememberUpdatedState(onClick)
+    val scope = rememberCoroutineScope()
     Box(
-        Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(8.dp)).clickable(onClick = onClick),
+        Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(8.dp))
+            // Tap for one step; hold to keep stepping, faster the longer it's held.
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = {
+                    cb()
+                    val job = scope.launch {
+                        delay(400)
+                        var wait = 120L
+                        while (true) { cb(); delay(wait); wait = (wait * 0.9).toLong().coerceAtLeast(40) }
+                    }
+                    tryAwaitRelease()
+                    job.cancel()
+                })
+            },
         contentAlignment = Alignment.Center,
     ) { Text(label, color = C.text, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
 }

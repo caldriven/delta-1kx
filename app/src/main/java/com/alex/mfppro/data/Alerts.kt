@@ -45,7 +45,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             while (isActive) {
                 // Every 2 s on screen; every 5 s in the background, where it only feeds notifications.
                 delay(if (repo.visible.value) 2_000 else 5_000)
-                if (repo.prefs.alertsEnabled) check()
+                runCatching { check() }
                 runCatching { checkAccounts() }
             }
         }
@@ -65,27 +65,28 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     private val steps = HashMap<String, Long>()
 
     private fun onFill(f: Fill) {
-        val p = repo.prefs
+        val p = repo.prefs.notifyFor(f.accountId)
+        if (p.muted) return
         val name = repo.account.accounts.value[f.accountId]?.let { it.account.name.ifBlank { "#" + it.account.accountNumber } } ?: ""
         val sym = com.alex.mfppro.ui.ticker(f.symbol, f.provider)
         when {
-            f.type == "liquidation" || f.type == "close_out" -> if (p.notifyBreach)
+            f.type == "liquidation" || f.type == "close_out" -> if (p.breach)
                 trade(f.id.hashCode(), "${if (f.type == "liquidation") "Liquidated" else "Closed out"}: $sym", "${fmtSigned(f.realizedPnl)} · $name", alarm = true)
-            f.type.startsWith("stop") && f.reduceOnly -> if (p.notifyStops)
+            f.type.startsWith("stop") && f.reduceOnly -> if (p.stops)
                 trade(f.id.hashCode(), "Stop loss hit: $sym", "${fmtSigned(f.realizedPnl - f.fee)} at ${px(f.fillPrice)} · $name", alarm = true)
-            f.realizedPnl != 0.0 -> if (p.notifyFills)
+            f.realizedPnl != 0.0 -> if (p.fills)
                 trade(f.id.hashCode(), "Closed $sym ${fmtSigned(f.realizedPnl - f.fee)}", "${fmt(f.notional)} at ${px(f.fillPrice)} · $name")
-            else -> if (p.notifyFills)
+            else -> if (p.fills)
                 trade(f.id.hashCode(), "Filled: ${if (f.side == "buy") "Long" else "Short"} $sym ${fmt(f.notional)}", "at ${px(f.fillPrice)} · $name")
         }
     }
 
     /** Breach, margin and PnL-step checks, every couple of seconds. */
     private fun checkAccounts() {
-        val p = repo.prefs
         val marks = repo.market.marks.value
         for (s in repo.account.accounts.value.values) {
             val id = s.account.id
+            val p = repo.prefs.notifyFor(id)
             val name = s.account.name.ifBlank { "#" + s.account.accountNumber }
             // Breach: the account flips to failed, or live room goes to zero.
             val prev = status.put(id, s.account.status)
@@ -93,16 +94,16 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             val gone = (prev == "active" && s.account.status == "failed") || (s.account.status == "active" && (r.room ?: 1.0) <= 0)
             if (gone && id !in breached) {
                 breached += id
-                if (p.notifyBreach) trade(id.hashCode() + 1, "Account breached: $name", "Equity ${fmt(r.equity)}", alarm = true)
+                if (p.breach && !p.muted) trade(id.hashCode() + 1, "Account breached: $name", "Equity ${fmt(r.equity)}", alarm = true)
             } else if (!gone && s.account.status == "active" && (r.room ?: 1.0) > 0) breached -= id
-            if (s.account.status != "active") continue
+            if (s.account.status != "active" || p.muted) continue
             // Margin: share of equity tied up as position margin.
             val margin = s.positions.values.sumOf { it.marginAt() }
             val used = if (r.equity > 0) margin / r.equity * 100 else 0.0
-            if (used >= p.marginAlertPct && id !in marginHigh) {
+            if (used >= p.marginPct && id !in marginHigh) {
                 marginHigh += id
-                if (p.notifyMargin) trade(id.hashCode() + 2, "Margin ${"%.0f".format(used)}% used: $name", "${fmt(margin)} of ${fmt(r.equity)} equity", alarm = true)
-            } else if (used < p.marginAlertPct * 0.9) marginHigh -= id
+                if (p.margin) trade(id.hashCode() + 2, "Margin ${"%.0f".format(used)}% used: $name", "${fmt(margin)} of ${fmt(r.equity)} equity", alarm = true)
+            } else if (used < p.marginPct * 0.9) marginHigh -= id
             // PnL steps per position, each measured against its own base: dollars, position cost,
             // account equity, and the binding loss allowance.
             val allowance = (if (r.bindingIsDaily) r.dailyAllowance else r.ddAllowance)?.takeIf { it > 0 }
@@ -115,11 +116,11 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
                 val eqPct = if (r.equity > 0) pnl / r.equity * 100 else 0.0
                 val riskPct = allowance?.let { pnl / it * 100 }
                 val hits = listOfNotNull(
-                    step("u", pos.id, pnl, p.pnlStepUsd.toDouble())?.let { "${fmtSigned(it)} step" },
-                    step("p", pos.id, pct, p.pnlStepPct.toDouble())?.let { String.format(Locale.US, "%+.2f%% of position", it) },
-                    step("e", pos.id, eqPct, p.pnlStepEq.toDouble())?.let { String.format(Locale.US, "%+.2f%% of equity", it) },
+                    step("u", pos.id, pnl, p.pnlUsd.toDouble())?.let { "${fmtSigned(it)} step" },
+                    step("p", pos.id, pct, p.pnlPct.toDouble())?.let { String.format(Locale.US, "%+.2f%% of position", it) },
+                    step("e", pos.id, eqPct, p.pnlEq.toDouble())?.let { String.format(Locale.US, "%+.2f%% of equity", it) },
                     // Loss limit: only losses use it up, so this step only speaks when the position is red.
-                    riskPct?.let { step("r", pos.id, it, p.pnlStepRisk.toDouble()) }?.takeIf { it < 0 && allowance != null }?.let {
+                    riskPct?.let { step("r", pos.id, it, p.pnlRisk.toDouble()) }?.takeIf { it < 0 && allowance != null }?.let {
                         // Measured against the limit's size, which says nothing about a breach on its own
                         // (today's gains add room), so the real room left goes with it.
                         val used = -it
@@ -128,7 +129,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
                     },
                 )
                 val sideOk = when (p.pnlSide) { "loss" -> pnl < 0; "profit" -> pnl > 0; else -> true }
-                if (p.notifyPnl && hits.isNotEmpty() && sideOk) {
+                if (p.pnl && hits.isNotEmpty() && sideOk) {
                     trade(pos.id.hashCode(), "${pos.symbol} ${if (pos.isLong) "long" else "short"} ${fmtSigned(pnl)}${if (p.pnlNet) " net" else ""}",
                         String.format(Locale.US, "%s · %+.2f%% · equity %+.2f%% · value %s · %s", hits.first(), pct, eqPct, fmt(value), name))
                 }
@@ -171,14 +172,16 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun fmtSigned(v: Double) = (if (v >= 0) "+" else "-") + fmt(kotlin.math.abs(v))
-    private fun px(v: Double) = if (v >= 1000) String.format(Locale.US, "%,.2f", v) else String.format(Locale.US, "%.4f", v)
+    private fun px(v: Double) = com.alex.mfppro.ui.fmtPrice(v)
 
     private fun check() {
-        val usd = repo.prefs.alertRoomUsd.toDouble()
-        val pct = repo.prefs.alertRoomPct / 100.0
         val marks = repo.market.marks.value
         for (s in repo.account.accounts.value.values) {
             if (s.account.status != "active") continue
+            val rules = repo.prefs.notifyFor(s.account.id)
+            if (rules.muted || !rules.room) { fired -= s.account.id; continue }
+            val usd = rules.roomUsd.toDouble()
+            val pct = rules.roomPct / 100.0
             val r = riskOf(s, marks)
             val room = r.room ?: continue
             val frac = r.roomFraction
@@ -216,7 +219,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         )
     }
 
-    private fun fmt(v: Double?) = if (v == null) "—" else String.format(Locale.US, "$%,.2f", v)
+    private fun fmt(v: Double?) = com.alex.mfppro.ui.fmtUsd(v)
 
     companion object {
         fun monitorNotification(ctx: Context) = NotificationCompat.Builder(ctx, CH_MONITOR)

@@ -191,7 +191,7 @@ private fun MiniMeter(label: String, value: Double?, full: Double?, loss: Boolea
     }
 }
 
-private fun fmtCompactUsd(v: Double?) = if (v == null) "—" else if (kotlin.math.abs(v) >= 10_000) "$" + fmtCompact(v) else fmtUsd(v).substringBefore('.')
+private fun fmtCompactUsd(v: Double?) = if (v == null) "—" else if (kotlin.math.abs(v) >= 10_000) (if (v < 0) "-$" else "$") + fmtCompact(kotlin.math.abs(v)) else fmtUsdWhole(v)
 
 /** Account pill like MFP's switcher: tap to pick from the active accounts. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)

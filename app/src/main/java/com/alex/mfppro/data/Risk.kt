@@ -37,13 +37,23 @@ data class RiskView(
         }
 }
 
+/** Accounts the trading policy marks as competition entries; filled in by [Repo] as policies load. */
+object Competitions {
+    @Volatile var ids: Set<String> = emptySet()
+}
+
+fun isCompetition(a: Account) = a.id in Competitions.ids || a.name.contains("competition", true)
+
+fun hasPassTarget(a: Account) = a.stage != "funded" && !isCompetition(a)
+
 fun riskOf(s: AccountState, marks: Map<String, Double>): RiskView {
     var missing = false
     val upnl = s.positions.values.sumOf { p -> marks[p.feedKey]?.let(p::pnlAt) ?: run { missing = true; 0.0 } }
     val a = s.account
     val r = a.risk
     val req = r?.requirements
-    val target = pctToFraction(req?.profitTargetPct)?.let { a.startingBalance * (1 + it) }
+    // Only an evaluation has a pass target; funded and competition accounts have nothing to pass.
+    val target = pctToFraction(req?.profitTargetPct)?.takeIf { hasPassTarget(a) }?.let { a.startingBalance * (1 + it) }
     return RiskView(
         equity = a.balance + upnl,
         upnl = upnl,
@@ -64,6 +74,27 @@ fun breachPrice(p: Position, mark: Double, room: Double): Double? {
     if (p.size <= 0) return null
     val move = room / p.size
     return if (p.isLong) (mark - move).takeIf { it > 0 } else mark + move
+}
+
+/**
+ * Elite plans boost leverage on a few index and commodity markets; every other
+ * market keeps its listed maximum. Per the Elite guide (leverage and exposure).
+ */
+private val ELITE_LEVERAGE = mapOf(
+    "NAS100" to 40.0, "XYZ100" to 40.0, "SP500" to 40.0, "US500" to 40.0,
+    "US30" to 25.0, "XAU" to 20.0, "GOLD" to 20.0, "CL" to 10.0, "BRENTOIL" to 10.0,
+)
+
+/** Elite accounts: named so, flagged in their rules, or with Elite's 40x-of-start total exposure cap. */
+fun isElite(a: Account, policy: TradingPolicy?): Boolean =
+    a.name.contains("elite", true) ||
+        policy?.accountRules?.any { it.id.contains("elite", true) } == true ||
+        (a.startingBalance > 0 && policy?.maximumTotalNotionalUsd?.let { kotlin.math.abs(it / a.startingBalance - 40) < 0.5 } == true)
+
+/** Highest leverage this account may use on [m]. */
+fun maxLeverage(m: Market, a: Account?, policy: TradingPolicy?): Int {
+    val boost = if (a != null && isElite(a, policy)) ELITE_LEVERAGE[m.symbol.uppercase()] else null
+    return maxOf(m.maxLeverage, boost ?: 0.0).toInt().coerceAtLeast(1)
 }
 
 val OSLO: ZoneId = ZoneId.of("Europe/Oslo")

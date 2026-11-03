@@ -126,20 +126,37 @@ fun splitTag() = if (Split.pct < 100) " ${Split.pct}%" else ""
 
 fun fmtPrice(p: Double?): String {
     if (p == null) return "—"
-    val a = abs(p)
-    val d = when {
-        a >= 10_000 -> 1
-        a >= 100 -> 2
-        a >= 1 -> 4
-        a >= 0.01 -> 5
-        else -> 7
-    }
+    return String.format(Locale.US, "%,.${priceDecimals(p)}f", p)
+}
+
+/**
+ * A price as its market quotes it: never finer than the tick (oil 70.12, not 70.1200; BTC on a
+ * whole-dollar tick 98,765), and a 0.25 tick keeps its two decimals instead of rounding off-tick.
+ */
+fun fmtPrice(p: Double?, m: com.alex.mfppro.data.Market?): String {
+    if (p == null) return "—"
+    if (m == null) return fmtPrice(p)
+    val d = if (decimalTick(m)) naturalDecimals(m, p) else tickDecimals(m)
     return String.format(Locale.US, "%,.${d}f", p)
 }
 
+/** Decimals a price is shown with: about six significant digits. */
+fun priceDecimals(p: Double): Int {
+    val a = abs(p)
+    return when {
+        a >= 10_000 -> 1
+        a >= 100 -> 2
+        a >= 10 -> 4
+        // Forex lives here: EUR/USD needs its fifth decimal.
+        a >= 0.01 -> 5
+        else -> 7
+    }
+}
+
+/** Dollars with cents; from $10,000 up the cents are noise and are dropped. */
 fun fmtUsd(v: Double?, signed: Boolean = false): String {
     if (v == null) return "—"
-    val s = String.format(Locale.US, "%,.2f", abs(v))
+    val s = String.format(Locale.US, if (abs(v) >= 10_000) "%,.0f" else "%,.2f", abs(v))
     val sign = if (v < 0) "-" else if (signed && v > 0) "+" else ""
     return "$sign$$s"
 }
@@ -153,7 +170,18 @@ fun fmtCompact(v: Double?): String {
         a >= 1e3 -> v / 1e3 to "K"
         else -> v to ""
     }
-    return String.format(Locale.US, "%.2f%s", x, u)
+    // About three significant digits, no trailing zeros: 1K, 1.25K, 12.5K, 523.
+    val d = when { abs(x) >= 100 -> 0; abs(x) >= 10 -> 1; else -> 2 }
+    var n = String.format(Locale.US, "%.${d}f", x)
+    if ('.' in n) n = n.trimEnd('0').trimEnd('.')
+    return n + u
+}
+
+/** Whole dollars, rounded (not cut): $9,999.99 → $10,000, -0.40 → $0. */
+fun fmtUsdWhole(v: Double?): String {
+    if (v == null) return "—"
+    val r = kotlin.math.round(v)
+    return (if (r < 0) "-" else "") + "$" + String.format(Locale.US, "%,.0f", abs(r))
 }
 
 fun fmtPct(v: Double?, signed: Boolean = true): String {
