@@ -180,7 +180,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 put("client_order_id", "mfppro-" + UUID.randomUUID().toString().take(13))
                 put("account_id", acc.account.id); put("market_id", market.marketId)
                 put("side", if (buy) "buy" else "sell"); put("size", size)
-                put("leverage", lev); put("margin_mode", held?.marginMode ?: repo.prefs.marginMode)
+                put("leverage", lev); put("margin_mode", held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id))
                 if (reduceOnly) put("reduce_only", true)
                 if (limitPx != null) {
                     put("type", "limit"); put("limit_price", limitPx)

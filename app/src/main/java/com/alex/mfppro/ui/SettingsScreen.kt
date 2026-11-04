@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.AccountBox
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Code
@@ -73,7 +74,7 @@ private val ABOUT = Color(0xFF94A3B8)
 /**
  * Settings: a short list of categories, each opening its own page. Notification
  * rules live under Notifications, per account, with PnL steps a page of their own.
- * Pages: home, api, about, license, oss, oss:<i>, trading, risk, notify, rules:<id|default>,
+ * Pages: home, api, accounts, acct:<id>, about, license, oss, oss:<i>, trading, risk, notify, rules:<id|default>,
  * pnl:<id|default>, chart, display.
  */
 @Composable
@@ -91,6 +92,7 @@ fun SettingsScreen(repo: Repo) {
             page.startsWith("pnl:") -> "rules:" + page.removePrefix("pnl:")
             page.startsWith("rules:") -> "notify"
             page.startsWith("oss:") -> "oss"
+            page.startsWith("acct:") -> "accounts"
             page == "license" || page == "oss" -> "about"
             else -> "home"
         }
@@ -106,6 +108,8 @@ fun SettingsScreen(repo: Repo) {
             page == "home" -> Home(repo) { page = it }
             page == "api" -> Page("Account & API key", ::up) { ApiPage(repo) { page = it } }
             page == "about" -> Page("About Delta 1kx", ::up) { AboutPage(repo) { page = it } }
+            page == "accounts" -> Page("Accounts", ::up) { AccountsPage(repo) { page = it } }
+            page.startsWith("acct:") -> page.removePrefix("acct:").let { id -> Page(targetName(repo, id), ::up) { AccountPage(repo, id) { page = it } } }
             page == "license" -> Page("License & terms", ::up) { LicensePage() }
             page == "oss" -> Page("Open source licenses", ::up) { OssPage { page = it } }
             page.startsWith("oss:") -> OSS.getOrNull(page.removePrefix("oss:").toInt())?.let { o -> Page(o.name, ::up) { OssLicensePage(o) } }
@@ -150,6 +154,7 @@ private fun Home(repo: Repo, open: (String) -> Unit) {
     Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
         NavRow("Account & API key", key?.let { (if (it.startsWith("fp_test_")) "Sandbox" else "Live") + " key …" + it.takeLast(4) } ?: "No key yet", API, Icons.Filled.Key) { open("api") }
         NavRow("About Delta 1kx", "Alpha ${appVersion(androidx.compose.ui.platform.LocalContext.current)} · by $CREATOR · terms and licenses", ABOUT, Icons.Filled.Info) { open("about") }
+        NavRow("Accounts", "Names, cross or isolated, MFP rules", API, Icons.Filled.AccountBox) { open("accounts") }
         NavRow("Trading", "Confirmations, slippage, quick sizes, TP/SL type", ORDERS, Icons.Filled.TouchApp) { open("trading") }
         NavRow("Risk guard", if (p.lockEnabled) "Night lock ${p.lockStart}:00–${p.lockEnd}:00 Oslo" else "Night lock off", RULES, Icons.Filled.Bedtime) { open("risk") }
         NavRow("Notifications", notifySummary(repo), ALERTS, Icons.Filled.NotificationsActive) { open("notify") }
@@ -518,6 +523,79 @@ private fun DisplayPage(repo: Repo) {
             hideComp = it; repo.prefs.hideComp = it; Comp.hide = it
         }
         ChipPick("Profit split (your share of positive PnL)", listOf(100, 90, 80), Split.pct, PNL, { "$it%" }) { Split.pct = it; repo.prefs.profitSplit = it }
+    }
+}
+
+@Composable
+private fun AccountsPage(repo: Repo, open: (String) -> Unit) {
+    val accounts by repo.account.accounts.collectAsStateWithLifecycle()
+    val list = activeAccounts(accounts, includeComp = true)
+    Note("Per-account settings in Delta 1kx, and each account's rules as MFP reports them.")
+    if (list.isEmpty()) Note("No active accounts yet.")
+    else Column(Modifier.padding(vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        list.forEachIndexed { i, s ->
+            val own = com.alex.mfppro.data.Nicknames.map[s.account.id]
+            val sub = listOfNotNull(
+                own?.let { "MFP: " + s.account.name.ifBlank { "#" + s.account.accountNumber } },
+                s.account.stage.ifBlank { null }, fmtUsd(s.account.balance),
+                repo.prefs.marginModeFor(s.account.id).replaceFirstChar { it.uppercase() },
+            ).joinToString(" · ")
+            NavRow(accountName(s), sub, API, null, last = i == list.lastIndex) { open("acct:" + s.account.id) }
+        }
+    }
+}
+
+@Composable
+private fun AccountPage(repo: Repo, id: String, open: (String) -> Unit) {
+    val accounts by repo.account.accounts.collectAsStateWithLifecycle()
+    val policies by repo.policies.collectAsStateWithLifecycle()
+    val s = accounts[id] ?: run { Note("This account is no longer listed."); return }
+    val a = s.account
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    Section("Name", API, Icons.Filled.AccountBox) {
+        var nick by remember(id) { mutableStateOf(com.alex.mfppro.data.Nicknames.map[id] ?: "") }
+        AppInput("", nick, { nick = it.take(32); repo.prefs.setNickname(id, nick) }, Modifier.fillMaxWidth(),
+            placeholder = a.name.ifBlank { "#" + a.accountNumber })
+        Note("Only changes how Delta 1kx shows this account. Leave it empty to use MFP's name (${a.name.ifBlank { "#" + a.accountNumber }}). " +
+            "MFP's API can't rename accounts; to rename it everywhere, use MFP's website.")
+        Text("Open MFP", color = API, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp)).clickable { openUrl(ctx, "https://myfundedperpetuals.com") }.padding(vertical = 4.dp))
+    }
+    Section("New positions", ORDERS, Icons.Filled.TouchApp) {
+        var mode by remember(id) { mutableStateOf(repo.prefs.marginModeFor(id)) }
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Seg("Cross", mode == "cross", ORDERS) { mode = "cross"; repo.prefs.setMarginModeFor(id, "cross") }
+            Seg("Isolated", mode == "isolated", ORDERS) { mode = "isolated"; repo.prefs.setMarginModeFor(id, "isolated") }
+        }
+        Note("Cross shares the whole balance as margin; isolated limits each position to its own margin. " +
+            "This is the default for new positions on this account; the order ticket can still switch it. " +
+            "A position you already hold keeps its mode: MFP fixes it when the position opens.")
+    }
+    Section("MFP rules", RULES, Icons.Filled.Bedtime) {
+        val rq = a.risk?.requirements
+        val pol = policies[id]
+        fun pct(v: Double?) = com.alex.mfppro.data.pctToFraction(v)?.let { String.format(Locale.US, "%.1f%%", it * 100).replace(".0%", "%") }
+        listOfNotNull(
+            "Account" to "#${a.accountNumber}",
+            "Stage" to (a.stage.ifBlank { "—" } + if (com.alex.mfppro.data.isCompetition(a)) " · competition" else ""),
+            "Status" to a.status.ifBlank { "—" },
+            "Starting balance" to fmtUsd(a.startingBalance),
+            "Balance" to fmtUsd(a.balance),
+            a.risk?.equity?.let { "Equity" to fmtUsd(it) },
+            pct(rq?.dailyLossPct)?.let { "Daily loss limit" to it },
+            pct(rq?.maxDrawdownPct)?.let { "Max drawdown" to it },
+            pct(rq?.profitTargetPct)?.takeIf { com.alex.mfppro.data.hasPassTarget(a) }?.let { "Profit target" to it },
+            a.risk?.dailyLossFloor?.let { "Daily loss floor" to fmtUsd(it) },
+            a.risk?.maxDrawdownFloor?.let { "Drawdown floor" to fmtUsd(it) },
+            pol?.maximumTotalNotionalUsd?.let { "Max total exposure" to fmtUsd(it) },
+            pol?.limits?.maxPositionValueUsd?.let { "Max position value" to fmtUsd(it) },
+            pol?.limits?.maxOpenPositions?.let { "Max open positions" to it.toInt().toString() },
+            "Elite leverage" to (if (com.alex.mfppro.data.isElite(a, pol)) "yes" else "no"),
+        ).forEach { (k, v) -> Info(k, v) }
+        Note("As MFP reports them; the app can't change them.")
+    }
+    Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
+        NavRow("Notifications", rulesSummary(repo.prefs.notifyFor(id)), ALERTS, Icons.Filled.NotificationsActive, last = true) { open("rules:$id") }
     }
 }
 

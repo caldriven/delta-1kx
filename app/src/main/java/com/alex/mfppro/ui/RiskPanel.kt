@@ -69,7 +69,7 @@ fun exposureLeft(policy: com.alex.mfppro.data.TradingPolicy?, s: AccountState, m
     return listOfNotNull(acct, pos).minOrNull()?.coerceAtLeast(0.0)
 }
 
-fun accountName(s: AccountState) = s.account.name.ifBlank { "#" + s.account.accountNumber }
+fun accountName(s: AccountState) = com.alex.mfppro.data.Nicknames.map[s.account.id] ?: s.account.name.ifBlank { "#" + s.account.accountNumber }
 
 /** Trading account line plus live distance to each rule: max DD, daily loss and target. */
 @Composable

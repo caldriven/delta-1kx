@@ -56,6 +56,24 @@ class Prefs(ctx: Context) {
         get() = plain.getString("margin_mode", "cross")!!
         set(v) = plain.edit().putString("margin_mode", v).apply()
 
+    /** Cross or isolated for new positions on this account; falls back to the last one used anywhere. */
+    fun marginModeFor(accountId: String?): String =
+        accountId?.let { plain.getString("margin_$it", null) } ?: marginMode
+    fun setMarginModeFor(accountId: String, v: String) {
+        plain.edit().putString("margin_$accountId", v).apply(); marginMode = v
+    }
+
+    /** What the app calls an account; MFP's own name is untouched. Blank clears it. */
+    fun setNickname(accountId: String, v: String) {
+        val t = v.trim()
+        plain.edit().apply { if (t.isEmpty()) remove("nick_$accountId") else putString("nick_$accountId", t) }.apply()
+        if (t.isEmpty()) Nicknames.map.remove(accountId) else Nicknames.map[accountId] = t
+    }
+
+    init {
+        plain.all.forEach { (k, v) -> if (k.startsWith("nick_") && v is String) Nicknames.map[k.removePrefix("nick_")] = v }
+    }
+
     var lockEnabled: Boolean
         get() = plain.getBoolean("lock_enabled", true)
         set(v) = plain.edit().putBoolean("lock_enabled", v).apply()
@@ -321,7 +339,8 @@ class Prefs(ctx: Context) {
         // Keep what you trade on: account, selection, market and per-market leverage.
         val keep = setOf("trade_account", "selected_accounts", "last_market")
         val e = plain.edit()
-        plain.all.keys.filter { it !in keep && !it.startsWith("lev_") }.forEach { e.remove(it) }
+        // Nicknames are names, not settings: they stay.
+        plain.all.keys.filter { it !in keep && !it.startsWith("lev_") && !it.startsWith("nick_") }.forEach { e.remove(it) }
         e.commit()
     }
 

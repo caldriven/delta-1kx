@@ -403,7 +403,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
     val pol = acc?.account?.id?.let { policies[it] }
     val maxLev = minOf(a?.let { com.alex.mfppro.data.maxLeverage(it, acc?.account, pol) } ?: 1, b?.let { com.alex.mfppro.data.maxLeverage(it, acc?.account, pol) } ?: 1)
     var lev by remember(aId, bId, maxLev) { mutableStateOf(minOf(repo.prefs.leverage(aId, 5), maxLev).coerceAtLeast(1)) }
-    var isolated by remember { mutableStateOf(repo.prefs.marginMode == "isolated") }
+    var isolated by remember(acc?.account?.id) { mutableStateOf(repo.prefs.marginModeFor(acc?.account?.id) == "isolated") }
     var beta by remember { mutableStateOf(true) }
     var usdText by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf(false) }
@@ -452,7 +452,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
         val bodyA = leg(ma, longA, sizeA, pxA!!, heldA); val bodyB = leg(mb, !longA, sizeB, pxB!!, heldB)
         repo.prefs.tradeAccountId = acc!!.account.id
         repo.prefs.setLeverage(ma.marketId, lev); repo.prefs.setLeverage(mb.marketId, lev)
-        repo.prefs.marginMode = if (isolated) "isolated" else "cross"
+        repo.prefs.setMarginModeFor(acc!!.account.id, if (isolated) "isolated" else "cross")
         busy = true; orphan = null
         scope.launch {
             val r1 = repo.placeOrder("Pair ${if (longA) "long" else "short"} ${ma.symbol}", bodyA)

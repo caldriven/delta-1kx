@@ -126,7 +126,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     val maxLev = maxLeverage(market, acc?.account, accountId?.let { policies[it] })
     // Follow the account: its position in this market sets leverage and margin mode.
     var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
-    var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginMode) == "isolated") }
+    var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginModeFor(accountId)) == "isolated") }
     var reduceOnly by remember { mutableStateOf(false) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }
     var tpsl by remember { mutableStateOf(false) }
@@ -204,7 +204,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         val a = acc ?: return
         repo.prefs.tradeAccountId = a.account.id
         repo.prefs.setLeverage(market.marketId, lev)
-        repo.prefs.marginMode = if (isolated) "isolated" else "cross"
+        repo.prefs.setMarginModeFor(a.account.id, if (isolated) "isolated" else "cross")
         // Scaled ladders go their own way; the single-order body below would need a limit price.
         if (scaled) {
             busy = true

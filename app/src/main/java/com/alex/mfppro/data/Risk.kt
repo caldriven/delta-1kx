@@ -42,6 +42,11 @@ object Competitions {
     @Volatile var ids: Set<String> = emptySet()
 }
 
+/** App-only account names (Settings → Accounts), observable so every screen renames at once. */
+object Nicknames {
+    val map = androidx.compose.runtime.mutableStateMapOf<String, String>()
+}
+
 fun isCompetition(a: Account) = a.id in Competitions.ids || a.name.contains("competition", true)
 
 fun hasPassTarget(a: Account) = a.stage != "funded" && !isCompetition(a)
