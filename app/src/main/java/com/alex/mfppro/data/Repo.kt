@@ -161,6 +161,7 @@ class Repo(ctx: Context) {
                     "exposure_cap" -> "Market exposure cap reached: size down or close some first"
                     "venue_conflict" -> "You already hold this on another venue: close that first or switch venue"
                     "network" -> "No answer from MFP. Check open orders before retrying. (${r.message})"
+                    "stale_snapshot" -> "The TP/SL changed on MFP since the app last saw it. Wait a moment and try again."
                     else -> r.message
                 } + if (r.code !in setOf("exposure_cap", "venue_conflict", "network")) "  [${r.code}]" else "")
             }
@@ -198,7 +199,17 @@ class Repo(ctx: Context) {
             }
         }
         val what = if (fraction < 1.0) "Close ${kotlin.math.round(fraction * 100).toInt()}% ${p.symbol}" else "Close ${p.symbol}"
-        return report(what, trade.closePosition(key, p.id, body))
+        var r = trade.closePosition(key, p.id, body)
+        val exits = exitsOf(p)
+        if (r is TradeResult.Rejected && r.code == "rule_violation" && exits.isNotEmpty()) {
+            // A triggered TP/SL limit resting for the full size blocks the close. A full market close
+            // drops the exits anyway, so cancel them and try once more; a partial close says why.
+            r = if (fraction >= 1.0 && limitPrice == null) {
+                exits.forEach { trade.cancelOrder(key, it.id) }
+                trade.closePosition(key, p.id, body)
+            } else r.copy(message = r.message + " · A triggered TP/SL may be holding the size: cancel it under Orders first")
+        }
+        return report(what, r)
     }
 
     /**
@@ -226,7 +237,7 @@ class Repo(ctx: Context) {
         put("side", if (p.isLong) "sell" else "buy")
         put("size", roundSize(p.size * 2, market(p.marketId)))
         put("leverage", p.leverage); put("margin_mode", p.marginMode)
-        put("target_position_id", p.id)
+        // MFP rejects target_position_id on market orders; the size alone flips the position.
         put("slippage_tolerance_bps", prefs.slippageBps)
         market.marks.value[p.feedKey]?.let { put("expected_price", it) }
     })
@@ -275,7 +286,11 @@ class Repo(ctx: Context) {
             ops[s] = JsonObject(ops[s] + ("oco_pair_with_operation_index" to JsonPrimitive(t)))
         }
         if (ops.isEmpty()) return TradeResult.Ok(null)
-        return report(label, trade.replaceExits(key, p, current, ops))
+        var r = trade.replaceExits(key, p, current, ops)
+        // Older limit exits may be known to MFP by their trigger rather than their limit: try that once.
+        if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
+            r = trade.replaceExits(key, p, current, ops, armPrice = true)
+        return report(label, r)
     }
 
     /** Move the stop loss to the entry price, keeping any take profit. */

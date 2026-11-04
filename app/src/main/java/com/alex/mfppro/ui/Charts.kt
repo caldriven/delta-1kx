@@ -412,10 +412,13 @@ fun CandleChart(
             // Above the plot stack from the top edge down, below it from the bottom edge up: order each side
             // farthest first so the level nearest the price ends up closest to the chart.
             val ordered = lines.filterNot { it.ref }.let { ls -> ls.filter { it.price >= lo }.sortedByDescending { it.price } + ls.filter { it.price < lo }.sortedBy { it.price } }
-            for (l in ordered) {
+            // On-screen lines first, so the edge tags for off-screen levels can step around their tags.
+            val tagYs = mutableListOf<Float>()
+            for (l in ordered.sortedBy { if (it.price in lo..hi) 0 else 1 }) {
                 val parts = l.parts.ifEmpty { listOf(l.label) }
                 if (l.price in lo..hi) {
                     val yy = y(l.price)
+                    tagYs += yy
                     drawLine(l.color, Offset(0f, yy), Offset(chartW, yy), if (l.solid) 1.6f else 1.3f, pathEffect = if (l.solid) null else dash)
                     axisTags += AxisTag(yy, l.color, fmtPrice(l.price), Color.White)
                     val bx = l.box
@@ -431,9 +434,13 @@ fun CandleChart(
                     // Off-screen level: stack a tag on the edge it lies beyond, with its price.
                     val above = l.price > hi
                     val shown = listOf((if (above) "▲ " else "▼ ") + parts.first()) + parts.drop(1) + fmtPrice(l.price)
-                    val at = if (above) topEdge else bottomEdge
-                    queued += { tagBox(tm, shown, l.color, Offset(6.dp.toPx(), at), pillStyle, pillH) }
-                    if (above) topEdge += pillH + 3.dp.toPx() else bottomEdge -= pillH + 3.dp.toPx()
+                    val stepY = pillH + 3.dp.toPx()
+                    var at = if (above) topEdge else bottomEdge
+                    while (tagYs.any { kotlin.math.abs(it - (at + pillH / 2)) < stepY } && at in 0f..chartH) at += if (above) stepY else -stepY
+                    val atY = at
+                    queued += { tagBox(tm, shown, l.color, Offset(6.dp.toPx(), atY), pillStyle, pillH) }
+                    tagYs += at + pillH / 2
+                    if (above) topEdge = at + stepY else bottomEdge = at - stepY
                 }
             }
 
@@ -668,7 +675,8 @@ private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, chartW: Fl
     val layouts = segs.map { tm.measure(it.first, it.second) }
     // Reverse and close get wider targets than the labels.
     val widths = layouts.mapIndexed { i, l -> l.size.width + padX * (if (segs[i].third >= 4) 4 else 2) }
-    var x = chartW - widths.sum() - 6.dp.toPx()
+    // Left side, so the newest candles on the right stay visible.
+    var x = 6.dp.toPx()
     val left = x
     drawRoundRect(C.bg, Offset(left, top), Size(widths.sum(), h), androidx.compose.ui.geometry.CornerRadius(5f, 5f))
     segs.forEachIndexed { i, sg ->

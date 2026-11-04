@@ -31,6 +31,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.TrendingDown
@@ -92,6 +94,50 @@ import java.util.Date
 import java.util.Locale
 
 private val INTERVALS = listOf("1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M")
+
+/** One colour per unit, so minutes, hours, days and weeks (and 1m against 1M) tell apart at a glance. */
+private fun intervalColor(iv: String) = when (iv.last()) {
+    'm' -> Color(0xFF38BDF8)
+    'h' -> Color(0xFFF59E0B)
+    'd' -> Color(0xFFA78BFA)
+    else -> Color(0xFFF472B6)
+}
+
+/**
+ * Chart intervals as roomy chips, the picked one filled in its unit's colour. When they don't all
+ * fit, the row scrolls and a fading arrow on the hidden side says so (tap it to jump there).
+ */
+@Composable
+private fun IntervalRow(interval: String, fontSize: androidx.compose.ui.unit.TextUnit, modifier: Modifier, onPick: (String) -> Unit) {
+    val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    Box(modifier) {
+        Row(Modifier.horizontalScroll(scroll).padding(horizontal = 2.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+            INTERVALS.forEach { iv ->
+                val on = iv == interval
+                val col = intervalColor(iv)
+                Text(
+                    iv, style = num.copy(fontSize = fontSize, color = if (on) col else col.copy(alpha = 0.7f), fontWeight = if (on) FontWeight.Bold else FontWeight.Medium),
+                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if (on) col.copy(alpha = 0.18f) else Color.Transparent)
+                        .clickable { onPick(iv) }.padding(horizontal = 8.dp, vertical = 5.dp),
+                )
+            }
+        }
+        @Composable
+        fun Hint(left: Boolean) = Box(
+            Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd).width(26.dp).height(30.dp)
+                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(
+                    if (left) listOf(C.bg, C.bg.copy(alpha = 0f)) else listOf(C.bg.copy(alpha = 0f), C.bg)))
+                .clickable { scope.launch { scroll.animateScrollTo(if (left) 0 else scroll.maxValue) } },
+            contentAlignment = if (left) Alignment.CenterStart else Alignment.CenterEnd,
+        ) {
+            Icon(if (left) Icons.Filled.ChevronLeft else Icons.Filled.ChevronRight, if (left) "More intervals left" else "More intervals right",
+                tint = C.text, modifier = Modifier.size(18.dp))
+        }
+        if (scroll.canScrollBackward) Hint(true)
+        if (scroll.canScrollForward) Hint(false)
+    }
+}
 
 @Composable
 /**
@@ -356,16 +402,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             // Order-flow bubbles: still an alpha.
             ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { view = 3 }
             Spacer(Modifier.weight(1f))
-            // Intervals scroll sideways if they don't all fit.
-            if (view == 0) Row(Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState())) {
-                INTERVALS.forEach { iv ->
-                    val on = iv == interval
-                    Text(
-                        iv, style = num.copy(fontSize = 11.sp, color = if (on) C.accent else C.muted, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal),
-                        modifier = Modifier.clip(RoundedCornerShape(5.dp)).clickable { interval = iv; repo.prefs.lastInterval = iv }.padding(horizontal = 5.dp, vertical = 5.dp),
-                    )
-                }
-            }
+            if (view == 0) IntervalRow(interval, 12.sp, Modifier.weight(1f, fill = false)) { interval = it; repo.prefs.lastInterval = it }
         }
         // Indicator toggles sit above the chart so the plot stays clean. The tools button folds the bar away;
         // which toggles appear is set in Settings.
@@ -892,12 +929,8 @@ private fun LandscapeChart(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(symbol, color = C.text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             Spacer(Modifier.width(12.dp))
-            INTERVALS.forEach { iv ->
-                val on = iv == interval
-                Text(iv, style = num.copy(fontSize = 12.sp, color = if (on) C.accent else C.muted, fontWeight = if (on) FontWeight.Bold else FontWeight.Normal),
-                    modifier = Modifier.clip(RoundedCornerShape(5.dp)).clickable { onInterval(iv) }.padding(horizontal = 8.dp, vertical = 4.dp))
-            }
-            Spacer(Modifier.weight(1f))
+            IntervalRow(interval, 12.sp, Modifier.weight(1f), onInterval)
+            Spacer(Modifier.width(8.dp))
             Icon(Icons.Filled.FullscreenExit, "Exit", tint = C.text, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClose).padding(6.dp).size(22.dp))
         }
         CandleChart(candles, lines, Modifier.fillMaxSize(), showVp = showVp, showPoc = showPoc, vpSince = vpSince, sessions = sessions)

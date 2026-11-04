@@ -120,7 +120,11 @@ data class Order(
             else -> null
         }
     val exitExecution get() = if (type.endsWith("_limit")) "limit" else "market"
-    val exitPrice get() = triggerPrice ?: limitPrice
+    /**
+     * The exit's own price. A limit TP/SL rests at its limit; MFP arms it with a trigger a little
+     * before that, which is not the price you set.
+     */
+    val exitPrice get() = if (exitExecution == "limit") limitPrice ?: triggerPrice else triggerPrice ?: limitPrice
 }
 
 @Serializable

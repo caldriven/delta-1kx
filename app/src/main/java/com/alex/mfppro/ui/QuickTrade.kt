@@ -256,10 +256,17 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                     if (buy) C.up else C.down, enabled = !busy && sideOk(buy), modifier = Modifier.weight(1f),
                     empty = if (f >= 1.0) "flat after" else "no floor in reach",
                 ) { send(buy, 1.0, f) }
-            } else presets.forEach { mult ->
+            } else {
+              // Once a multiple hits the exposure cap, every higher one would show the same amount:
+              // show a single "Max" button for the cap instead of repeats.
+              var capped = false
+              presets.forEach { mult ->
+                if (capped) return@forEach
                 val sn = snap
                 val px = limitPx ?: if (buy) sn?.ask else sn?.bid
-                var usd = minOf((sn?.available ?: available) * effMult(mult), capLeft ?: Double.MAX_VALUE)
+                val want = (sn?.available ?: available) * effMult(mult)
+                capped = capLeft != null && want >= capLeft && mult != presets.first()
+                var usd = minOf(want, capLeft ?: Double.MAX_VALUE)
                 if (reduceOnly && held != null && px != null) usd = minOf(usd, held.size * px)
                 // Net exposure in this market after the fill decides where each floor is hit.
                 val size = if (px != null && px > 0) usd / px else 0.0
@@ -267,11 +274,12 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 val dll = sn?.dailyRoom?.let { floorPrice(px, net, it) }
                 val dd = sn?.ddRoom?.let { floorPrice(px, net, it) }
                 QuickBtn(
-                    (if (mult % 1.0 == 0.0) mult.toInt().toString() else String.format(Locale.US, "%.1f", mult)) + "x",
+                    if (capped) "max" else (if (mult % 1.0 == 0.0) mult.toInt().toString() else String.format(Locale.US, "%.1f", mult)) + "x",
                     (if (reduceOnly && held != null) "≤$" else "$") + fmtCompact(usd),
                     dll, dd, px,
                     if (buy) C.up else C.down, enabled = !busy && !locked && sideOk(buy), modifier = Modifier.weight(1f),
                 ) { send(buy, mult) }
+              }
             }
         }
         if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp)
@@ -330,7 +338,8 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
         }
         // Whichever floor price is nearer is the one that breaches first.
         val near = listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "DD" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
-        Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)) } ?: empty, style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
+        // The floor is already rounded to a coarse step: show it without trailing zeros (3.235, not 3.23500).
+        Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)).let { t -> if ('.' in t) t.trimEnd('0').trimEnd('.') else t } } ?: empty, style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
     }
 }
 
