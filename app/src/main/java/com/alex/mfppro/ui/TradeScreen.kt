@@ -111,15 +111,15 @@ private fun intervalColor(iv: String) = when (iv.last()) {
 private fun IntervalRow(interval: String, fontSize: androidx.compose.ui.unit.TextUnit, modifier: Modifier, onPick: (String) -> Unit) {
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
-    Box(modifier) {
-        Row(Modifier.horizontalScroll(scroll).padding(horizontal = 2.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+    Box(modifier, contentAlignment = Alignment.CenterEnd) {
+        Row(Modifier.horizontalScroll(scroll), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             INTERVALS.forEach { iv ->
                 val on = iv == interval
                 val col = intervalColor(iv)
                 Text(
                     iv, style = num.copy(fontSize = fontSize, color = if (on) col else col.copy(alpha = 0.7f), fontWeight = if (on) FontWeight.Bold else FontWeight.Medium),
                     modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(if (on) col.copy(alpha = 0.18f) else Color.Transparent)
-                        .clickable { onPick(iv) }.padding(horizontal = 8.dp, vertical = 5.dp),
+                        .clickable { onPick(iv) }.padding(horizontal = 7.dp, vertical = 5.dp),
                 )
             }
         }
@@ -401,8 +401,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             ViewChip("Data", Icons.Filled.Insights, view == 1) { view = 1 }
             // Order-flow bubbles: still an alpha.
             ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { view = 3 }
-            Spacer(Modifier.weight(1f))
-            if (view == 0) IntervalRow(interval, 12.sp, Modifier.weight(1f, fill = false)) { interval = it; repo.prefs.lastInterval = it }
+            // The intervals take all the width left after the view chips (a spacer used to claim half of it).
+            if (view == 0) IntervalRow(interval, 12.sp, Modifier.weight(1f).padding(start = 4.dp)) { interval = it; repo.prefs.lastInterval = it }
+            else Spacer(Modifier.weight(1f))
         }
         // Indicator toggles sit above the chart so the plot stays clean. The tools button folds the bar away;
         // which toggles appear is set in Settings.
