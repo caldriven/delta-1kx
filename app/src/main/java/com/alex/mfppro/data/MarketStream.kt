@@ -33,7 +33,7 @@ import kotlin.random.Random
 private const val TAG = "MarketStream"
 private const val URL = "wss://api-stream.myfundedperpetuals.com/v1/market-data"
 // Publish at ~20 fps: chart and PnL feel live without flooding recomposition.
-private const val FLUSH_MS = 50L
+private const val FLUSH_MS = 100L
 private const val MAX_TRADES = 80
 private const val MAX_CANDLES = 1500
 private const val MAX_OI = 5000
@@ -105,7 +105,10 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     init {
         scope.launch(serial) {
             while (isActive) {
-                delay(FLUSH_MS)
+                // Paused (app in the background, no monitor): no socket, nothing to publish, so tick
+                // once a second, not ten times, and let the CPU sleep.
+                delay(if (paused) 1_000 else FLUSH_MS)
+                if (paused) continue
                 flush()
                 watchdog()
             }

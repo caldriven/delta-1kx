@@ -30,7 +30,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.sample
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.drawText
@@ -102,7 +104,11 @@ fun AppInput(
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) Text(placeholder.ifEmpty { if (numeric) "0.00" else "" }, color = C.muted.copy(alpha = 0.6f), style = if (numeric) num.copy(fontSize = 15.sp) else TextStyle(fontSize = 14.sp))
                 BasicTextField(
-                    value, { s -> onChange(if (numeric) s.replace(',', '.').filter { it.isDigit() || it == '.' } else s) },
+                    value, { s ->
+                        // Numbers: digits and one decimal point; a second point is ignored rather than accepted.
+                        if (!numeric) onChange(s)
+                        else s.replace(',', '.').filter { it.isDigit() || it == '.' }.takeIf { t -> t.count { it == '.' } <= 1 }?.let(onChange)
+                    },
                     singleLine = true,
                     textStyle = (if (numeric) num.copy(fontSize = 15.sp) else TextStyle(fontFamily = Inter, fontSize = 14.sp)).copy(color = C.text),
                     cursorBrush = SolidColor(C.accent),
@@ -132,8 +138,14 @@ fun AppTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, 
     Box(Modifier.fillMaxWidth().height(1.dp).background(C.line))
 }
 
-/** [mode] (0/1) draws two dots under the label for a button that flips between two views. */
-data class NavItem(val label: String, val icon: ImageVector, val id: Int, val mode: Int? = null)
+/**
+ * [mode] (0/1) marks a button that flips between two views: while it's the open tab its label
+ * reads as a switch ([modes], e.g. Chart / Trade) with the active side lit in that view's colour.
+ */
+data class NavItem(val label: String, val icon: ImageVector, val id: Int, val mode: Int? = null, val modes: List<String>? = null)
+
+/** One colour per view of a two-view button. */
+private val MODE_COLORS get() = listOf(C.accent, Color(0xFF60A5FA))
 
 /**
  * Bottom bar with a pill that slides to the selected item. The pill can also be dragged across
@@ -202,7 +214,8 @@ fun BottomBar(
             ) {
                 items.forEach { item ->
                     val on = item.id == selected
-                    val tint by animateColorAsState(if (on) C.accent else C.muted, label = "navTint")
+                    val m = item.mode?.takeIf { on && item.modes != null }
+                    val tint by animateColorAsState(if (!on) C.muted else if (m != null) MODE_COLORS[m] else C.accent, label = "navTint")
                     Column(
                         Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(14.dp)).clickable { onSelect(item.id) },
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -216,14 +229,12 @@ fun BottomBar(
                                     .togetherWith(androidx.compose.animation.scaleOut(targetScale = 0.6f) + androidx.compose.animation.fadeOut())
                             },
                         ) { ic -> Icon(ic, item.label, tint = tint, modifier = Modifier.size(20.dp)) }
-                        Text(item.label, color = tint, fontSize = 10.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
-                        item.mode?.let { m ->
-                            Row(Modifier.padding(top = 2.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(3.dp)) {
-                                for (i in 0..1) {
-                                    val dot by animateColorAsState(if (i == m) tint else C.line, label = "dot")
-                                    val dw by animateDpAsState(if (i == m) 10.dp else 4.dp, label = "dotW")
-                                    Box(Modifier.width(dw).height(3.dp).clip(RoundedCornerShape(2.dp)).background(dot))
-                                }
+                        if (m == null) Text(item.label, color = tint, fontSize = 10.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+                        else Row(verticalAlignment = Alignment.CenterVertically) {
+                            item.modes!!.forEachIndexed { i, l ->
+                                if (i > 0) Text("/", color = C.line, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 2.dp))
+                                val c by animateColorAsState(if (i == m) MODE_COLORS[i] else C.muted, label = "modeTint")
+                                Text(l, color = c, fontSize = 10.sp, fontWeight = if (i == m) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
                             }
                         }
                     }
@@ -304,6 +315,8 @@ fun ConfirmDialog(
     note: String? = null,
     confirm: String = "Confirm",
     onDismiss: () -> Unit,
+    /** Extra choices shown under the rows, e.g. how a TP or SL executes. */
+    extra: (@Composable () -> Unit)? = null,
     onConfirm: () -> Unit,
 ) {
     androidx.compose.ui.window.Dialog(onDismiss) {
@@ -319,6 +332,7 @@ fun ConfirmDialog(
                     }
                 }
             }
+            extra?.let { Box(Modifier.padding(top = 10.dp)) { it() } }
             note?.let { Text(it, color = C.text.copy(alpha = 0.8f), fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 10.dp)) }
             Row(Modifier.padding(top = 16.dp).fillMaxWidth(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
                 Box(
@@ -375,10 +389,56 @@ fun BrandMark(modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * One entry of a keyed feed: recomposes only when that key's value changes, not on every update to
+ * any key. With [ms] > 0 it also emits at most that often.
+ */
+@OptIn(kotlinx.coroutines.FlowPreview::class)
+@Composable
+fun <K, V> kotlinx.coroutines.flow.StateFlow<Map<K, V>>.collectKey(key: K, ms: Long = 0): androidx.compose.runtime.State<V?> {
+    val f = androidx.compose.runtime.remember(this, key, ms) {
+        val one = map { it[key] }.distinctUntilChanged()
+        if (ms > 0) kotlinx.coroutines.flow.flow { emit(value[key]); emitAll(one.sample(ms)) } else one
+    }
+    return f.collectAsStateWithLifecycle(initialValue = value[key])
+}
+
 /** Collects a fast-ticking flow at most every [ms], for screens that don't need every price tick. */
 @OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectThrottled(ms: Long): androidx.compose.runtime.State<T> {
     val f = androidx.compose.runtime.remember(this, ms) { kotlinx.coroutines.flow.flow { emit(value); emitAll(this@collectThrottled.sample(ms)) } }
     return f.collectAsStateWithLifecycle(initialValue = value)
+}
+
+/** What a venue's TP/SL triggers watch (MFP trading guide: conditional trigger policy). */
+fun triggerSource(provider: String): String = when (provider) {
+    "veranta", "ostium" -> "the venue mid price"
+    "binance", "bybit", "hyperliquid" -> "the last traded price"
+    else -> "the chart price"
+}
+
+/**
+ * Market vs limit for a take profit ([tp]) or stop loss, with a line on what
+ * each does and which price triggers it.
+ */
+@Composable
+fun ExitExecPicker(tp: Boolean, exec: String, provider: String, onChange: (String) -> Unit) {
+    val col = if (tp) C.up else C.down
+    Column {
+        Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg(if (tp) "TP market" else "Stop market", exec == "market", col) { onChange("market") }
+            Seg(if (tp) "TP limit · reduce only" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
+        }
+        val src = triggerSource(provider)
+        Text(
+            when {
+                tp && exec == "market" -> "Triggers when $src reaches it, then closes at market."
+                tp -> "Triggers on $src, then a reduce-only limit at your price: never a worse fill, but a quick touch may not fill."
+                exec == "market" -> "Triggers when $src reaches it, then closes at market: fills in a fast move, with slippage."
+                else -> "Triggers on $src, then a reduce-only limit at your price: no slippage, but a gap past it leaves you open."
+            },
+            color = C.muted, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(top = 4.dp),
+        )
+    }
 }

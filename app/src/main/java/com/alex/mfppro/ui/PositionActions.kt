@@ -3,7 +3,13 @@ package com.alex.mfppro.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -53,6 +59,7 @@ private data class Pending(val title: String, val detail: String, val danger: Bo
 @Composable
 fun PositionActions(repo: Repo, p: Position, mark: Double?) {
     val scope = rememberCoroutineScope()
+    val pm = remember(p.marketId) { repo.market(p.marketId) }
     var pending by remember { mutableStateOf<Pending?>(null) }
     var tpslOpen by remember { mutableStateOf(false) }
     var limitOpen by remember { mutableStateOf(false) }
@@ -88,11 +95,11 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
             // A stop at entry only makes sense while the position is in profit.
             val inProfit = mark != null && p.pnlAt(mark) > 0
             PillBtn("Breakeven", w, enabled = !busy && inProfit) {
-                act("Breakeven ${p.symbol}", "Move stop loss to entry ${fmtPrice(p.entryPrice)}", false) { repo.breakeven(p) }
+                act("Breakeven ${p.symbol}", "Move stop loss to entry ${fmtPrice(p.entryPrice, pm)}", false) { repo.breakeven(p) }
             }
             PillBtn("Guard SL", w, enabled = !busy && guardSl != null) {
                 guardSl?.let { px ->
-                    act("Guard stop ${p.symbol}", "Market stop at ${fmtPrice(px)} (${fmtUsd(p.pnlAt(px), true)}), leaving 25% of the drawdown allowance.", false) { repo.setTpSl(p, tp, px) }
+                    act("Guard stop ${p.symbol}", "Market stop at ${fmtPrice(px, pm)} (${fmtUsd(p.pnlAt(px), true)}), leaving 25% of the drawdown allowance.", false) { repo.setTpSl(p, tp, px) }
                 }
             }
             // Reversing opens a new position, so the night rule blocks it.
@@ -125,6 +132,8 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
     if (tpslOpen) {
         var tpText by remember { mutableStateOf(tp?.let(::plain) ?: "") }
         var slText by remember { mutableStateOf(sl?.let(::plain) ?: "") }
+        var tpExec by remember { mutableStateOf(exits.firstOrNull { it.exitGroup == "tp" }?.exitExecution ?: repo.prefs.tpExecution) }
+        var slExec by remember { mutableStateOf(exits.firstOrNull { it.exitGroup == "sl" }?.exitExecution ?: repo.prefs.slExecution) }
         val newTp = tpText.toDoubleOrNull(); val newSl = slText.toDoubleOrNull()
         val px = mark ?: p.entryPrice
         val dir = if (p.isLong) 1.0 else -1.0
@@ -133,7 +142,8 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
         fun at(usd: Double) = (px + dir * usd / p.size).takeIf { it > 0 }
         // Pass target as a price for this position alone.
         val targetPx = risk?.toTarget?.takeIf { it > 0 }?.let { at(it) }
-        fun set(price: Double?, tpSide: Boolean) { price?.let { v -> val t = roundTick(v); if (tpSide) tpText = plain(t) else slText = plain(t) } }
+        val mkt = remember(p.marketId) { repo.market(p.marketId) }
+        fun set(price: Double?, tpSide: Boolean) { price?.let { v -> val t = mkt?.let { snapTick(v, it) } ?: roundTick(v); if (tpSide) tpText = plain(t) else slText = plain(t) } }
         AlertDialog(
             onDismissRequest = { tpslOpen = false }, containerColor = C.panel,
             title = {
@@ -150,16 +160,16 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                     }
                     Row(Modifier.padding(top = 8.dp)) {
                         Cell("Value", "$" + fmtCompact(p.size * (mark ?: p.entryPrice)), Modifier.weight(1f))
-                        Cell("Entry", fmtPrice(p.entryPrice), Modifier.weight(1f))
-                        Cell("Last", fmtPrice(mark), Modifier.weight(1f))
-                        Cell("Breach", fmtPrice(breach), Modifier.weight(1f), C.down)
+                        Cell("Entry", fmtPrice(p.entryPrice, pm), Modifier.weight(1f))
+                        Cell("Last", fmtPrice(mark, pm), Modifier.weight(1f))
+                        Cell("Breach", fmtPrice(breach, pm), Modifier.weight(1f), C.down)
                     }
                 }
             },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     // Mini chart: drag the TP and SL lines; the fields below follow.
-                    val candles by repo.market.candles.collectAsStateWithLifecycle()
+                    val candles by repo.market.candles.collectThrottled(500)
                     androidx.compose.runtime.DisposableEffect(p.feedKey) {
                         val sub = com.alex.mfppro.data.Sub("candles", p.provider, p.coin, "5m")
                         repo.market.acquire(sub)
@@ -174,8 +184,8 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                             drag = LineDrag({ v -> "TP " + pnlTag(v) to C.up }) { v -> set(v, true) }) },
                         slLine?.let { PriceLine(it, C.down, "SL", parts = listOf(if (newSl == null) "SL?" else "SL", pnlTag(it)),
                             drag = LineDrag({ v -> "SL " + pnlTag(v) to C.down }) { v -> set(v, false) }) },
-                        breach?.let { PriceLine(it, C.down, "Breach", parts = listOf("Breach", fmtPrice(it))) },
-                        targetPx?.let { PriceLine(it, Color(0xFF22D3EE), "Target", parts = listOf("Target", fmtPrice(it))) },
+                        breach?.let { PriceLine(it, C.down, "Breach", parts = listOf("Breach", fmtPrice(it, pm))) },
+                        targetPx?.let { PriceLine(it, Color(0xFF22D3EE), "Target", parts = listOf("Target", fmtPrice(it, pm))) },
                     )
                     CandleChart(
                         candles[com.alex.mfppro.data.candleKey(p.provider, p.coin, "5m")].orEmpty().withLive(mark), lines,
@@ -195,6 +205,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                         PctSlider(f, C.up, Modifier.padding(top = 4.dp)) { set(px + it * (tpEnd - px), true) }
                     }
                     NumField("TP price", tpText, { tpText = it }, Modifier.fillMaxWidth())
+                    Box(Modifier.padding(top = 6.dp)) { ExitExecPicker(true, tpExec, p.provider) { tpExec = it } }
                     newTp?.let { v -> Info("PnL at TP", fmtUsd(p.pnlAt(v), true) + (equity?.let { e -> String.format(java.util.Locale.US, "  (%+.2f%% eq)", p.pnlAt(v) / e * 100) } ?: ""), C.up) }
 
                     // ---- Stop loss ----
@@ -207,9 +218,10 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                     if (breach != null) {
                         val f = newSl?.let { ((it - px) / (breach - px)).toFloat().coerceIn(0f, 1f) } ?: 0f
                         PctSlider(f, C.down, Modifier.padding(top = 4.dp)) { set(px + it * (breach - px), false) }
-                        Text("Slider: 0% = now · 100% = account breach ${fmtPrice(breach)}", color = C.muted, fontSize = 10.sp)
+                        Text("Slider: 0% = now · 100% = account breach ${fmtPrice(breach, pm)}", color = C.muted, fontSize = 10.sp)
                     }
                     NumField("SL price", slText, { slText = it }, Modifier.fillMaxWidth())
+                    Box(Modifier.padding(top = 6.dp)) { ExitExecPicker(false, slExec, p.provider) { slExec = it } }
                     newSl?.let { v ->
                         val loss = p.pnlAt(v) - p.pnlAt(px)
                         Info("PnL at SL", fmtUsd(p.pnlAt(v), true), C.down)
@@ -223,7 +235,11 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                 // TP beyond the price in profit direction, SL on the loss side; a typo never silently removes an order.
                 val tpBad = tpText.isNotBlank() && (newTp == null || (if (p.isLong) newTp <= px else newTp >= px))
                 val slBad = slText.isNotBlank() && (newSl == null || (if (p.isLong) newSl >= px else newSl <= px))
-                TextButton(enabled = !tpBad && !slBad, onClick = { tpslOpen = false; scope.launch { busy = true; repo.setTpSl(p, newTp, newSl); busy = false } }) {
+                TextButton(enabled = !tpBad && !slBad, onClick = {
+                    tpslOpen = false
+                    repo.prefs.tpExecution = tpExec; repo.prefs.slExecution = slExec
+                    scope.launch { busy = true; repo.setTpSl(p, newTp, newSl, tpExec = tpExec, slExec = slExec); busy = false }
+                }) {
                     Text(when { tpBad -> "TP on wrong side"; slBad -> "SL on wrong side"; else -> "Save" }, color = if (tpBad || slBad) C.down else C.accent)
                 }
             },
@@ -231,35 +247,229 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
         )
     }
 
-    if (limitOpen) {
-        var pxText by remember { mutableStateOf(mark?.let(::plain) ?: "") }
-        var pctText by remember { mutableStateOf("100") }
-        val px = pxText.toDoubleOrNull()
-        val frac = (pctText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0) / 100
-        AlertDialog(
-            onDismissRequest = { limitOpen = false }, containerColor = C.panel,
-            title = { Text("Limit close ${p.symbol}", color = C.text) },
-            text = {
-                Column {
-                    NumField("Price", pxText, { pxText = it }, Modifier.fillMaxWidth())
-                    NumField("% of position", pctText, { pctText = it }, Modifier.fillMaxWidth())
-                    px?.let { Info("PnL", fmtUsd(p.pnlAt(it) * frac, true), pnlColor(p.pnlAt(it))) }
+    if (limitOpen) LimitCloseDialog(repo, p, mark, onDismiss = { limitOpen = false }) { run ->
+        limitOpen = false
+        scope.launch { busy = true; run(); busy = false }
+    }
+}
+
+/** Offsets for the quick passive close, in % from the mid towards profit. */
+private val FAST_OFFSETS = listOf(0.02, 0.05, 0.1)
+
+/**
+ * Reduce-only close without crossing the book, in two ways:
+ * - Limit: how much (slider, snaps at quarters) and where (slider centred on the mid, ± a chosen
+ *   range, quick mid ± 0.05% chips, or drag the line on the chart). Post only by default: MFP
+ *   rejects the order rather than filling it at market if it would cross.
+ * - Chase: rests at the best ask (bid for a short) and follows it on MFP's server until filled.
+ */
+@Composable
+private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: () -> Unit, onPlace: (suspend () -> Unit) -> Unit) {
+    val books by repo.market.books.collectThrottled(250)
+    val book = books[p.feedKey]
+    val m = remember(p.marketId) { repo.market(p.marketId) }
+    fun tick(v: Double) = m?.let { snapTick(v, it) } ?: roundTick(v)
+    val bid = book?.bids?.firstOrNull()?.px; val ask = book?.asks?.firstOrNull()?.px
+    val mid = if (bid != null && ask != null) (bid + ask) / 2 else mark ?: p.entryPrice
+    // Towards profit: up for a long, down for a short.
+    val dir = if (p.isLong) 1.0 else -1.0
+    var chase by remember { mutableStateOf(false) }
+    var frac by remember { mutableStateOf(1.0) }
+    var range by remember { mutableStateOf(0.5) }
+    // Start as the fast passive close: mid ± 0.05% on the profit side, so it rests and fills on the next small move.
+    var offPct by remember { mutableStateOf(0.05 * dir) }
+    var postOnly by remember { mutableStateOf(true) }
+    var chasePct by remember { mutableStateOf(0.0) }
+    var capPct by remember { mutableStateOf<Double?>(null) }
+    // Closing a long sells on the ask side; closing a short buys on the bid side.
+    val touch = (if (p.isLong) ask else bid) ?: mid
+    val chaseOffset = if (chasePct > 0) tick(touch * chasePct / 100) else 0.0
+    val capPx = capPct?.let { tick(mid * (1 - dir * it / 100)) }
+    val px = if (chase) tick(touch + dir * chaseOffset) else tick(mid * (1 + offPct / 100))
+    val closeSize = p.size * frac
+    // Fee rate as this position has paid so far (fees over entry notional), else MFP's crypto rate.
+    val feeRate = (p.fees / (p.size * p.entryPrice)).takeIf { it > 0 && it < 0.01 } ?: 0.0003
+    val gross = p.pnlAt(px) * frac
+    val fee = closeSize * px * feeRate
+    // The closed part's share of fees and swap already on the position.
+    val carried = (p.realizedPnl - p.fees + p.funding) * frac
+    val net = gross - fee + carried
+    // Closing a long with a sell at or below the bid (or a short with a buy at or above the ask) fills at once.
+    val crosses = !chase && (if (p.isLong) bid != null && px <= bid else ask != null && px >= ask)
+    val ok = frac > 0 && closeSize * px >= 1.0 && !(crosses && postOnly)
+
+    AlertDialog(
+        onDismissRequest = onDismiss, containerColor = C.panel,
+        title = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Close", color = C.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(6.dp))
+                    Text(ticker(p.symbol, p.provider), color = C.muted, fontSize = 14.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Tag("Reduce only", C.accent)
                 }
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Seg("Limit", !chase, C.accent) { chase = false }
+                    Seg("Chase", chase, C.accent) { chase = true }
+                }
+            }
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                val candles by repo.market.candles.collectThrottled(500)
+                androidx.compose.runtime.DisposableEffect(p.feedKey) {
+                    val subs = listOf(com.alex.mfppro.data.Sub("candles", p.provider, p.coin, "5m"), com.alex.mfppro.data.Sub("books", p.provider, p.coin))
+                    subs.forEach { repo.market.acquire(it) }
+                    onDispose { subs.forEach { repo.market.release(it) } }
+                }
+                val col = if (gross >= 0) C.up else C.down
+                val closeLine = if (chase) PriceLine(px, col, "Chase", parts = listOf("Chase ${kotlin.math.round(frac * 100).toInt()}%", fmtUsd(gross, true)))
+                    else PriceLine(px, col, "Close", parts = listOf("Close ${kotlin.math.round(frac * 100).toInt()}%", fmtUsd(gross, true)),
+                        drag = LineDrag({ v -> "Close ${fmtPrice(v, m)} · ${fmtUsd(p.pnlAt(v) * frac, true)}" to (if (p.pnlAt(v) >= 0) C.up else C.down) }) { v ->
+                            val o = (v / mid - 1) * 100
+                            if (kotlin.math.abs(o) > range) range = listOf(0.5, 2.0, 5.0, 10.0).firstOrNull { it >= kotlin.math.abs(o) } ?: 10.0
+                            offPct = o.coerceIn(-range, range)
+                        })
+                CandleChart(
+                    candles[com.alex.mfppro.data.candleKey(p.provider, p.coin, "5m")].orEmpty().withLive(mark),
+                    listOfNotNull(
+                        PriceLine(p.entryPrice, C.muted, "Entry", solid = true),
+                        closeLine,
+                        capPx?.let { PriceLine(it, C.muted, "Cap", parts = listOf("Cap", fmtPrice(it, m))) },
+                    ),
+                    Modifier.fillMaxWidth().height(190.dp),
+                )
+
+                // ---- Amount ----
+                Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                    Text("Amount", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("${kotlin.math.round(frac * 100).toInt()}% · ${fmtUsd(closeSize * px)}", style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                }
+                PctSlider(frac.toFloat(), C.accent, Modifier.padding(top = 2.dp)) { frac = it.toDouble().coerceAtLeast(0.01) }
+
+                if (!chase) {
+                    // ---- Price, centred on the mid ----
+                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                        Text("Price", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text(fmtPrice(px, m), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                        // Coloured by what it means for this position: profit side or loss side.
+                        Text("  " + fmtOffset(offPct) + " mid", style = num.copy(fontSize = 11.sp, color = if (p.pnlAt(px) >= p.pnlAt(mid)) C.up else C.down))
+                    }
+                    // Quick passive closes: just past the mid on the profit side.
+                    Row(Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Fast", color = C.muted, fontSize = 11.sp, maxLines = 1)
+                        Seg("Mid", offPct == 0.0, C.text) { offPct = 0.0 }
+                        for (f in FAST_OFFSETS) Seg("mid ${if (p.isLong) "+" else "−"}${fmtOffset(f, false)}", offPct == f * dir, C.up) {
+                            range = 0.5; offPct = f * dir
+                        }
+                    }
+                    CenterSlider((offPct / range).toFloat(), Modifier.padding(top = 4.dp)) { offPct = it * range }
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(fmtOffset(-range), style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.weight(1f))
+                        Text("mid ${fmtPrice(mid, m)}", style = num.copy(fontSize = 10.sp, color = C.muted))
+                        Text(fmtOffset(range), style = num.copy(fontSize = 10.sp, color = C.muted), textAlign = androidx.compose.ui.text.style.TextAlign.End, modifier = Modifier.weight(1f))
+                    }
+                    Row(Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Range", color = C.muted, fontSize = 11.sp, maxLines = 1)
+                        for (r in listOf(0.5, 2.0, 5.0, 10.0)) Seg("±" + fmtOffset(r, false), range == r, C.accent) {
+                            range = r; offPct = offPct.coerceIn(-r, r)
+                        }
+                    }
+                    Row(Modifier.padding(top = 8.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text("Post only", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text("Never fills at market: MFP rejects it if it would cross the book.", color = C.muted, fontSize = 11.sp, lineHeight = 14.sp)
+                        }
+                        AppSwitch(postOnly, { postOnly = it })
+                    }
+                    if (crosses) Text(
+                        if (postOnly) "Crosses the book: move it past the ${if (p.isLong) "bid" else "ask"} or turn off post only"
+                        else "Crosses the book: fills now at market",
+                        color = if (postOnly) C.down else C.accent, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp),
+                    )
+                } else {
+                    // ---- Chase ----
+                    Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.Bottom) {
+                        Text("Starts at", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Text(fmtPrice(px, m), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                        Text("  best ${if (p.isLong) "ask" else "bid"}" + (if (chasePct > 0) " ${if (p.isLong) "+" else "−"}${fmtOffset(chasePct, false)}" else ""),
+                            style = num.copy(fontSize = 11.sp, color = C.muted))
+                    }
+                    Row(Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Offset", color = C.muted, fontSize = 11.sp, maxLines = 1)
+                        for (o in listOf(0.0, 0.02, 0.05)) Seg(if (o == 0.0) "Join" else fmtOffset(o, false), chasePct == o, C.accent) { chasePct = o }
+                    }
+                    Row(Modifier.padding(top = 4.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (p.isLong) "Lowest" else "Highest", color = C.muted, fontSize = 11.sp, maxLines = 1)
+                        Seg("No cap", capPct == null, C.text) { capPct = null }
+                        for (c in listOf(0.25, 0.5, 1.0)) Seg("${if (p.isLong) "−" else "+"}${fmtOffset(c, false)}", capPct == c, C.down) { capPct = c }
+                    }
+                    Text(
+                        "Rests at the best ${if (p.isLong) "ask" else "bid"} and moves with it on MFP's server until filled, so it keeps working with the app closed" +
+                            (capPx?.let { ". Stops following ${if (p.isLong) "below" else "above"} ${fmtPrice(it, m)}" } ?: "") +
+                            ". A chase can't be edited: cancel it under Orders.",
+                        color = C.muted, fontSize = 11.sp, lineHeight = 14.sp, modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+
+                // ---- Result ----
+                Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.bg).padding(10.dp)) {
+                    Info(if (chase) "PnL at the current touch" else "PnL on closed part", fmtUsd(gross, true), pnlColor(gross))
+                    Info("Est. close fee (${fmtOffset(feeRate * 100, false)})", fmtUsd(-fee, true), C.down)
+                    if (carried != 0.0) Info("Its share of fees, swap, banked", fmtUsd(carried, true), pnlColor(carried))
+                    Info("Est. net", fmtUsd(net, true), pnlColor(net))
+                    if (frac < 1) Info("Left open", "${kotlin.math.round((1 - frac) * 100).toInt()}% · ${fmtUsd(p.size * (1 - frac) * px)}")
+                }
+                Text("MFP charges maker and taker fills the same fee. Resting saves the spread and slippage, not the fee.",
+                    color = C.muted, fontSize = 10.sp, lineHeight = 13.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = ok, onClick = {
+                val f = frac; val at = px; val post = postOnly; val off = chaseOffset; val cap = capPx
+                if (chase) onPlace { repo.chaseClose(p, f, off, cap) } else onPlace { repo.closePosition(p, f, limitPrice = at, postOnly = post) }
+            }) {
+                Text(if (chase) "Chase ${kotlin.math.round(frac * 100).toInt()}%" else "Place ${kotlin.math.round(frac * 100).toInt()}% at ${fmtPrice(px, m)}", color = if (ok) C.accent else C.muted, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = C.muted) } },
+    )
+}
+
+/** A small % offset with only the decimals it needs: 0.05%, 0.5%, 2%. */
+private fun fmtOffset(v: Double, signed: Boolean = true): String {
+    val s = java.math.BigDecimal.valueOf(kotlin.math.abs(v)).setScale(3, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+    return (if (!signed || v == 0.0) "" else if (v > 0) "+" else "−") + s + "%"
+}
+
+/** Slider from −1 to +1 with the zero mark in the middle; tap or drag. */
+@Composable
+private fun CenterSlider(value: Float, modifier: Modifier = Modifier, onChange: (Float) -> Unit) {
+    val cb by androidx.compose.runtime.rememberUpdatedState(onChange)
+    val line = C.line; val up = C.up; val down = C.down; val text = C.text
+    androidx.compose.foundation.Canvas(
+        modifier.fillMaxWidth().height(30.dp)
+            .pointerInput(Unit) { detectTapGestures { cb(((it.x / size.width) * 2 - 1).coerceIn(-1f, 1f)) } }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { ch, _ -> ch.consume(); cb(((ch.position.x / size.width) * 2 - 1).coerceIn(-1f, 1f)) }
             },
-            confirmButton = {
-                TextButton(enabled = px != null && frac > 0, onClick = {
-                    limitOpen = false
-                    scope.launch { busy = true; repo.closePosition(p, frac, limitPrice = px); busy = false }
-                }) { Text("Place", color = C.accent) }
-            },
-            dismissButton = { TextButton(onClick = { limitOpen = false }) { Text("Cancel", color = C.muted) } },
-        )
+    ) {
+        val r = 9.dp.toPx(); val y = size.height / 2; val w = size.width - r * 2
+        val cx = r + w / 2; val x = r + w * (value.coerceIn(-1f, 1f) + 1) / 2
+        val col = if (value >= 0) up else down
+        drawLine(line, Offset(r, y), Offset(r + w, y), 4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(col, Offset(cx, y), Offset(x, y), 4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(text, Offset(cx, y - 8.dp.toPx()), Offset(cx, y + 8.dp.toPx()), 2.dp.toPx())
+        drawCircle(Color.White, r, Offset(x, y))
+        drawCircle(col, r - 3.dp.toPx(), Offset(x, y))
     }
 }
 
 @Composable
 fun OrderRow(repo: Repo, o: Order, account: String) {
     val scope = rememberCoroutineScope()
+    val om = remember(o.marketId) { repo.market(o.marketId) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -270,11 +480,19 @@ fun OrderRow(repo: Repo, o: Order, account: String) {
                 Text(account, color = C.muted, fontSize = 11.sp)
             }
             Text(
-                "${o.side} ${(o.limitPrice ?: o.triggerPrice)?.let { fmtUsd(o.size * it) } ?: fmtSize(o.size)} @ ${fmtPrice(o.limitPrice ?: o.triggerPrice)}" + (if (o.triggerPrice != null && o.limitPrice != null) " (trigger ${fmtPrice(o.triggerPrice)})" else ""),
+                if (o.type == "chase") "${o.side} ${fmtSize(o.size)} ${om?.symbol ?: ""} · chasing the best ${if (o.side == "buy") "bid" else "ask"}" +
+                    (o.chaseCapPrice?.let { " · cap ${fmtPrice(it, om)}" } ?: "")
+                else "${o.side} ${(o.limitPrice ?: o.triggerPrice)?.let { fmtUsd(o.size * it) } ?: fmtSize(o.size)} @ ${fmtPrice(o.limitPrice ?: o.triggerPrice, om)}" + (if (o.triggerPrice != null && o.limitPrice != null) " (trigger ${fmtPrice(o.triggerPrice, om)})" else ""),
                 style = num.copy(fontSize = 12.sp, color = C.muted),
             )
         }
-        Act("Cancel", color = C.down) { scope.launch { repo.cancelOrder(o) } }
+        // Removing a stop loss leaves the position unprotected: that one asks first.
+        var ask by remember { mutableStateOf(false) }
+        Act("Cancel", color = C.down, modifier = Modifier.padding(start = 8.dp)) { if (o.exitGroup == "sl") ask = true else scope.launch { repo.cancelOrder(o) } }
+        if (ask) ConfirmDialog("Remove stop loss", "${o.symbol} SL ${fmtPrice(o.triggerPrice ?: o.limitPrice, om)}", C.down,
+            note = "The position stays open without a stop.", confirm = "Remove", onDismiss = { ask = false }) {
+            ask = false; scope.launch { repo.cancelOrder(o) }
+        }
     }
 }
 
@@ -316,5 +534,5 @@ private fun RoundBtn(color: Color = C.text, enabled: Boolean = true, glyph: @Com
     ) { glyph(tint) }
 }
 
-/** Rounds to 5 significant digits, enough for any tick on MFP markets. */
-private fun roundTick(v: Double): Double = java.math.BigDecimal(v).round(java.math.MathContext(6)).toDouble()
+/** Fallback when the market isn't loaded: 6 significant digits, without binary noise. */
+private fun roundTick(v: Double): Double = java.math.BigDecimal.valueOf(v).round(java.math.MathContext(6)).toDouble()

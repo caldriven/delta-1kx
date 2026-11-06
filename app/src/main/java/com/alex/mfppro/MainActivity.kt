@@ -53,6 +53,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.animation.togetherWith
 import androidx.compose.ui.unit.sp
 import com.alex.mfppro.ui.C
+import com.alex.mfppro.ui.TradeResultBanner
 import com.alex.mfppro.ui.BottomBar
 import com.alex.mfppro.ui.NavItem
 import com.alex.mfppro.ui.MfpTheme
@@ -82,6 +83,7 @@ class MainActivity : ComponentActivity() {
                 enableEdgeToEdge(statusBarStyle = bar, navigationBarStyle = bar)
             }
             MfpTheme {
+                com.alex.mfppro.ui.TermsGate(repo)
                 var tab by rememberSaveable { mutableStateOf(0) }
                 var marketId by rememberSaveable { mutableStateOf(repo.prefs.lastMarketId) }
                 var compact by rememberSaveable { mutableStateOf(false) }
@@ -138,9 +140,9 @@ class MainActivity : ComponentActivity() {
                         } else BottomBar(
                             listOf(
                                 NavItem("Dashboard", Icons.Filled.Dashboard, 0),
-                                NavItem(if (tab == 4 && analysis) "Analysis" else "Markets", if (tab == 4 && analysis) Icons.Filled.Insights else Icons.Filled.QueryStats, 4, mode = if (tab == 4) (if (analysis) 1 else 0) else null),
+                                NavItem(if (tab == 4 && analysis) "Analysis" else "Markets", if (tab == 4 && analysis) Icons.Filled.Insights else Icons.Filled.QueryStats, 4, mode = if (tab == 4) (if (analysis) 1 else 0) else null, modes = listOf("List", "Analysis")),
                                 // On Trade, this button flips between chart and position management.
-                                NavItem("Trade", if (tab == 1 && compact) Icons.Filled.Tune else Icons.Filled.CandlestickChart, 1, mode = if (tab == 1) (if (compact) 1 else 0) else null),
+                                NavItem("Trade", if (tab == 1 && compact) Icons.Filled.Tune else Icons.Filled.CandlestickChart, 1, mode = if (tab == 1) (if (compact) 1 else 0) else null, modes = listOf("Chart", "Trade")),
                                 NavItem("Journal", Icons.AutoMirrored.Filled.MenuBook, 2),
                                 // Opens the order panel over whatever screen is showing.
                                 NavItem("Order", Icons.Filled.SwapVert, 5),
@@ -185,7 +187,8 @@ class MainActivity : ComponentActivity() {
                             else androidx.compose.foundation.pager.HorizontalPager(pager, userScrollEnabled = false, key = { pageTabs[it] }) { i ->
                                 when (pageTabs[i]) {
                                     0 -> PositionsScreen(repo, onOpenMarket = openMarket, onOpenSettings = { go(3) })
-                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket, focus = focusOn)
+                                    1 -> TradeScreen(repo, marketId, compact, onPickMarket = openMarket, focus = focusOn,
+                                        onOpenMarkets = { analysis = false; repo.prefs.marketsAnalysis = false; go(4) })
                                     2 -> com.alex.mfppro.ui.JournalScreen(repo, onOpenSettings = { go(3) })
                                     else -> OverviewScreen(repo, analysis, onOpenMarket = openMarket)
                                 }
@@ -198,9 +201,14 @@ class MainActivity : ComponentActivity() {
                             if (m == null) com.alex.mfppro.ui.OrderPanel.open = null
                             else androidx.compose.runtime.key(id, req) { com.alex.mfppro.ui.OrderTicket(repo, m, req) { com.alex.mfppro.ui.OrderPanel.open = null } }
                         }
+                        com.alex.mfppro.ui.PairPanel.open?.let { req ->
+                            androidx.compose.runtime.key(req) { com.alex.mfppro.ui.PairTicket(repo, req) { com.alex.mfppro.ui.PairPanel.open = null } }
+                        }
                     }
                 }
                 com.alex.mfppro.ui.Overlay.content?.invoke()
+                // Order results above everything, panels and dialogs' backdrop included.
+                TradeResultBanner(repo)
                 }
             }
         }

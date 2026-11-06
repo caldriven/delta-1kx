@@ -43,8 +43,9 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         nm.createNotificationChannel(NotificationChannel(CH_TRADES, "Fills and PnL", NotificationManager.IMPORTANCE_HIGH))
         repo.scope.launch {
             while (isActive) {
-                delay(2_000)
-                if (repo.prefs.alertsEnabled) check()
+                // Every 2 s on screen; every 5 s in the background, where it only feeds notifications.
+                delay(if (repo.visible.value) 2_000 else 5_000)
+                runCatching { check() }
                 runCatching { checkAccounts() }
             }
         }
@@ -60,32 +61,32 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     private val status = HashMap<String, String>()
     private val breached = HashSet<String>()
     private val marginHigh = HashSet<String>()
-    // Last PnL step seen per position, in dollars and in percent of value.
-    private val usdStep = HashMap<String, Long>()
-    private val pctStep = HashMap<String, Long>()
+    // Last PnL step seen, keyed "kind|positionId" (u = $, p = % of position, e = % of equity, r = % of loss limit).
+    private val steps = HashMap<String, Long>()
 
     private fun onFill(f: Fill) {
-        val p = repo.prefs
+        val p = repo.prefs.notifyFor(f.accountId)
+        if (p.muted) return
         val name = repo.account.accounts.value[f.accountId]?.let { it.account.name.ifBlank { "#" + it.account.accountNumber } } ?: ""
         val sym = com.alex.mfppro.ui.ticker(f.symbol, f.provider)
         when {
-            f.type == "liquidation" || f.type == "close_out" -> if (p.notifyBreach)
+            f.type == "liquidation" || f.type == "close_out" -> if (p.breach)
                 trade(f.id.hashCode(), "${if (f.type == "liquidation") "Liquidated" else "Closed out"}: $sym", "${fmtSigned(f.realizedPnl)} · $name", alarm = true)
-            f.type.startsWith("stop") && f.reduceOnly -> if (p.notifyStops)
+            f.type.startsWith("stop") && f.reduceOnly -> if (p.stops)
                 trade(f.id.hashCode(), "Stop loss hit: $sym", "${fmtSigned(f.realizedPnl - f.fee)} at ${px(f.fillPrice)} · $name", alarm = true)
-            f.realizedPnl != 0.0 -> if (p.notifyFills)
+            f.realizedPnl != 0.0 -> if (p.fills)
                 trade(f.id.hashCode(), "Closed $sym ${fmtSigned(f.realizedPnl - f.fee)}", "${fmt(f.notional)} at ${px(f.fillPrice)} · $name")
-            else -> if (p.notifyFills)
+            else -> if (p.fills)
                 trade(f.id.hashCode(), "Filled: ${if (f.side == "buy") "Long" else "Short"} $sym ${fmt(f.notional)}", "at ${px(f.fillPrice)} · $name")
         }
     }
 
     /** Breach, margin and PnL-step checks, every couple of seconds. */
     private fun checkAccounts() {
-        val p = repo.prefs
         val marks = repo.market.marks.value
         for (s in repo.account.accounts.value.values) {
             val id = s.account.id
+            val p = repo.prefs.notifyFor(id)
             val name = s.account.name.ifBlank { "#" + s.account.accountNumber }
             // Breach: the account flips to failed, or live room goes to zero.
             val prev = status.put(id, s.account.status)
@@ -93,43 +94,63 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             val gone = (prev == "active" && s.account.status == "failed") || (s.account.status == "active" && (r.room ?: 1.0) <= 0)
             if (gone && id !in breached) {
                 breached += id
-                if (p.notifyBreach) trade(id.hashCode() + 1, "Account breached: $name", "Equity ${fmt(r.equity)}", alarm = true)
+                if (p.breach && !p.muted) trade(id.hashCode() + 1, "Account breached: $name", "Equity ${fmt(r.equity)}", alarm = true)
             } else if (!gone && s.account.status == "active" && (r.room ?: 1.0) > 0) breached -= id
-            if (s.account.status != "active") continue
+            if (s.account.status != "active" || p.muted) continue
             // Margin: share of equity tied up as position margin.
             val margin = s.positions.values.sumOf { it.marginAt() }
             val used = if (r.equity > 0) margin / r.equity * 100 else 0.0
-            if (used >= p.marginAlertPct && id !in marginHigh) {
+            if (used >= p.marginPct && id !in marginHigh) {
                 marginHigh += id
-                if (p.notifyMargin) trade(id.hashCode() + 2, "Margin ${"%.0f".format(used)}% used: $name", "${fmt(margin)} of ${fmt(r.equity)} equity", alarm = true)
-            } else if (used < p.marginAlertPct * 0.9) marginHigh -= id
-            // PnL steps per position.
+                if (p.margin) trade(id.hashCode() + 2, "Margin ${"%.0f".format(used)}% used: $name", "${fmt(margin)} of ${fmt(r.equity)} equity", alarm = true)
+            } else if (used < p.marginPct * 0.9) marginHigh -= id
+            // PnL steps per position, each measured against its own base: dollars, position cost,
+            // account equity, and the binding loss allowance.
+            val allowance = (if (r.bindingIsDaily) r.dailyAllowance else r.ddAllowance)?.takeIf { it > 0 }
             for (pos in s.positions.values) {
                 val m = marks[pos.feedKey] ?: continue
-                val pnl = pos.pnlAt(m)
+                val pnl = if (p.pnlNet) pos.netAt(m) else pos.pnlAt(m)
                 val value = pos.size * m
-                val pct = if (value > 0) pnl / (pos.size * pos.entryPrice) * 100 else 0.0
-                val su = p.pnlStepUsd.toDouble()
-                val sp = p.pnlStepPct.toDouble()
-                val bu = if (su > 0) kotlin.math.floor(pnl / su).toLong() else 0L
-                val bp = if (sp > 0) kotlin.math.floor(pct / sp).toLong() else 0L
-                // First sight records the step. Afterwards notify only on a step at least one beyond the last
-                // notified one (in either direction), so PnL wobbling across a boundary doesn't spam.
-                val lastU = usdStep[pos.id]; val lastP = pctStep[pos.id]
-                if (lastU == null) usdStep[pos.id] = bu
-                if (lastP == null) pctStep[pos.id] = bp
-                val newU = lastU != null && su > 0 && (bu > lastU || bu < lastU - 1)
-                val newP = lastP != null && sp > 0 && (bp > lastP || bp < lastP - 1)
-                if (newU) usdStep[pos.id] = bu
-                if (newP) pctStep[pos.id] = bp
-                if (p.notifyPnl && (newU || newP)) {
-                    trade(pos.id.hashCode(), "${pos.symbol} ${if (pos.isLong) "long" else "short"} ${fmtSigned(pnl)}",
-                        String.format(Locale.US, "%+.2f%% · value %s · %s", pct, fmt(value), name))
+                val cost = pos.size * pos.entryPrice
+                val pct = if (cost > 0) pnl / cost * 100 else 0.0
+                val eqPct = if (r.equity > 0) pnl / r.equity * 100 else 0.0
+                val riskPct = allowance?.let { pnl / it * 100 }
+                val hits = listOfNotNull(
+                    step("u", pos.id, pnl, p.pnlUsd.toDouble())?.let { "${fmtSigned(it)} step" },
+                    step("p", pos.id, pct, p.pnlPct.toDouble())?.let { String.format(Locale.US, "%+.2f%% of position", it) },
+                    step("e", pos.id, eqPct, p.pnlEq.toDouble())?.let { String.format(Locale.US, "%+.2f%% of equity", it) },
+                    // Loss limit: only losses use it up, so this step only speaks when the position is red.
+                    riskPct?.let { step("r", pos.id, it, p.pnlRisk.toDouble()) }?.takeIf { it < 0 && allowance != null }?.let {
+                        // Measured against the limit's size, which says nothing about a breach on its own
+                        // (today's gains add room), so the real room left goes with it.
+                        val used = -it
+                        String.format(Locale.US, "Loss is %.0f%% of the %s %s limit · %s room left", used, fmt(allowance!!),
+                            if (r.bindingIsDaily) "daily" else "max DD", fmt(r.room))
+                    },
+                )
+                val sideOk = when (p.pnlSide) { "loss" -> pnl < 0; "profit" -> pnl > 0; else -> true }
+                if (p.pnl && hits.isNotEmpty() && sideOk) {
+                    trade(pos.id.hashCode(), "${pos.symbol} ${if (pos.isLong) "long" else "short"} ${fmtSigned(pnl)}${if (p.pnlNet) " net" else ""}",
+                        String.format(Locale.US, "%s · %+.2f%% · equity %+.2f%% · value %s · %s", hits.first(), pct, eqPct, fmt(value), name))
                 }
             }
         }
         val open = repo.account.accounts.value.values.flatMap { it.positions.keys }.toSet()
-        usdStep.keys.retainAll(open); pctStep.keys.retainAll(open)
+        steps.keys.retainAll { it.substringAfter('|') in open }
+    }
+
+    /**
+     * Crossed step boundary for [v] in units of [size], or null. First sight only records the step.
+     * Afterwards a step at least one beyond the last notified one (either direction) fires, so PnL
+     * wobbling across a boundary doesn't spam. Returns the boundary value that was crossed.
+     */
+    private fun step(kind: String, id: String, v: Double, size: Double): Double? {
+        if (size <= 0) return null
+        val key = "$kind|$id"
+        val b = kotlin.math.floor(v / size).toLong()
+        val last = steps[key] ?: run { steps[key] = b; return null }
+        if (b > last || b < last - 1) { steps[key] = b; return (if (b > last) b else b + 1) * size }
+        return null
     }
 
     private fun trade(id: Int, title: String, text: String, alarm: Boolean = false) {
@@ -140,7 +161,9 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         NotificationManagerCompat.from(ctx).notify(
             id,
             NotificationCompat.Builder(ctx, if (alarm) CH_ALERTS else CH_TRADES)
-                .setSmallIcon(if (alarm) android.R.drawable.stat_sys_warning else android.R.drawable.stat_notify_more)
+                .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
+                // A label and colour per kind, so a risk alarm never reads like a routine fill.
+                .setSubText(if (alarm) "Risk alert" else "Trade").setColor(if (alarm) 0xFFEF4444.toInt() else 0xFFF59E0B.toInt())
                 .setContentTitle(title).setContentText(text)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(if (alarm) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_EVENT)
@@ -149,14 +172,16 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun fmtSigned(v: Double) = (if (v >= 0) "+" else "-") + fmt(kotlin.math.abs(v))
-    private fun px(v: Double) = if (v >= 1000) String.format(Locale.US, "%,.2f", v) else String.format(Locale.US, "%.4f", v)
+    private fun px(v: Double) = com.alex.mfppro.ui.fmtPrice(v)
 
     private fun check() {
-        val usd = repo.prefs.alertRoomUsd.toDouble()
-        val pct = repo.prefs.alertRoomPct / 100.0
         val marks = repo.market.marks.value
         for (s in repo.account.accounts.value.values) {
             if (s.account.status != "active") continue
+            val rules = repo.prefs.notifyFor(s.account.id)
+            if (rules.muted || !rules.room) { fired -= s.account.id; continue }
+            val usd = rules.roomUsd.toDouble()
+            val pct = rules.roomPct / 100.0
             val r = riskOf(s, marks)
             val room = r.room ?: continue
             val frac = r.roomFraction
@@ -186,18 +211,19 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         NotificationManagerCompat.from(ctx).notify(
             id,
             NotificationCompat.Builder(ctx, CH_ALERTS)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
+                .setSubText("Drawdown alert").setColor(0xFFEF4444.toInt())
                 .setContentTitle(title).setContentText(text)
                 .setPriority(NotificationCompat.PRIORITY_HIGH).setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setContentIntent(open).setAutoCancel(true).build(),
         )
     }
 
-    private fun fmt(v: Double?) = if (v == null) "—" else String.format(Locale.US, "$%,.2f", v)
+    private fun fmt(v: Double?) = com.alex.mfppro.ui.fmtUsd(v)
 
     companion object {
         fun monitorNotification(ctx: Context) = NotificationCompat.Builder(ctx, CH_MONITOR)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
             .setContentTitle("Delta 1kx is watching your accounts")
             .setContentText("Alerts stay live in the background")
             .setOngoing(true)

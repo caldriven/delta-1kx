@@ -68,8 +68,18 @@ data class Position(
     val marginMode: String = "cross",
     val liquidationPrice: Double? = null,
     val openedAt: Double = 0.0,
+    // Running totals on the open position: PnL already banked by partial closes, fees paid, funding (swap) received (+) or paid (-).
+    val realizedPnl: Double = 0.0,
+    val fees: Double = 0.0,
+    val funding: Double = 0.0,
 ) {
     val isLong get() = side == "long"
+
+    /** Whole-trade result at [mark]: open PnL plus banked PnL, after fees and swap. */
+    fun netAt(mark: Double) = pnlAt(mark) + realizedPnl - fees + funding
+
+    /** Mark where [netAt] turns zero. */
+    val breakeven get() = (entryPrice + (fees - funding - realizedPnl) / size.coerceAtLeast(1e-12) * (if (isLong) 1 else -1)).takeIf { it > 0 }
 
     /** Positions may carry a differently formatted market_id; venue + coin is the reliable match. */
     fun inMarket(m: Market) = marketId == m.marketId || (provider == m.provider && coin == m.coin)
@@ -92,6 +102,8 @@ data class Order(
     val size: Double = 0.0,
     val triggerPrice: Double? = null,
     val limitPrice: Double? = null,
+    val chaseOffset: Double? = null,
+    val chaseCapPrice: Double? = null,
     val reduceOnly: Boolean = false,
     val status: String = "",
     val bracketRole: String? = null,
@@ -108,7 +120,11 @@ data class Order(
             else -> null
         }
     val exitExecution get() = if (type.endsWith("_limit")) "limit" else "market"
-    val exitPrice get() = triggerPrice ?: limitPrice
+    /**
+     * The exit's own price. A limit TP/SL rests at its limit; MFP arms it with a trigger a little
+     * before that, which is not the price you set.
+     */
+    val exitPrice get() = if (exitExecution == "limit") limitPrice ?: triggerPrice else triggerPrice ?: limitPrice
 }
 
 @Serializable
@@ -175,7 +191,19 @@ data class FillPage(val data: List<Fill> = emptyList(), val hasMore: Boolean = f
 data class PolicyLimits(val maxPositionValueUsd: Double? = null, val maxOpenPositions: Double? = null)
 
 @Serializable
-data class TradingPolicy(val limits: PolicyLimits? = null, val maximumTotalNotionalUsd: Double? = null)
+data class PolicyRule(val id: String = "")
+
+@Serializable
+data class PolicyCompetition(val openingExposureRestricted: Boolean = false)
+
+@Serializable
+data class TradingPolicy(
+    val limits: PolicyLimits? = null,
+    val maximumTotalNotionalUsd: Double? = null,
+    val accountRules: List<PolicyRule> = emptyList(),
+    /** Present only on competition accounts. */
+    val competition: PolicyCompetition? = null,
+)
 
 /** A closed position from GET /v1/positions?status=closed: one whole trade with its fees and funding. */
 @Serializable

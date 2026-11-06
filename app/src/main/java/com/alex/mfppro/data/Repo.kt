@@ -55,10 +55,22 @@ class Repo(ctx: Context) {
     /** Public trade prints straight from the venues, for the cross-exchange tape. */
     val venueTrades by lazy { VenueTrades(http) }
 
+    /** Macro factors (VIX, 10Y, DXY) for analysis only. */
+    val factors by lazy { FactorFeed(http) }
+
+    /** Candle history for a market or a macro factor. */
+    suspend fun history(m: Market, interval: String, bars: Int): List<Candle> =
+        if (m.provider == FactorFeed.PROVIDER) factors.candles(m, interval, bars) else market.candleHistory(m.provider, m.coin, interval, bars)
+
     /** One-line results of trading actions, shown as snackbars. */
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val messages = _messages.asSharedFlow()
     fun postMessage(text: String) { _messages.tryEmit(text) }
+
+    /** What happened to a trading action, for the result banner. [ok] null = still in progress (queued). */
+    data class TradeEvent(val what: String, val ok: Boolean?, val status: String, val detail: String, val time: Long = System.currentTimeMillis())
+    private val _tradeEvents = MutableSharedFlow<TradeEvent>(extraBufferCapacity = 16)
+    val tradeEvents = _tradeEvents.asSharedFlow()
 
     private val _markets = MutableStateFlow<List<Market>>(emptyList())
     val markets = _markets.asStateFlow()
@@ -72,14 +84,17 @@ class Repo(ctx: Context) {
 
     private var pauseJob: Job? = null
     private var riskJob: Job? = null
+    /** App on screen. In the background the monitor keeps mark ticks only and checks less often. */
+    private val _visible = MutableStateFlow(true)
+    val visible = _visible.asStateFlow()
 
     init {
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) = onForeground()
-            override fun onStop(owner: LifecycleOwner) = onBackground()
+            override fun onStart(owner: LifecycleOwner) { _visible.value = true; onForeground() }
+            override fun onStop(owner: LifecycleOwner) { _visible.value = false; onBackground() }
         })
         // A new default network (Wi-Fi <-> mobile) leaves old sockets dead: reconnect at once.
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
@@ -124,16 +139,31 @@ class Repo(ctx: Context) {
 
     private fun requireKey(): String? = _apiKey.value.also { if (it == null) _messages.tryEmit("Add an API key first") }
 
+    /** Every trading result goes to the result banner: green tick, red cross, or amber while queued. */
     private fun report(what: String, r: TradeResult): TradeResult {
-        _messages.tryEmit(
+        _tradeEvents.tryEmit(
             when (r) {
-                is TradeResult.Ok -> "$what: " + (r.order?.status ?: if (r.queued) "queued" else "done")
-                // Plain words for the rejections a trader can act on.
-                is TradeResult.Rejected -> "$what rejected: " + when (r.code) {
-                    "exposure_cap" -> "market exposure cap reached — size down or close some first"
-                    "venue_conflict" -> "you already hold this on another venue — close that first or switch venue"
-                    else -> r.message
+                is TradeResult.Ok -> {
+                    val st = r.order?.status?.lowercase()
+                    when {
+                        // Accepted by the API but the engine turned it down.
+                        st == "rejected" || st == "canceled" || st == "cancelled" || st == "expired" ->
+                            TradeEvent(what, false, st.replaceFirstChar { it.uppercase() }, "The order was not executed")
+                        r.queued -> TradeEvent(what, null, "Queued", "Waiting for the venue")
+                        else -> TradeEvent(what, true, when (st) {
+                            "filled" -> "Filled"; "open", "new", "resting" -> "Placed"; "partially_filled" -> "Partly filled"
+                            "triggered", "pending" -> "Pending"; null -> "Done"; else -> st.replace('_', ' ').replaceFirstChar { it.uppercase() }
+                        }, r.order?.let { o -> listOfNotNull(o.side.uppercase().ifBlank { null }, o.type.replace('_', ' ').ifBlank { null }, (o.limitPrice ?: o.triggerPrice)?.let { "@ " + com.alex.mfppro.ui.fmtPrice(it) }).joinToString(" ") } ?: "")
+                    }
                 }
+                // Plain words for the rejections a trader can act on.
+                is TradeResult.Rejected -> TradeEvent(what, false, "Rejected", when (r.code) {
+                    "exposure_cap" -> "Market exposure cap reached: size down or close some first"
+                    "venue_conflict" -> "You already hold this on another venue: close that first or switch venue"
+                    "network" -> "No answer from MFP. Check open orders before retrying. (${r.message})"
+                    "stale_snapshot" -> "The TP/SL changed on MFP since the app last saw it. Wait a moment and try again."
+                    else -> r.message
+                } + if (r.code !in setOf("exposure_cap", "venue_conflict", "network")) "  [${r.code}]" else "")
             }
         )
         refreshRiskSoon()
@@ -150,21 +180,55 @@ class Repo(ctx: Context) {
         return report(label, trade.placeOrder(key, body))
     }
 
-    /** Market close of [fraction] of the position, or a limit close at [limitPrice]. */
-    suspend fun closePosition(p: Position, fraction: Double = 1.0, limitPrice: Double? = null): TradeResult {
+    /**
+     * Market close of [fraction] of the position, or a limit close at [limitPrice].
+     * With [postOnly] the limit must rest: MFP rejects it instead of filling it at market
+     * when it would cross the book.
+     */
+    suspend fun closePosition(p: Position, fraction: Double = 1.0, limitPrice: Double? = null, postOnly: Boolean = false): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val m = market(p.marketId)
         val body = buildJsonObject {
             if (fraction < 1.0) put("size", roundSize(p.size * fraction, m))
             if (limitPrice != null) {
-                put("type", "limit"); put("limit_price", limitPrice); put("marketable_limit_acknowledged", true)
+                put("type", "limit"); put("limit_price", m?.let { com.alex.mfppro.ui.snapTick(limitPrice, it) } ?: limitPrice)
+                if (!postOnly) put("marketable_limit_acknowledged", true)
             } else {
                 put("type", "market")
                 market.marks.value[p.feedKey]?.let { put("expected_price", it) }
             }
         }
-        val what = if (fraction < 1.0) "Close ${(fraction * 100).toInt()}% ${p.symbol}" else "Close ${p.symbol}"
-        return report(what, trade.closePosition(key, p.id, body))
+        val what = if (fraction < 1.0) "Close ${kotlin.math.round(fraction * 100).toInt()}% ${p.symbol}" else "Close ${p.symbol}"
+        var r = trade.closePosition(key, p.id, body)
+        val exits = exitsOf(p)
+        if (r is TradeResult.Rejected && r.code == "rule_violation" && exits.isNotEmpty()) {
+            // A triggered TP/SL limit resting for the full size blocks the close. A full market close
+            // drops the exits anyway, so cancel them and try once more; a partial close says why.
+            r = if (fraction >= 1.0 && limitPrice == null) {
+                exits.forEach { trade.cancelOrder(key, it.id) }
+                trade.closePosition(key, p.id, body)
+            } else r.copy(message = r.message + " · A triggered TP/SL may be holding the size: cancel it under Orders first")
+        }
+        return report(what, r)
+    }
+
+    /**
+     * Reduce-only chase close: rests at the best ask (closing a long) or bid (closing a short),
+     * [offset] further out in price, and follows the touch on MFP's server until filled.
+     * [cap] is the worst price it may follow to.
+     */
+    suspend fun chaseClose(p: Position, fraction: Double, offset: Double, cap: Double?): TradeResult {
+        val m = market(p.marketId)
+        val what = if (fraction < 1.0) "Chase close ${kotlin.math.round(fraction * 100).toInt()}% ${p.symbol}" else "Chase close ${p.symbol}"
+        return placeOrder(what, buildJsonObject {
+            put("type", "chase"); put("account_id", p.accountId); put("market_id", p.marketId)
+            put("side", if (p.isLong) "sell" else "buy")
+            put("size", roundSize(p.size * fraction, m))
+            put("leverage", p.leverage); put("margin_mode", p.marginMode)
+            put("reduce_only", true)
+            put("chase_offset", offset)
+            cap?.let { put("chase_cap_price", it) }
+        })
     }
 
     /** Flip a position: one market order for twice its size on the other side. */
@@ -173,7 +237,7 @@ class Repo(ctx: Context) {
         put("side", if (p.isLong) "sell" else "buy")
         put("size", roundSize(p.size * 2, market(p.marketId)))
         put("leverage", p.leverage); put("margin_mode", p.marginMode)
-        put("target_position_id", p.id)
+        // MFP rejects target_position_id on market orders; the size alone flips the position.
         put("slippage_tolerance_bps", prefs.slippageBps)
         market.marks.value[p.feedKey]?.let { put("expected_price", it) }
     })
@@ -182,22 +246,37 @@ class Repo(ctx: Context) {
         account.accounts.value[p.accountId]?.orders?.values.orEmpty()
             .filter { it.marketId == p.marketId && it.exitGroup != null }
 
-    /** Set (or with null remove) the position's TP and SL in one atomic batch. */
-    suspend fun setTpSl(p: Position, tp: Double?, sl: Double?, label: String = "TP/SL ${p.symbol}"): TradeResult {
+    /**
+     * Set (or with null remove) the position's TP and SL in one atomic batch.
+     * [tpExec] / [slExec] pick "market" (trigger, then market close) or "limit" (a resting
+     * reduce-only limit at the price); null keeps what an existing exit uses, or the saved default.
+     */
+    suspend fun setTpSl(
+        p: Position, tp: Double?, sl: Double?, label: String = "TP/SL ${p.symbol}",
+        tpExec: String? = null, slExec: String? = null,
+    ): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val current = exitsOf(p)
         val ops = mutableListOf<JsonObject>()
         val placed = mutableMapOf<String, Int>()
-        for ((group, price) in listOf("tp" to tp, "sl" to sl)) {
+        // Every exit price lands on the market's tick (breakeven at an average entry, guard stops, drags).
+        val m = market(p.marketId)
+        fun snap(v: Double?) = v?.let { x -> m?.let { com.alex.mfppro.ui.snapTick(x, it) } ?: x }
+        for ((group, price) in listOf("tp" to snap(tp), "sl" to snap(sl))) {
             val existing = current.filter { it.exitGroup == group }
+            val asked = if (group == "tp") tpExec else slExec
+            val exec = asked ?: existing.firstOrNull()?.exitExecution ?: if (group == "tp") prefs.tpExecution else prefs.slExecution
+            // Modify can't change how an exit executes; switching means cancel and place again.
+            val keep = existing.firstOrNull()?.takeIf { it.exitExecution == exec }
             if (price == null) {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
-            } else if (existing.isNotEmpty()) {
-                ops += buildJsonObject { put("kind", "modify"); put("order_id", existing[0].id); put("price", price); put("size", p.size) }
-                existing.drop(1).forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
+            } else if (keep != null) {
+                ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
+                existing.filter { it !== keep }.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else {
+                existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
                 placed[group] = ops.size
-                ops += buildJsonObject { put("kind", "place"); put("group", group); put("execution_type", "market"); put("price", price); put("size", p.size) }
+                ops += buildJsonObject { put("kind", "place"); put("group", group); put("execution_type", exec); put("price", price); put("size", p.size) }
             }
         }
         // Pair a freshly placed TP and SL as OCO so one filling cancels the other.
@@ -207,7 +286,11 @@ class Repo(ctx: Context) {
             ops[s] = JsonObject(ops[s] + ("oco_pair_with_operation_index" to JsonPrimitive(t)))
         }
         if (ops.isEmpty()) return TradeResult.Ok(null)
-        return report(label, trade.replaceExits(key, p, current, ops))
+        var r = trade.replaceExits(key, p, current, ops)
+        // Older limit exits may be known to MFP by their trigger rather than their limit: try that once.
+        if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
+            r = trade.replaceExits(key, p, current, ops, armPrice = true)
+        return report(label, r)
     }
 
     /** Move the stop loss to the entry price, keeping any take profit. */
@@ -302,6 +385,25 @@ class Repo(ctx: Context) {
         }
     }
 
+    /** Rolling 1-hour change per market, from twelve 5-minute candles; refreshed every 2 min at most. */
+    private val _chg1h = MutableStateFlow<Map<String, Double>>(emptyMap())
+    val chg1h = _chg1h.asStateFlow()
+    private var chg1hAt = 0L
+    private var chg1hJob: Job? = null
+    fun load1h(only: List<Market> = _markets.value) {
+        if (chg1hJob?.isActive == true || System.currentTimeMillis() - chg1hAt < 2 * 60_000) return
+        chg1hJob = scope.launch {
+            chg1hAt = System.currentTimeMillis()
+            for (m in only) launch {
+                val c = runCatching { market.candleHistory(m.provider, m.coin, "5m", 13) }.getOrNull().orEmpty()
+                if (c.size >= 12) {
+                    val open = c[c.size - 12].o
+                    if (open > 0) _chg1h.update { it + (m.marketId to (c.last().c / open - 1) * 100) }
+                }
+            }
+        }
+    }
+
     private fun loadMarkets() = scope.launch {
         loadVenues()
         var wait = 1_000L
@@ -344,9 +446,11 @@ class Repo(ctx: Context) {
     private fun trackPositionMarks() = scope.launch {
         market.realtime = prefs.realtimePnl
         var held = emptySet<Sub>()
-        kotlinx.coroutines.flow.combine(account.accounts, _realtime) { m, rt ->
+        // Order books only while the app is on screen: in the background mark ticks are enough for alerts,
+        // and every held market's full book is the heaviest feed there is.
+        kotlinx.coroutines.flow.combine(account.accounts, _realtime, _visible) { m, rt, vis ->
             m.values.flatMap { it.positions.values }.flatMap {
-                listOfNotNull(Sub("ticks", it.provider, it.coin), if (rt) Sub("books", it.provider, it.coin) else null)
+                listOfNotNull(Sub("ticks", it.provider, it.coin), if (rt && vis) Sub("books", it.provider, it.coin) else null)
             }.toSet()
         }
             .distinctUntilChanged()
@@ -367,7 +471,10 @@ class Repo(ctx: Context) {
         val acc = runCatching { rest.account(key, id) }.onFailure { Log.w(TAG, "account $id: ${it.message}") }.getOrNull() ?: return
         account.mergeRisk(acc)
         if (acc.status == "active" && System.currentTimeMillis() - (policyAt[id] ?: 0) > 600_000) {
-            runCatching { rest.tradingPolicy(key, id) }.onSuccess { pol -> policyAt[id] = System.currentTimeMillis(); _policies.update { it + (id to pol) } }
+            runCatching { rest.tradingPolicy(key, id) }.onSuccess { pol ->
+                policyAt[id] = System.currentTimeMillis(); _policies.update { it + (id to pol) }
+                Competitions.ids = if (pol.competition != null) Competitions.ids + id else Competitions.ids - id
+            }
         }
         if (acc.status == "active") runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it) }
     }

@@ -18,6 +18,12 @@ class Prefs(ctx: Context) {
         get() = secure.getString("api_key", null)
         set(v) = secure.edit().putString("api_key", v).apply()
 
+    /** Alpha terms version accepted with the key, and when; kept through a settings reset. */
+    val termsAccepted: Int get() = secure.getInt("terms_version", 0)
+    val termsAcceptedAt: Long get() = secure.getLong("terms_at", 0L)
+    fun acceptTerms(version: Int) =
+        secure.edit().putInt("terms_version", version).putLong("terms_at", System.currentTimeMillis()).apply()
+
     /** Empty means "all accounts". */
     var selectedAccounts: Set<String>
         get() = plain.getStringSet("selected_accounts", emptySet())!!.toSet()
@@ -49,6 +55,24 @@ class Prefs(ctx: Context) {
     var marginMode: String
         get() = plain.getString("margin_mode", "cross")!!
         set(v) = plain.edit().putString("margin_mode", v).apply()
+
+    /** Cross or isolated for new positions on this account; falls back to the last one used anywhere. */
+    fun marginModeFor(accountId: String?): String =
+        accountId?.let { plain.getString("margin_$it", null) } ?: marginMode
+    fun setMarginModeFor(accountId: String, v: String) {
+        plain.edit().putString("margin_$accountId", v).apply(); marginMode = v
+    }
+
+    /** What the app calls an account; MFP's own name is untouched. Blank clears it. */
+    fun setNickname(accountId: String, v: String) {
+        val t = v.trim()
+        plain.edit().apply { if (t.isEmpty()) remove("nick_$accountId") else putString("nick_$accountId", t) }.apply()
+        if (t.isEmpty()) Nicknames.map.remove(accountId) else Nicknames.map[accountId] = t
+    }
+
+    init {
+        plain.all.forEach { (k, v) -> if (k.startsWith("nick_") && v is String) Nicknames.map[k.removePrefix("nick_")] = v }
+    }
 
     var lockEnabled: Boolean
         get() = plain.getBoolean("lock_enabled", true)
@@ -165,6 +189,12 @@ class Prefs(ctx: Context) {
     var chipOpens: Boolean
         get() = plain.getBoolean("chip_opens", true)
         set(v) = plain.edit().putBoolean("chip_opens", v).apply()
+    var chipPivots: Boolean
+        get() = plain.getBoolean("chip_pivots", true)
+        set(v) = plain.edit().putBoolean("chip_pivots", v).apply()
+    var showPivots: Boolean
+        get() = plain.getBoolean("show_pivots", false)
+        set(v) = plain.edit().putBoolean("show_pivots", v).apply()
     var chipVp: Boolean
         get() = plain.getBoolean("chip_vp", true)
         set(v) = plain.edit().putBoolean("chip_vp", v).apply()
@@ -203,6 +233,51 @@ class Prefs(ctx: Context) {
     var pnlStepPct: Float
         get() = plain.getFloat("pnl_step_pct", 1f)
         set(v) = plain.edit().putFloat("pnl_step_pct", v).apply()
+    /** PnL step as % of account equity (0 = off). */
+    var pnlStepEq: Float
+        get() = plain.getFloat("pnl_step_eq", 0f)
+        set(v) = plain.edit().putFloat("pnl_step_eq", v).apply()
+    /** PnL step as % of the binding loss allowance, daily or max DD (0 = off). */
+    var pnlStepRisk: Float
+        get() = plain.getFloat("pnl_step_risk", 0f)
+        set(v) = plain.edit().putFloat("pnl_step_risk", v).apply()
+    /** "both", "loss" or "profit". */
+    var pnlSide: String
+        get() = plain.getString("pnl_side", "both") ?: "both"
+        set(v) = plain.edit().putString("pnl_side", v).apply()
+    /** Count PnL after fees and swap instead of price PnL. */
+    var pnlNet: Boolean
+        get() = plain.getBoolean("pnl_net", false)
+        set(v) = plain.edit().putBoolean("pnl_net", v).apply()
+    var pnlPreset: String
+        get() = plain.getString("pnl_preset", "custom") ?: "custom"
+        set(v) = plain.edit().putString("pnl_preset", v).apply()
+
+    /** Notification rules every account uses unless it has its own. The first read carries the old single settings over. */
+    var notifyDefaults: NotifyRules
+        get() = plain.getString("notify_rules", null)?.let { runCatching { notifyJson.decodeFromString(NotifyRules.serializer(), it) }.getOrNull() }
+            ?: NotifyRules(
+                fills = notifyFills, stops = notifyStops, breach = notifyBreach,
+                room = alertsEnabled, roomUsd = alertRoomUsd, roomPct = alertRoomPct,
+                margin = notifyMargin, marginPct = marginAlertPct,
+                pnl = notifyPnl, pnlUsd = if (plain.contains("pnl_step_usd")) pnlStepUsd else 0,
+                pnlPct = if (plain.contains("pnl_step_pct")) pnlStepPct else 0f,
+                pnlEq = if (plain.contains("pnl_step_eq")) pnlStepEq else 1f,
+                pnlRisk = if (plain.contains("pnl_step_risk")) pnlStepRisk else 25f,
+                pnlSide = pnlSide, pnlNet = pnlNet,
+                pnlPreset = if (plain.contains("pnl_preset")) pnlPreset else "Calm",
+            )
+        set(v) = plain.edit().putString("notify_rules", notifyJson.encodeToString(NotifyRules.serializer(), v)).apply()
+
+    /** An account's own rules, or null when it follows the defaults. */
+    fun notifyOverride(accountId: String): NotifyRules? =
+        plain.getString("notify_rules_$accountId", null)?.let { runCatching { notifyJson.decodeFromString(NotifyRules.serializer(), it) }.getOrNull() }
+
+    fun setNotifyOverride(accountId: String, v: NotifyRules?) = plain.edit().apply {
+        if (v == null) remove("notify_rules_$accountId") else putString("notify_rules_$accountId", notifyJson.encodeToString(NotifyRules.serializer(), v))
+    }.apply()
+
+    fun notifyFor(accountId: String): NotifyRules = notifyOverride(accountId) ?: notifyDefaults
 
     var pickerSort: String
         get() = plain.getString("picker_sort", "24h") ?: "24h"
@@ -218,6 +293,39 @@ class Prefs(ctx: Context) {
         get() = plain.getString("corr_window", "H1") ?: "H1"
         set(v) = plain.edit().putString("corr_window", v).apply()
 
+    /** Price decimals for limit prices in one market (fewer than its tick allows); null = the tick. */
+    /** How new TP and SL exits execute: "market" (trigger, then market) or "limit" (resting reduce-only limit). */
+    var tpExecution: String
+        get() = plain.getString("tp_exec", "market") ?: "market"
+        set(v) = plain.edit().putString("tp_exec", v).apply()
+    var slExecution: String
+        get() = plain.getString("sl_exec", "market") ?: "market"
+        set(v) = plain.edit().putString("sl_exec", v).apply()
+
+    fun priceDecimals(marketId: String): Int? = plain.getInt("dec_$marketId", -1).takeIf { it >= 0 }
+    fun setPriceDecimals(marketId: String, v: Int?) = plain.edit().apply { if (v == null) remove("dec_$marketId") else putInt("dec_$marketId", v) }.apply()
+
+    /** Chart layers turned off: pnl (position box), exits (TP/SL), floors (DLL/DD), target, orders, fills. */
+    var chartHidden: Set<String>
+        get() = plain.getString("chart_hidden", "")!!.split(',').filter { it.isNotBlank() }.toSet()
+        set(v) = plain.edit().putString("chart_hidden", v.joinToString(",")).apply()
+
+    /** Trade view account card unfolded (rule lines shown). */
+    var accountOpen: Boolean
+        get() = plain.getBoolean("account_open", false)
+        set(v) = plain.edit().putBoolean("account_open", v).apply()
+
+    /** Analysis view: correlation or special trades. */
+    var analysisView: String
+        get() = plain.getString("analysis_view", "CORR") ?: "CORR"
+        set(v) = plain.edit().putString("analysis_view", v).apply()
+    var pairScan: String
+        get() = plain.getString("pair_scan", "T20") ?: "T20"
+        set(v) = plain.edit().putString("pair_scan", v).apply()
+    var pairWindow: String
+        get() = plain.getString("pair_window", "H4") ?: "H4"
+        set(v) = plain.edit().putString("pair_window", v).apply()
+
     var fillsAllMarkets: Boolean
         get() = plain.getBoolean("fills_all_markets", true)
         set(v) = plain.edit().putBoolean("fills_all_markets", v).apply()
@@ -231,11 +339,20 @@ class Prefs(ctx: Context) {
         // Keep what you trade on: account, selection, market and per-market leverage.
         val keep = setOf("trade_account", "selected_accounts", "last_market")
         val e = plain.edit()
-        plain.all.keys.filter { it !in keep && !it.startsWith("lev_") }.forEach { e.remove(it) }
+        // Nicknames are names, not settings: they stay.
+        plain.all.keys.filter { it !in keep && !it.startsWith("lev_") && !it.startsWith("nick_") }.forEach { e.remove(it) }
         e.commit()
     }
 
     /** Extra markets added to every correlation preset. */
+    /** Multi-chart slots, as market ids; blank slots fall back to the defaults. */
+    var multiCharts: List<String>
+        get() = plain.getString("multi_charts", "")!!.split(',')
+        set(v) = plain.edit().putString("multi_charts", v.joinToString(",")).apply()
+    var multiInterval: String
+        get() = plain.getString("multi_interval", "15m") ?: "15m"
+        set(v) = plain.edit().putString("multi_interval", v).apply()
+
     var corrExtra: List<String>
         get() = plain.getString("corr_extra", "")!!.split(',').filter { it.isNotBlank() }
         set(v) = plain.edit().putString("corr_extra", v.joinToString(",")).apply()

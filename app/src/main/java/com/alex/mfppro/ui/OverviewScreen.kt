@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +34,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -51,6 +56,15 @@ import com.alex.mfppro.data.Sub
 
 private enum class SortKey(val label: String) { VOL("Volume"), CHG("24h"), WEEK("7d"), OI("OI"), OIC("OI 24h"), FUND("Funding"), NAME("Name") }
 
+/** Where the market list was, so opening a chart and coming back lands on the same rows. */
+private object ListMemory {
+    var query = ""
+    var key: Any? = null
+    var order: List<String> = emptyList()
+    var index = 0
+    var offset = 0
+}
+
 /** Sortable market overview: every MFP market with 24h (from the UTC open) and 7d change, OI, OI change and funding. */
 @Composable
 fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String) -> Unit) {
@@ -58,7 +72,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     val stats by repo.market.stats.collectThrottled(500)
     val classes by repo.classes.collectAsStateWithLifecycle()
     val extras by repo.extras.collectAsStateWithLifecycle()
-    var query by remember { mutableStateOf("") }
+    var query by remember { mutableStateOf(ListMemory.query) }
     var cls by remember { mutableStateOf(repo.prefs.overviewClass) }
     var sort by remember {
         val (k, d) = repo.prefs.overviewSort.split(":").let { it[0] to (it.getOrNull(1) != "asc") }
@@ -113,10 +127,23 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     // Freeze the order between refreshes: re-sorting on every 50 ms tick made rows jump while scrolling.
     // A new sort/filter takes effect at once and starts at the top.
     val latest by androidx.compose.runtime.rememberUpdatedState(live)
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    var order by remember(sort, activeCls, q) { mutableStateOf(live.map { it.marketId }) }
+    val listKey = listOf(sort, activeCls, q, analysis)
+    // Same list as last time: come back to its rows and scroll position instead of the top.
+    val returning = remember { ListMemory.key == listKey && ListMemory.order.isNotEmpty() }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState(
+        if (returning) ListMemory.index else 0, if (returning) ListMemory.offset else 0)
+    var order by remember(sort, activeCls, q) {
+        mutableStateOf(if (ListMemory.key == listKey && ListMemory.order.isNotEmpty()) ListMemory.order else live.map { it.marketId })
+    }
+    LaunchedEffect(listState) {
+        androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (i, o) -> ListMemory.index = i; ListMemory.offset = o }
+    }
+    SideEffect { ListMemory.key = listKey; ListMemory.order = order; ListMemory.query = query }
+    // The first run after coming back keeps the restored position; a new sort, filter or search starts at the top.
+    var restoring by remember { mutableStateOf(returning) }
     LaunchedEffect(sort, activeCls, q) {
-        listState.scrollToItem(0)
+        if (restoring) restoring = false else listState.scrollToItem(0)
         // Re-sort every second while stats are still arriving, then every 5 s.
         var n = 0
         while (true) {
@@ -136,9 +163,19 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     val fundingCol = sort.first == SortKey.FUND
 
     if (analysis) {
+        var view by remember { mutableStateOf(repo.prefs.analysisView.takeIf { v -> ANALYSIS_TABS.any { it.key == v } } ?: "CHARTS") }
+        val tab = ANALYSIS_TABS.first { it.key == view }
         Column(Modifier.fillMaxSize().background(C.bg)) {
-            Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(14.dp, 8.dp, 12.dp, 4.dp))
-            AnalysisScreen(repo, onOpenMarket)
+            Text("Analysis", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(14.dp, 8.dp, 10.dp, 0.dp))
+            AnalysisTabBar(view) { view = it; repo.prefs.analysisView = it }
+            // One line on what this tab is for, so nobody has to guess.
+            Text(tab.what, color = C.muted, fontSize = 12.sp, lineHeight = 16.sp, modifier = Modifier.padding(horizontal = 14.dp).padding(bottom = 4.dp))
+            when (view) {
+                "CHARTS" -> MultiChart(repo, onOpenMarket)
+                "SPECIAL" -> SpecialTrades(repo)
+                "SCAN" -> AnalysisScreen(repo, onOpenMarket, scanOnly = true)
+                else -> AnalysisScreen(repo, onOpenMarket)
+            }
         }
         return
     }
@@ -262,6 +299,20 @@ fun MarketLogo(m: Market, cls: String, size: Dp = 34.dp) {
     RoundImage(Logos.ticker(m.symbol, cls), m.symbol, size)
 }
 
+/** Ticker logo from a coin alone, for rows (positions) that have no Market at hand. */
+@Composable
+fun CoinLogo(coin: String, provider: String, size: Dp = 18.dp) {
+    val tile = Logos.tile(coin)
+    if (tile != null) {
+        Box(Modifier.size(size).clip(CircleShape).background(Color(tile.bg)), contentAlignment = Alignment.Center) {
+            Text(tile.text, color = Color(tile.fg), fontWeight = FontWeight.Bold, fontSize = (size.value * if (tile.text.length > 2) 0.3f else 0.4f).sp, maxLines = 1)
+        }
+        return
+    }
+    // Ostium lists stocks and FX; everything else here is crypto.
+    RoundImage(Logos.ticker(coin, if (provider == "ostium") "Stocks" else "Crypto"), coin, size)
+}
+
 @Composable
 private fun RoundImage(url: String?, name: String, size: Dp) {
     val fallback = @Composable {
@@ -280,3 +331,37 @@ private fun RoundImage(url: String?, name: String, size: Dp) {
 
 private val palette = listOf(0xFF3B82F6, 0xFF8B5CF6, 0xFFEC4899, 0xFF14B8A6, 0xFFF59E0B, 0xFF6366F1, 0xFF10B981, 0xFFEF4444)
 private fun letterColor(s: String) = Color(palette[(s.hashCode() and 0x7fffffff) % palette.size])
+
+private class AnalysisTab(val key: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector, val color: Color, val what: String)
+
+private val ANALYSIS_TABS = listOf(
+    AnalysisTab("CHARTS", "Charts", androidx.compose.material.icons.Icons.Filled.GridView, Color(0xFF3B82F6),
+        "Four markets side by side. Tap a name to swap it."),
+    AnalysisTab("CORR", "Correlation", androidx.compose.material.icons.Icons.Filled.Hub, Color(0xFFF59E0B),
+        "Which markets move together, how that stacks your risk, and how big to size each."),
+    AnalysisTab("SCAN", "Scanner", androidx.compose.material.icons.Icons.Filled.Radar, Color(0xFF22C55E),
+        "Coins leading BTC, coiled ones about to move, and which to avoid. Then movers and crowded funding or OI."),
+    AnalysisTab("SPECIAL", "Pairs", androidx.compose.material.icons.Icons.AutoMirrored.Filled.CompareArrows, Color(0xFFA78BFA),
+        "Pair trades: long one, short the other when their spread is stretched."),
+)
+
+/** Full-width tabs, icon over label, each in its own colour when selected. */
+@Composable
+private fun AnalysisTabBar(selected: String, onSelect: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(C.panel2).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        ANALYSIS_TABS.forEach { t ->
+            val on = t.key == selected
+            Column(
+                Modifier.weight(1f).clip(RoundedCornerShape(9.dp)).background(if (on) t.color.copy(alpha = 0.18f) else Color.Transparent)
+                    .clickable { onSelect(t.key) }.padding(vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                androidx.compose.material3.Icon(t.icon, null, tint = if (on) t.color else C.muted, modifier = Modifier.size(18.dp))
+                Text(t.label, color = if (on) t.color else C.muted, fontSize = 11.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+            }
+        }
+    }
+}

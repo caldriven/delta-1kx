@@ -105,4 +105,21 @@ object Opens {
 
     /** Today's UTC open, or the last close when today's candle hasn't printed yet. */
     fun dayOpen(days: List<Candle>): Double? = openAt(days, dayStart()) ?: days.lastOrNull()?.c
+
+    /** Classic floor pivots: P from the last full period's high, low and close, three levels each side. */
+    data class Pivots(val p: Double, val r1: Double, val r2: Double, val r3: Double, val s1: Double, val s2: Double, val s3: Double)
+
+    /** Pivots from the last completed UTC day, or the last completed week when [weekly]. Null without data. */
+    fun pivots(days: List<Candle>, weekly: Boolean): Pivots? {
+        val end = if (weekly) weekStart() else dayStart()
+        val start = if (weekly) end - 7 * 86_400_000L else end - 86_400_000L
+        // Markets shut at the boundary (weekends for stocks): fall back to the latest full period seen.
+        val bars = days.filter { it.openTime in start until end }.ifEmpty {
+            days.filter { it.openTime < end }.let { if (weekly) it.takeLast(5) else it.takeLast(1) }
+        }
+        if (bars.isEmpty()) return null
+        val h = bars.maxOf { it.h }; val l = bars.minOf { it.l }; val c = bars.last().c
+        val p = (h + l + c) / 3
+        return Pivots(p, 2 * p - l, p + (h - l), h + 2 * (p - l), 2 * p - h, p - (h - l), l - 2 * (h - p))
+    }
 }

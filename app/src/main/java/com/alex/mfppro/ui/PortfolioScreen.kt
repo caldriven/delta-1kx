@@ -63,7 +63,7 @@ fun activeAccounts(m: Map<String, AccountState>, includeComp: Boolean = false) =
 
 /** Competitions have no drawdown, daily loss or target rules. */
 fun isComp(s: AccountState): Boolean {
-    if (s.account.name.contains("competition", ignoreCase = true)) return true
+    if (com.alex.mfppro.data.isCompetition(s.account)) return true
     val req = s.account.risk?.requirements ?: return false
     return (req.dailyLossPct ?: 0.0) <= 0 && (req.maxDrawdownPct ?: 0.0) <= 0 && (req.profitTargetPct ?: 0.0) <= 0
 }
@@ -108,7 +108,7 @@ private fun ScreenHeader(repo: Repo, title: String, onSettings: (() -> Unit)? = 
 fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: () -> Unit) {
     val accounts by repo.account.accounts.collectAsStateWithLifecycle()
     val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val venue by repo.market.venueMarks.collectAsStateWithLifecycle()
+    val venue by repo.market.venueMarks.collectThrottled(500)
     val tradeAcc = rememberTradeAccount(repo)
     var dashAll by remember { mutableStateOf(repo.prefs.dashAll) }
     var closeAllFor by remember { mutableStateOf<AccountState?>(null) }
@@ -158,7 +158,8 @@ fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: 
             val positions = s.positions.values.byFocus(repo.prefs.lastMarketId, marks)
             if (dashAll) item(key = "h_" + s.account.id) {
                 AccountStrip(s, marks) {
-                    if (repo.prefs.confirmCloseAll) closeAllFor = s else scope.launch { repo.closeAll(listOf(s.account.id)) }
+                    // A small button next to the account name: always asks, unlike the hold-to-close one above.
+                    closeAllFor = s
                 }
             }
             if (positions.isEmpty()) item(key = "e_" + s.account.id) {
@@ -168,7 +169,7 @@ fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: 
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(10.dp)).background(C.panel)) {
                     val m = marks[p.feedKey]
                     val br = m?.let { mk -> riskOf(s, marks).room?.let { breachPrice(p, mk, it) } }
-                    PositionRow(p, m, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl")) { onOpenMarket(p.marketId) }
+                    PositionRow(p, m, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl"), market = repo.market(p.marketId)) { repo.setTradeAccount(p.accountId); onOpenMarket(p.marketId) }
                     PositionActions(repo, p, marks[p.feedKey])
                 }
             }
@@ -290,44 +291,86 @@ private fun Meter(label: String, value: String, frac: Double, color: Color, sub:
 
 /** [breach] = price where this position takes its account onto the nearest floor. */
 @Composable
-fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolean, breach: Double? = null, venueMark: Double? = null, tp: Double? = null, sl: Double? = null, onClick: () -> Unit) {
+fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolean, breach: Double? = null, venueMark: Double? = null, tp: Double? = null, sl: Double? = null, market: com.alex.mfppro.data.Market? = null, onClick: () -> Unit) {
     val pnl = net(mark?.let(p::pnlAt))
     val roe = pnl?.let { it / p.marginAt() * 100 }
     Column(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            VenueTag(p.provider, 16.dp)
+            // The market symbol, as the market list uses for its logos; the venue's coin id doesn't always match.
+            CoinLogo(p.symbol.uppercase().removeSuffix("USDT").removeSuffix("-PERP").ifBlank { p.coin }, p.provider, 20.dp)
             Spacer(Modifier.width(6.dp))
             Text(ticker(p.symbol, p.provider), color = C.text, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(6.dp))
             Tag("${if (p.isLong) "Long" else "Short"} ${p.leverage.toInt()}x", if (p.isLong) C.up else C.down)
+            Spacer(Modifier.width(6.dp))
+            VenueTag(p.provider, 16.dp)
             if (showAccount) { Spacer(Modifier.width(6.dp)); Text(account, color = C.muted, fontSize = 11.sp) }
             Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
+            // Press and hold the PnL for the whole-trade breakdown (fees, swap, banked PnL, breakeven).
+            var peek by remember { mutableStateOf(false) }
+            val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+            Column(
+                Modifier.pointerInput(Unit) {
+                    detectTapGestures(
+                        onPress = { tryAwaitRelease(); peek = false },
+                        onLongPress = { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); peek = true },
+                        onTap = { onClick() },
+                    )
+                },
+                horizontalAlignment = Alignment.End,
+            ) {
                 Text(fmtUsd(pnl, signed = true), style = num.copy(color = pnlColor(pnl), fontWeight = FontWeight.Medium))
                 Text(fmtPct(roe), style = num.copy(fontSize = 11.sp, color = pnlColor(pnl)))
+                if (peek && mark != null) PnlBreakdown(p, mark)
             }
         }
         Row(Modifier.padding(top = 4.dp)) {
             Cell("Value", "$" + fmtCompact(p.size * (mark ?: p.entryPrice)), Modifier.weight(1f))
-            Cell("Entry", fmtPrice(p.entryPrice), Modifier.weight(1f))
-            Cell("Last", fmtPrice(mark), Modifier.weight(1f))
+            Cell("Entry", fmtPrice(p.entryPrice, market), Modifier.weight(1f))
+            Cell("Last", fmtPrice(mark, market), Modifier.weight(1f))
             // Mark is the venue's price, so its logo sits beside it.
             Column(Modifier.weight(1f)) {
                 Text("Mark", color = C.muted, fontSize = 10.sp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(fmtPrice(venueMark), style = num.copy(fontSize = 12.sp, color = C.muted))
+                    Text(fmtPrice(venueMark, market), style = num.copy(fontSize = 12.sp, color = C.muted))
                 }
             }
         }
         // Second row lines up with the first: breach price and move (shorts +, longs -), then TP and SL.
         val away = if (breach != null && mark != null && mark > 0) (breach / mark - 1) * 100 else null
         Row(Modifier.padding(top = 6.dp)) {
-            Cell("Breach", fmtPrice(breach), Modifier.weight(1f), C.down)
+            Cell("Breach", fmtPrice(breach, market), Modifier.weight(1f), C.down)
             Cell("To breach", fmtPct(away), Modifier.weight(1f), C.down)
-            Cell("TP", fmtPrice(tp), Modifier.weight(1f), if (tp != null) C.up else C.muted)
-            Cell("SL", fmtPrice(sl), Modifier.weight(1f), if (sl != null) C.down else C.muted)
+            Cell("TP", fmtPrice(tp, market), Modifier.weight(1f), if (tp != null) C.up else C.muted)
+            Cell("SL", fmtPrice(sl, market), Modifier.weight(1f), if (sl != null) C.down else C.muted)
+        }
+    }
+}
+
+/** Whole-trade card shown while the PnL is held, like MFP's tooltip: what the trade nets after costs. */
+@Composable
+fun PnlBreakdown(p: com.alex.mfppro.data.Position, mark: Double) {
+    val total = p.netAt(mark)
+    androidx.compose.ui.window.Popup(alignment = Alignment.TopEnd, offset = androidx.compose.ui.unit.IntOffset(0, -20)) {
+        Column(
+            Modifier.width(250.dp).clip(RoundedCornerShape(10.dp)).background(C.panel2).border(1.dp, C.line, RoundedCornerShape(10.dp)).padding(12.dp),
+        ) {
+            @Composable
+            fun line(label: String, v: String, color: Color = C.text, bold: Boolean = false) = Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                Text(label, color = if (bold) C.text else C.muted, fontSize = 12.sp, fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                Text(v, style = num.copy(fontSize = 12.sp, fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium, color = color))
+            }
+            line("Total trade", fmtUsd(total, true), pnlColor(total), bold = true)
+            line("Unrealized PnL", fmtUsd(p.pnlAt(mark), true), pnlColor(p.pnlAt(mark)))
+            line("Gross realized PnL", fmtUsd(p.realizedPnl, true), pnlColor(p.realizedPnl))
+            line("Fees (paid)", fmtUsd(-p.fees, true), if (p.fees > 0) C.down else C.text)
+            line("Swap fees", fmtUsd(p.funding, true), pnlColor(p.funding))
+            line("Breakeven price", fmtPrice(p.breakeven))
+            if (Split.pct < 100) line("Your share (${Split.pct}%)", fmtUsd(net(total), true), pnlColor(total))
+            Text(if (total >= 0) "Net positive after costs." else "Net PnL turns positive once the mark passes breakeven.",
+                color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
@@ -472,7 +515,7 @@ private fun RuleLine(label: String, left: Double?, of: Double?, target: Boolean 
     Row(Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = C.muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
         Text(fmtUsd(left), style = num.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = col))
-        Text(if (floor != null) " · floor " + fmtUsd(floor).substringBefore('.') else " / " + fmtUsd(of), style = num.copy(fontSize = 13.sp, color = C.muted))
+        Text(if (floor != null) " · floor " + fmtUsdWhole(floor) else " / " + fmtUsd(of), style = num.copy(fontSize = 13.sp, color = C.muted))
     }
     Box(Modifier.padding(top = 6.dp).fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)).background(C.line)) {
         Box(Modifier.fillMaxWidth(fill.toFloat()).height(5.dp).background(col))

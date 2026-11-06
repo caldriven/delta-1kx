@@ -36,7 +36,10 @@ data class Quote(
 /** Result of a write: the order the server returned, or a readable rejection. */
 sealed class TradeResult {
     data class Ok(val order: Order?, val queued: Boolean = false) : TradeResult()
-    data class Rejected(val code: String, val message: String) : TradeResult()
+    data class Rejected(val code: String, val message: String, val rule: String? = null) : TradeResult()
+
+    /** Accepted by the API and not turned down by the engine afterwards. */
+    val accepted: Boolean get() = this is Ok && order?.status?.lowercase() !in setOf("rejected", "canceled", "cancelled", "expired")
 }
 
 /**
@@ -65,14 +68,15 @@ class TradeApi(private val http: OkHttpClient) {
         write(key, "DELETE", "/v1/orders/${enc(orderId)}", null, idempotent = false)
 
     /** Atomic TP/SL batch, guarded by the position size and exit orders we observed. */
-    suspend fun replaceExits(key: String, position: Position, current: List<Order>, ops: List<JsonObject>) =
+    /** [armPrice]: describe limit exits by their trigger instead of their limit (fallback for a stale snapshot). */
+    suspend fun replaceExits(key: String, position: Position, current: List<Order>, ops: List<JsonObject>, armPrice: Boolean = false) =
         write(key, "PUT", "/v1/positions/${enc(position.id)}/exit-orders", buildJsonObject {
             put("expected_position_size", position.size)
             put("expected_orders", buildJsonArray {
                 current.forEach { o ->
                     add(buildJsonObject {
                         put("order_id", o.id); put("execution_type", o.exitExecution)
-                        put("price", o.exitPrice ?: 0.0); put("size", o.size)
+                        put("price", (if (armPrice) o.triggerPrice ?: o.exitPrice else o.exitPrice) ?: 0.0); put("size", o.size)
                     })
                 }
             })
@@ -130,7 +134,13 @@ class TradeApi(private val http: OkHttpClient) {
         val detail = err?.arr("details")?.joinToString("; ") {
             val o = it.jsonObject; "${o.str("field")}: ${o.str("issue")}"
         }.orEmpty()
-        return TradeResult.Rejected(code, listOfNotNull(err?.str("message"), detail.ifBlank { null }).joinToString(" — ").ifBlank { code })
+        // Trading rejections name the rule (e.g. exit-allocation) and may carry details as an object.
+        val rule = err?.str("rule_id")
+        val facts = (err?.get("details") as? JsonObject)?.entries?.joinToString(", ") { (k, v) ->
+            "${k.replace('_', ' ')}: ${(v as? kotlinx.serialization.json.JsonPrimitive)?.content ?: v}"
+        }.orEmpty()
+        return TradeResult.Rejected(code, listOfNotNull(err?.str("message"), rule?.let { "rule $it" }, detail.ifBlank { null }, facts.ifBlank { null })
+            .joinToString(" — ").ifBlank { code }, rule)
     }
 
     private class Raw(val status: Int, val json: JsonElement?, val retryAfter: Long?)

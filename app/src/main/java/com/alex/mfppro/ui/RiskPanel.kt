@@ -24,6 +24,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -65,7 +69,7 @@ fun exposureLeft(policy: com.alex.mfppro.data.TradingPolicy?, s: AccountState, m
     return listOfNotNull(acct, pos).minOrNull()?.coerceAtLeast(0.0)
 }
 
-fun accountName(s: AccountState) = s.account.name.ifBlank { "#" + s.account.accountNumber }
+fun accountName(s: AccountState) = com.alex.mfppro.data.Nicknames.map[s.account.id] ?: s.account.name.ifBlank { "#" + s.account.accountNumber }
 
 /** Trading account line plus live distance to each rule: max DD, daily loss and target. */
 @Composable
@@ -74,77 +78,82 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
     val acc = rememberTradeAccount(repo) ?: return
     val r = riskOf(acc, marks)
     val start = acc.account.startingBalance
-    // One line: account and equity on the left, live distance to each rule as slim bars.
+    // One line (account, equity, room left) with a Show toggle; the rule lines fold out below it.
     var pick by androidx.compose.runtime.remember { mutableStateOf(false) }
-    // Tap anywhere on the strip to switch account.
-    Column(modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.panel).clickable { pick = true }.padding(horizontal = 8.dp, vertical = 5.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AccountSwitcher(repo, Modifier.width(118.dp))
-            AwayBar("DD", r.ddRoom, r.ddAllowance, acc.account.risk != null, Modifier.weight(1f))
-            // No daily loss rule on this account: nothing to show.
-            if (acc.account.risk == null || r.dailyFloor != null || (r.dailyAllowance ?: 0.0) > 0)
-                AwayBar("DLL", r.dailyRoom, r.dailyAllowance, acc.account.risk != null, Modifier.weight(1f))
-            val goal = r.target?.let { it - start }?.takeIf { it > 0 }
-            if (goal != null) {
-                val done = ((r.equity - start) / goal).coerceIn(0.0, 1.0)
-                Bar("TGT", r.toTarget, done, TARGET_C, Modifier.weight(1f))
+    var open by androidx.compose.runtime.remember { mutableStateOf(repo.prefs.accountOpen) }
+    // Tap anywhere on the card to switch account.
+    Column(modifier.padding(horizontal = 8.dp, vertical = 2.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.panel).clickable { pick = true }.padding(horizontal = 10.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AccountSwitcher(repo, Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text("Room left", color = C.muted, fontSize = 10.sp)
+                Text(fmtCompactUsd(r.room), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = roomColor(r.roomFraction)))
+            }
+            Spacer(Modifier.width(8.dp))
+            Row(
+                Modifier.clip(RoundedCornerShape(8.dp)).background(C.panel2).clickable { open = !open; repo.prefs.accountOpen = open }.padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(if (open) "Hide" else "Show", color = C.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(4.dp))
+                Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, null, tint = C.text, modifier = Modifier.size(18.dp))
             }
         }
-        // Margin in use against balance: a thin line under the account.
+        androidx.compose.animation.AnimatedVisibility(open, enter = androidx.compose.animation.expandVertically(), exit = androidx.compose.animation.shrinkVertically()) {
+        Column {
+        val loaded = acc.account.risk != null
+        // Room bars run light orange (all left) to red (none left).
+        run {
+            val f = r.ddAllowance?.takeIf { it > 0 }?.let { a -> r.ddRoom?.let { (it / a).coerceIn(0.0, 1.0) } }
+            RuleLine("Max DD left", r.ddRoom, f, androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat()),
+                empty = if (loaded && r.ddRoom == null && (r.ddAllowance ?: 0.0) <= 0) "off" else "—", of = r.ddAllowance?.takeIf { it > 0 })
+        }
+        // No daily loss rule on this account: nothing to show.
+        if (!loaded || r.dailyFloor != null || (r.dailyAllowance ?: 0.0) > 0) {
+            val f = r.dailyAllowance?.takeIf { it > 0 }?.let { a -> r.dailyRoom?.let { (it / a).coerceIn(0.0, 1.0) } }
+            RuleLine("Daily loss left", r.dailyRoom, f, androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat()),
+                empty = if (loaded && r.dailyRoom == null && (r.dailyAllowance ?: 0.0) <= 0) "off" else "—", of = r.dailyAllowance?.takeIf { it > 0 })
+        }
+        r.target?.let { it - start }?.takeIf { it > 0 }?.let { goal ->
+            RuleLine("To target", r.toTarget, ((r.equity - start) / goal).coerceIn(0.0, 1.0), TARGET_C, of = goal)
+        }
+        // Margin in use against balance.
         val margin = acc.positions.values.sumOf { it.marginAt() }
         val bal = acc.account.balance
         if (margin > 0 && bal > 0) {
             val used = (margin / bal).coerceIn(0.0, 1.0)
-            Row(Modifier.padding(top = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Margin", color = C.muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                androidx.compose.foundation.layout.Box(Modifier.padding(horizontal = 6.dp).weight(1f).height(2.dp).clip(RoundedCornerShape(1.dp)).background(C.line)) {
-                    androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(used.toFloat()).height(2.dp).background(if (used > 0.9) C.down else C.muted))
-                }
-                Text(fmtCompactUsd(margin) + " / " + fmtCompactUsd(bal), style = num.copy(fontSize = 10.sp, color = C.muted))
-            }
+            RuleLine("Margin used", margin, used, if (used > 0.9) C.down else C.muted, of = bal)
         }
         val policy by repo.policies.collectAsStateWithLifecycle()
         // Only in the position view: hitting the cap just makes an order fail.
         if (showExposure) policy[acc.account.id]?.maximumTotalNotionalUsd?.takeIf { it > 0 }?.let { cap ->
             val gross = acc.positions.values.sumOf { it.size * (marks[it.feedKey] ?: it.entryPrice) }
             val used = (gross / cap).coerceIn(0.0, 1.0)
-            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Exposure", color = C.muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                androidx.compose.foundation.layout.Box(Modifier.padding(horizontal = 6.dp).weight(1f).height(2.dp).clip(RoundedCornerShape(1.dp)).background(C.line)) {
-                    androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth(used.toFloat()).height(2.dp).background(if (used > 0.9) C.down else C.muted))
-                }
-                Text(fmtCompactUsd(gross) + " / " + fmtCompactUsd(cap), style = num.copy(fontSize = 10.sp, color = C.muted))
-                policy[acc.account.id]?.limits?.maxPositionValueUsd?.takeIf { it < cap }?.let {
-                    Text("  · max pos " + fmtCompactUsd(it), style = num.copy(fontSize = 10.sp, color = C.muted))
-                }
+            RuleLine("Exposure", gross, used, if (used > 0.9) C.down else C.muted, of = cap)
+            policy[acc.account.id]?.limits?.maxPositionValueUsd?.takeIf { it < cap }?.let {
+                Text("Max per position " + fmtCompactUsd(it), style = num.copy(fontSize = 10.sp, color = C.muted), modifier = Modifier.padding(top = 2.dp))
             }
         }
+        }
+        }
+        // Warnings stay visible when folded.
         RiskWarning(r)
         LockBanner(repo)
     }
     if (pick) AccountPickerSheet(repo) { pick = false }
 }
 
-/** Dollars left before a floor, with a bar of the allowance still unused. */
+/** One rule as a full-width line: label, bar of how much is left (or used), dollars and the allowance. */
 @Composable
-private fun AwayBar(label: String, room: Double?, allowance: Double?, loaded: Boolean, modifier: Modifier) {
-    val f = if (room != null && allowance != null && allowance > 0) (room / allowance).coerceIn(0.0, 1.0) else null
-    // Light orange with the full allowance left, deepening to red as it runs out.
-    val col = androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat())
-    Bar(label, room, f, col, modifier, empty = if (loaded && room == null && (allowance ?: 0.0) <= 0) "off" else "—")
-}
-
-@Composable
-private fun Bar(label: String, usd: Double?, fill: Double?, color: androidx.compose.ui.graphics.Color, modifier: Modifier, empty: String = "—") {
-    Column(modifier) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(label, color = C.muted, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(usd?.let(::fmtCompactUsd) ?: empty, style = num.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (usd == null) C.muted else color), maxLines = 1)
+private fun RuleLine(label: String, usd: Double?, fill: Double?, color: androidx.compose.ui.graphics.Color, empty: String = "—", of: Double? = null) {
+    Row(Modifier.padding(top = 5.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = C.muted, fontSize = 11.sp, modifier = Modifier.width(92.dp))
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(C.line)) {
+            androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth((fill ?: 0.0).toFloat()).height(4.dp).background(color))
         }
-        androidx.compose.foundation.layout.Box(Modifier.padding(top = 2.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(C.line)) {
-            androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth((fill ?: 0.0).toFloat()).height(3.dp).background(color))
-        }
+        Text(usd?.let(::fmtCompactUsd) ?: empty, style = num.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (usd == null) C.muted else C.text),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End, maxLines = 1, modifier = Modifier.width(72.dp))
+        Text(of?.let { " / " + fmtCompactUsd(it) } ?: "", style = num.copy(fontSize = 10.sp, color = C.muted), maxLines = 1, modifier = Modifier.width(62.dp))
     }
 }
 
@@ -182,7 +191,7 @@ private fun MiniMeter(label: String, value: Double?, full: Double?, loss: Boolea
     }
 }
 
-private fun fmtCompactUsd(v: Double?) = if (v == null) "—" else if (kotlin.math.abs(v) >= 10_000) "$" + fmtCompact(v) else fmtUsd(v).substringBefore('.')
+private fun fmtCompactUsd(v: Double?) = if (v == null) "—" else if (kotlin.math.abs(v) >= 10_000) (if (v < 0) "-$" else "$") + fmtCompact(kotlin.math.abs(v)) else fmtUsdWhole(v)
 
 /** Account pill like MFP's switcher: tap to pick from the active accounts. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)

@@ -216,7 +216,7 @@ private fun Calendar(month: YearMonth, byDay: Map<LocalDate, Double>, selected: 
     }
 }
 
-private fun fmtCompactSigned(v: Double) = (if (v < 0) "-" else "+") + "$" + fmtCompact(kotlin.math.abs(v)).removeSuffix(".00")
+private fun fmtCompactSigned(v: Double) = (if (v < 0) "-" else "+") + "$" + fmtCompact(kotlin.math.abs(v))
 
 @Composable
 private fun TradeRow(t: Closed) {

@@ -52,16 +52,19 @@ import kotlin.math.sqrt
 private val POS_C = Color(0xFFF0A030)
 private val NEG_C = Color(0xFF20D0D0)
 
-/** Lookback windows: candle interval, number of candles, candles per day. */
-private enum class Window(val label: String, val interval: String, val bars: Int, val perDay: Double) {
-    H1("1h · 7d", "1h", 168, 24.0), H4("4h · 30d", "4h", 180, 6.0), D1("1d · 90d", "1d", 90, 1.0)
+/** Lookback windows: how far back, measured on which candles (number of candles, candles per day). */
+internal enum class Window(val label: String, val desc: String, val interval: String, val bars: Int, val perDay: Double) {
+    H1("7D", "last 7 days · 1h candles", "1h", 168, 24.0),
+    H4("30D", "last 30 days · 4h candles", "4h", 180, 6.0),
+    D1("90D", "last 90 days · daily candles", "1d", 90, 1.0),
 }
 
 /** Correlation presets: your book, the big coins, top alts, or crypto against macro. */
-private enum class Universe(val label: String) { POS("Positions"), MAJORS("Majors"), ALTS("Top alts"), MACRO("Macro"), TOP20("Top 20") }
+private enum class Universe(val label: String) { POS("Positions"), MACRO("Cross-asset"), MAJORS("Crypto majors"), ALTS("Top alts"), TOP20("Top 20") }
 
 private val MAJORS = listOf("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "HYPE")
-private val MACRO = listOf("BTC", "ETH", "XAU", "XAG", "CL", "XYZ100", "NAS100", "SP500", "EUR")
+/** Crypto against stocks, metals, oil, FX; the macro factors (VIX, 10Y, DXY) are added on top. */
+private val MACRO = listOf("BTC", "ETH", "SOL", "SP500", "XYZ100", "NAS100", "XAU", "XAG", "COPPER", "CL", "EUR", "JPY")
 
 /** Log returns keyed by candle open time. */
 private fun returns(c: List<Candle>): Map<Long, Double> {
@@ -94,7 +97,7 @@ private class Matrix(val markets: List<Market>, val ret: List<Map<Long, Double>>
  * Everything is computed on the phone from MFP candles and stats.
  */
 @Composable
-fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
+fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit, scanOnly: Boolean = false) {
     val markets by repo.markets.collectAsStateWithLifecycle()
     val venues by repo.venues.collectAsStateWithLifecycle()
     val stats by repo.market.stats.collectThrottled(1000)
@@ -118,7 +121,7 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         Universe.POS -> (held + bySymbols(listOf("BTC", "ETH"))).distinctBy { it.marketId }
         Universe.MAJORS -> bySymbols(MAJORS)
         Universe.ALTS -> listOfNotNull(btc) + crypto.filter { it.symbol !in MAJORS }.take(9)
-        Universe.MACRO -> bySymbols(MACRO).distinctBy { it.symbol.replace("NAS100", "XYZ100") }
+        Universe.MACRO -> bySymbols(MACRO).distinctBy { it.symbol.replace("NAS100", "XYZ100") } + com.alex.mfppro.data.FactorFeed.ALL
         Universe.TOP20 -> (listOfNotNull(btc) + byVol).distinctBy { it.marketId }.take(20)
     }
     val set = (base + added).distinctBy { it.marketId }
@@ -138,10 +141,10 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
     var picked by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     LaunchedEffect(setKey, window) {
         val set = frozen.orEmpty()
-        if (set.size < 2) return@LaunchedEffect
+        if (scanOnly || set.size < 2) return@LaunchedEffect
         loading = true; picked = null
         val rets = coroutineScope {
-            set.map { m -> async { returns(runCatching { repo.market.candleHistory(m.provider, m.coin, window.interval, window.bars) }.getOrDefault(emptyList())) } }.awaitAll()
+            set.map { m -> async { returns(runCatching { repo.history(m, window.interval, window.bars) }.getOrDefault(emptyList())) } }.awaitAll()
         }
         val raw = Array(set.size) { i -> Array(set.size) { j -> if (i <= j) pair(rets[i], rets[j]) else null } }
         for (i in set.indices) for (j in 0 until i) raw[i][j] = raw[j][i]
@@ -163,6 +166,16 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
         if (m.marketId !in extraIds) { extraIds = extraIds + m.marketId; repo.prefs.corrExtra = extraIds }
     }
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
+        // Scanner tab: just what is moving and where positioning is crowded.
+        if (scanOnly) {
+            item { Title("Setups", "crypto · 1h candles · 7d") }
+            item { SetupScanner(repo, markets, stats, extras, classes, onOpenMarket) }
+            item { Title("Movers", "1h · 4h · 24h · 7d") }
+            item { Movers(repo, markets, stats, extras, classes, onOpenMarket) }
+            item { Title("Funding & OI", "extremes now") }
+            item { FundingOi(markets, stats, extras, onOpenMarket) }
+            return@LazyColumn
+        }
         item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -181,30 +194,35 @@ fun AnalysisScreen(repo: Repo, onOpenMarket: (String) -> Unit) {
                             .clickable { extraIds = extraIds - m.marketId; repo.prefs.corrExtra = extraIds }.padding(horizontal = 10.dp, vertical = 5.dp))
                 }
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Window.entries.forEach { w -> Seg(w.label, window == w, C.accent) { window = w; repo.prefs.corrWindow = w.name } }
-            }
+            LookbackRow(window) { w -> window = w; repo.prefs.corrWindow = w.name }
         }
         val mx = matrix
-        item { Title("Correlation", if (loading) "loading…" else window.label) }
+        item { Title("Correlation", if (loading) "loading…" else "do they move together?") }
         if (mx == null) item { Text(if (loading) "Loading candles…" else "Not enough markets", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp)) }
         else {
             item { Heatmap(mx, picked) { picked = it } }
             picked?.let { (i, j) -> item { PairDetail(mx, i, j, window) } }
             item { PairLists(mx) { picked = it } }
             item { PositionRisk(repo, mx, window) }
-            item { Title("Volatility & beta", "annualised, vs BTC") }
+            item { Title("Volatility & sizing", "vs BTC") }
             item { VolBeta(mx, window, onOpenMarket) }
         }
-        item { Title("Movers", "4h · 24h · 7d") }
-        item { Movers(repo, markets, stats, extras, classes, onOpenMarket) }
-        item { Title("Funding & OI", "extremes now") }
-        item { FundingOi(markets, stats, extras, onOpenMarket) }
+    }
+}
+
+/** Lookback chips (how much history) with the candle size they're measured on. */
+@Composable
+internal fun LookbackRow(window: Window, onPick: (Window) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Lookback", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(end = 2.dp))
+        Window.entries.forEach { w -> Seg(w.label, window == w, C.accent) { onPick(w) } }
+        Spacer(Modifier.weight(1f))
+        Text(window.desc.substringAfter("· "), color = C.muted, fontSize = 11.sp)
     }
 }
 
 @Composable
-private fun Title(text: String, sub: String) {
+internal fun Title(text: String, sub: String) {
     Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Text(text, color = C.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.weight(1f))
@@ -213,7 +231,7 @@ private fun Title(text: String, sub: String) {
 }
 
 @Composable
-private fun Card(content: @Composable () -> Unit) {
+internal fun Card(content: @Composable () -> Unit) {
     Column(Modifier.padding(horizontal = 10.dp, vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(C.panel).padding(12.dp)) { content() }
 }
 
@@ -240,7 +258,8 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val label = 46.dp
             val cell = (maxWidth - label) / n
-            val showNum = cell >= 24.dp
+            // The number always sits in its square, sized to fit (".85" / "-.42" is four characters).
+            val numSize = (cell.value * 0.3f).coerceIn(6f, 11f).sp
             // Lower triangle only: each pair once, with the symbol on the diagonal.
             Column {
                 for (i in 0 until n) Row(verticalAlignment = Alignment.CenterVertically) {
@@ -257,8 +276,8 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
                             contentAlignment = Alignment.Center,
                         ) {
                             if (i == j) Text(mx.markets[i].symbol.take(4), color = C.muted, fontSize = 8.sp, maxLines = 1)
-                            else if (showNum && c != null) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
-                                style = num.copy(fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = onColor(bg)))
+                            else if (c != null) Text(String.format(Locale.US, "%.2f", c).replace("0.", "."),
+                                style = num.copy(fontSize = numSize, fontWeight = FontWeight.SemiBold, color = onColor(bg)), maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -270,7 +289,7 @@ private fun Heatmap(mx: Matrix, picked: Pair<Int, Int>?, onPick: (Pair<Int, Int>
                 .background(androidx.compose.ui.graphics.Brush.horizontalGradient(if (lo >= 0) listOf(lerp(C.panel2, POS_C, 0.25f), POS_C) else if (hi <= 0) listOf(NEG_C, lerp(C.panel2, NEG_C, 0.25f)) else listOf(NEG_C, C.panel2, POS_C))))
             Text(String.format(Locale.US, "%.2f", hi), style = num.copy(fontSize = 9.sp, color = C.muted))
         }
-        Text("Amber = move together, cyan = opposite · shade spans this set's range · tap a cell", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
+        Text("Amber = same bet · cyan = natural hedge · tap a pair", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -283,12 +302,12 @@ private fun PairLists(mx: Matrix, onPick: (Pair<Int, Int>) -> Unit) {
     Card {
         Row {
             Column(Modifier.weight(1f)) {
-                Text("Move together", color = C.muted, fontSize = 11.sp)
+                Text("Same bet · don't stack", color = C.muted, fontSize = 11.sp)
                 pairs.sortedByDescending { it.third }.take(4).forEach { (i, j, c) -> PairLine(mx, i, j, c) { onPick(i to j) } }
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Diversify", color = C.muted, fontSize = 11.sp)
+                Text("Spread risk", color = C.muted, fontSize = 11.sp)
                 pairs.sortedBy { it.third }.take(4).forEach { (i, j, c) -> PairLine(mx, i, j, c) { onPick(i to j) } }
             }
         }
@@ -374,6 +393,34 @@ private fun PairDetail(mx: Matrix, i: Int, j: Int, window: Window) {
                 }
                 Text(String.format(Locale.US, "now %.2f · min %.2f · max %.2f", roll.last(), roll.min(), roll.max()), style = num.copy(fontSize = 10.sp, color = C.muted))
             }
+            // What the pair means for a trade.
+            c?.let { cc ->
+                val (tag, col, line) = when {
+                    cc.corr >= 0.7 -> Triple("Same bet", C.down, "Long both = double risk · long one, short the other = hedged pair")
+                    cc.corr >= 0.4 -> Triple("Linked", C.accent, "Partly the same bet: size them as one")
+                    cc.corr > -0.4 -> Triple("Independent", C.up, "Holding both spreads risk")
+                    else -> Triple("Opposite", POS_C, "Same-side positions offset each other")
+                }
+                Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.bg).padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Tag(tag, col)
+                        Spacer(Modifier.width(8.dp))
+                        Text(line, color = C.text, fontSize = 12.sp)
+                    }
+                    beta?.takeIf { cc.corr >= 0.4 }?.let { b ->
+                        Info("Hedge \$1,000 ${ca.symbol} with", "${fmtUsd(1000 * b)} ${cb.symbol}")
+                    }
+                    // Short rolling windows swing a lot; what matters is whether the recent link is weaker than the whole window's.
+                    if (roll.size >= 8) {
+                        val recent = roll.takeLast(roll.size / 4).average()
+                        val weak = recent < cc.corr - 0.25
+                        Info("Lately", if (weak) String.format(Locale.US, "Weakening (ρ %.2f) · hedge less reliable", recent) else String.format(Locale.US, "Holding (ρ %.2f)", recent), if (weak) C.down else C.up)
+                    }
+                }
+                if (cc.corr >= 0.4 && ca.tradingEnabled && cb.tradingEnabled) SplitPairButton(ca, cb, Modifier.padding(top = 8.dp).fillMaxWidth()) {
+                    PairPanel.open = PairRequest(ca.marketId, cb.marketId, true, window.name)
+                }
+            }
         }
     }
 }
@@ -408,7 +455,7 @@ private fun PositionRisk(repo: Repo, mx: Matrix, window: Window) {
     Card {
         Row {
             Column(Modifier.weight(1f)) {
-                Text("1-day VaR 95%", color = C.muted, fontSize = 11.sp)
+                Text("Bad-day loss (1 in 20)", color = C.muted, fontSize = 11.sp)
                 Text(fmtUsd(varDay), style = num.copy(fontSize = 20.sp, fontWeight = FontWeight.Bold, color = C.text))
             }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
@@ -420,6 +467,15 @@ private fun PositionRisk(repo: Repo, mx: Matrix, window: Window) {
         }
         Text("Gross ${fmtUsd(gross)} · net ${fmtUsd(w.sum(), true)}" + if (!known) " · some markets missing" else "",
             style = num.copy(fontSize = 11.sp, color = C.muted), modifier = Modifier.padding(top = 4.dp))
+        val share = room?.takeIf { it > 0 }?.let { varDay / it * 100 }
+        if (share != null) Text(
+            when {
+                share > 60 -> "Too big for your room: cut size or hedge"
+                share > 30 -> "Elevated: don't add correlated risk"
+                else -> "Room to add"
+            },
+            color = when { share > 60 -> C.down; share > 30 -> C.accent; else -> C.up }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp),
+        )
         // Pairs: same direction + correlated = stacked; opposite + correlated = hedged.
         val pairs = buildList {
             for (a in pos.indices) for (b in a + 1 until pos.size) {
@@ -436,7 +492,7 @@ private fun PositionRisk(repo: Repo, mx: Matrix, window: Window) {
                 Text(name, color = C.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
                 Text(String.format(Locale.US, "%.2f", c), style = num.copy(fontSize = 12.sp, color = C.muted))
                 Spacer(Modifier.width(8.dp))
-                Tag(if (eff > 0) "Stacked" else "Hedged", if (eff > 0) C.down else C.up)
+                Tag(if (eff > 0) "Stacked · one bigger bet" else "Hedged · offset", if (eff > 0) C.down else C.up)
             }
         }
     }
@@ -446,26 +502,30 @@ private fun PositionRisk(repo: Repo, mx: Matrix, window: Window) {
 private fun VolBeta(mx: Matrix, window: Window, onOpenMarket: (String) -> Unit) {
     val bi = mx.markets.indexOfFirst { it.symbol == "BTC" }
     val bVar = if (bi >= 0) mx.cells[bi][bi]?.cov else null
-    val perYear = window.perDay * 365
+    // Typical one-day move (1σ) in %, and the size that carries the same risk as $1,000 of BTC.
+    fun dayMove(i: Int) = mx.cells[i][i]?.cov?.let { sqrt(it * window.perDay) * 100 }
+    val btcDay = if (bi >= 0) dayMove(bi) else null
     Card {
         Row(Modifier.padding(bottom = 4.dp)) {
             Text("Market", color = C.muted, fontSize = 10.sp, modifier = Modifier.weight(1f))
-            Text("Vol", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(60.dp))
-            Text("β BTC", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
-            Text("ρ BTC", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
+            Text("Normal day", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(68.dp))
+            Text("β BTC", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(48.dp))
+            Text("= \$1k BTC", color = C.muted, fontSize = 10.sp, textAlign = TextAlign.End, modifier = Modifier.width(72.dp))
         }
         mx.markets.indices.sortedByDescending { mx.cells[it][it]?.cov ?: 0.0 }.forEach { i ->
             val m = mx.markets[i]
-            val vol = mx.cells[i][i]?.cov?.let { sqrt(it * perYear) * 100 }
+            val day = dayMove(i)
             val c = if (bi >= 0) mx.cells[i][bi] else null
             val beta = if (c != null && bVar != null && bVar > 0) c.cov / bVar else null
-            Row(Modifier.fillMaxWidth().clickable { onOpenMarket(m.marketId) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            val same = if (day != null && day > 0 && btcDay != null) 1000 * btcDay / day else null
+            Row(Modifier.fillMaxWidth().clickable(enabled = m.tradingEnabled) { onOpenMarket(m.marketId) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(m.symbol, color = C.text, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Text(vol?.let { String.format(Locale.US, "%.0f%%", it) } ?: "—", style = num.copy(fontSize = 12.sp), textAlign = TextAlign.End, modifier = Modifier.width(60.dp))
-                Text(beta?.let { String.format(Locale.US, "%.2f", it) } ?: "—", style = num.copy(fontSize = 12.sp), textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
-                Text(c?.corr?.let { String.format(Locale.US, "%.2f", it) } ?: "—", style = num.copy(fontSize = 12.sp, color = C.muted), textAlign = TextAlign.End, modifier = Modifier.width(56.dp))
+                Text(day?.let { String.format(Locale.US, "±%.2f%%", it) } ?: "—", style = num.copy(fontSize = 12.sp), textAlign = TextAlign.End, modifier = Modifier.width(68.dp))
+                Text(beta?.let { String.format(Locale.US, "%.2f", it) } ?: "—", style = num.copy(fontSize = 12.sp, color = C.muted), textAlign = TextAlign.End, modifier = Modifier.width(48.dp))
+                Text(same?.let { "$" + String.format(Locale.US, "%,.0f", it) } ?: "—", style = num.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold), textAlign = TextAlign.End, modifier = Modifier.width(72.dp))
             }
         }
+        Text("Last column: size with the same risk as \$1,000 BTC · β 1.5 = moves 1.5% per 1% BTC", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
     }
 }
 
@@ -477,8 +537,11 @@ private fun Movers(
 ) {
     var period by remember { mutableStateOf("24h") }
     val chg4h by repo.chg4h.collectAsStateWithLifecycle()
-    LaunchedEffect(period) { if (period == "4h") repo.load4h() }
+    val chg1h by repo.chg1h.collectAsStateWithLifecycle()
+    val busiest = markets.sortedByDescending { stats[it.feedKey]?.dayNtlVlm ?: 0.0 }.take(30)
+    LaunchedEffect(period) { if (period == "4h") repo.load4h(); if (period == "1h") repo.load1h(busiest) }
     fun chg(m: Market): Double? = when (period) {
+        "1h" -> chg1h[m.marketId]
         "4h" -> chg4h[m.marketId]
         "7d" -> extras[m.marketId]?.week
         else -> {
@@ -486,11 +549,11 @@ private fun Movers(
             if (px != null && open != null && open > 0) (px / open - 1) * 100 else stats[m.feedKey]?.change24hPct
         }
     }
-    val top = markets.sortedByDescending { stats[it.feedKey]?.dayNtlVlm ?: 0.0 }.take(30).sortedByDescending { chg(it) ?: -999.0 }
+    val top = busiest.sortedByDescending { chg(it) ?: -999.0 }
     val maxAbs = top.mapNotNull { chg(it) }.maxOfOrNull { abs(it) }?.takeIf { it > 0 } ?: 1.0
     Card {
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-            for (p in listOf("4h", "24h", "7d")) Seg(p, period == p, C.accent) { period = p }
+            for (p in listOf("1h", "4h", "24h", "7d")) Seg(p, period == p, C.accent) { period = p }
         }
         top.chunked(5).forEach { row ->
             Row(Modifier.padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -525,19 +588,30 @@ private fun FundingOi(markets: List<Market>, stats: Map<String, com.alex.mfppro.
         Text("Funding APR", color = C.muted, fontSize = 11.sp)
         (hot + cold).distinctBy { it.marketId }.forEach { m ->
             val a = apr(m)
-            Row(Modifier.fillMaxWidth().clickable { onOpenMarket(m.marketId) }.padding(vertical = 3.dp)) {
+            // Positive funding: longs pay shorts, so the long side is crowded (and vice versa).
+            Row(Modifier.fillMaxWidth().clickable { onOpenMarket(m.marketId) }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(m.symbol, color = C.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text(a?.let { String.format(Locale.US, "%+.1f%%", it) } ?: "—", style = num.copy(fontSize = 12.sp, color = pnlColor(a)))
+                if (a != null && abs(a) >= 20) { Tag(if (a > 0) "Longs crowded · shorts paid" else "Shorts crowded · longs paid", if (a > 0) C.down else C.up); Spacer(Modifier.width(8.dp)) }
+                Text(a?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—", style = num.copy(fontSize = 12.sp, color = pnlColor(a)))
             }
         }
         Text("OI change 24h", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
         oiUp.forEach { m ->
             val o = extras[m.marketId]?.oi24h
-            Row(Modifier.fillMaxWidth().clickable { onOpenMarket(m.marketId) }.padding(vertical = 3.dp)) {
+            val px = stats[m.feedKey]?.change24hPct
+            // OI and price together say who is entering or leaving.
+            val flow = if (o == null || px == null) null else when {
+                o > 0 && px >= 0 -> "New longs" to C.up
+                o > 0 -> "New shorts" to C.down
+                px >= 0 -> "Shorts covering" to C.accent
+                else -> "Longs exiting" to C.accent
+            }
+            Row(Modifier.fillMaxWidth().clickable { onOpenMarket(m.marketId) }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(m.symbol, color = C.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text("OI $" + fmtCompact(stats[m.feedKey]?.openInterestUsd), style = num.copy(fontSize = 11.sp, color = C.muted))
-                Spacer(Modifier.width(10.dp))
-                Text(fmtPct(o), style = num.copy(fontSize = 12.sp, color = pnlColor(o)))
+                flow?.let { (t, c) -> Tag(t, c); Spacer(Modifier.width(8.dp)) }
+                Text("px " + fmtPct(px), style = num.copy(fontSize = 11.sp, color = C.muted))
+                Spacer(Modifier.width(8.dp))
+                Text("OI " + fmtPct(o), style = num.copy(fontSize = 12.sp, color = pnlColor(o)))
             }
         }
     }
