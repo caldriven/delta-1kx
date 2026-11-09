@@ -258,6 +258,7 @@ fun ConfirmDialog(
     extra: (@Composable () -> Unit)? = null,
     onConfirm: () -> Unit,
 ) {
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     androidx.compose.ui.window.Dialog(onDismiss) {
         val shape = RoundedCornerShape(16.dp)
         Column(Modifier.fillMaxWidth().clip(shape).background(C.panel).border(1.dp, color.copy(alpha = 0.55f), shape).padding(18.dp)) {
@@ -279,7 +280,7 @@ fun ConfirmDialog(
                     contentAlignment = Alignment.Center,
                 ) { Text("Cancel", color = C.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
                 Box(
-                    Modifier.weight(1.4f).height(48.dp).clip(RoundedCornerShape(10.dp)).background(color).clickable(onClick = onConfirm),
+                    Modifier.weight(1.4f).height(48.dp).clip(RoundedCornerShape(10.dp)).background(color).clickable { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); onConfirm() },
                     contentAlignment = Alignment.Center,
                 ) { Text(confirm, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
             }

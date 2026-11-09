@@ -319,13 +319,13 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     tp = LineDrag({ exitPreview(p, it, "TP") }) { px -> askExit(p, true, px, tp, sl) },
                     sl = LineDrag({ exitPreview(p, it, "SL") }) { px -> askExit(p, false, px, tp, sl) },
                     onReverse = {
-                        if (repo.prefs.locked()) repo.postMessage("Night lock: no reversing until ${repo.prefs.lockEnd}:00")
+                        if (repo.prefs.locked()) repo.postMessage(repo.prefs.lockMessage())
                         else chartAct(ChartAsk("Reverse", "Flip to ${if (p.isLong) "short" else "long"}", C.accent,
                             listOf(ConfirmRow("Market", ticker(p.symbol, p.provider)), ConfirmRow("Order value", fmtUsd(p.size * 2 * (mark ?: p.entryPrice)))), "Reverse") { repo.reverse(p) })
                     },
                     onClose = {
                         chartAct(ChartAsk("Market close", "Close " + ticker(p.symbol, p.provider), C.down,
-                            listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(mark?.let(p::pnlAt), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
+                            listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(net(mark?.let(p::pnlAt)), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
                     },
                 )),
             tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
@@ -396,7 +396,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         ) {
             HeadStat("OI", "$" + fmtCompact(s?.openInterestUsd))
             HeadStat("OI 24h", fmtPct(oiChg), pnlColor(oiChg))
-            HeadStat("Funding", (s?.fundingRate?.let { String.format(Locale.US, "%+.4f%%", it * 100) } ?: "—") +
+            HeadStat("Funding", fmtFunding(s?.fundingRate) +
                 (s?.nextFundingTime?.let { " · " + fmtCountdown(it - now) } ?: ""), pnlColor(s?.fundingRate))
             HeadStat("Vol 24h", "$" + fmtCompact(s?.dayNtlVlm))
             HeadStat("D open", fmtPrice(dOpen))
@@ -446,7 +446,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { layersOpen = true }.padding(3.dp).size(20.dp))
                 androidx.compose.material3.DropdownMenu(layersOpen, onDismissRequest = { layersOpen = false }, containerColor = C.panel) {
                     Text("On the chart", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
-                    for ((key, label) in listOf("pnl" to "Net PnL box", "exits" to "TP / SL lines", "floors" to "DLL / Max DD floors",
+                    for ((key, label) in listOf("pnl" to "PnL box", "exits" to "TP / SL lines", "floors" to "DLL / Max DD floors",
                         "target" to "Pass target", "orders" to "Open orders", "fills" to "Fill markers ▲▼")) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { AppCheck(label, key !in hidden) { on -> hidden = if (on) hidden - key else hidden + key; repo.prefs.chartHidden = hidden } },
@@ -489,7 +489,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             QuickTrade(repo, market, draft)
             val open = tradeAcc?.positions?.values?.byFocus(market.marketId, marks).orEmpty()
             Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-                if (open.isEmpty()) Text("Flat", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
+                if (open.isEmpty()) Text("No open positions", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
                 for (p in open) androidx.compose.runtime.key(p.id) {
                     val pm = marks[p.feedKey]
                     val br = pm?.let { mk -> tradeAcc?.let { riskOf(it, marks).room }?.let { breachPrice(p, mk, it) } }
@@ -517,7 +517,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     Spacer(Modifier.width(8.dp))
                     AppSwitch(showAll, { showAll = it; repo.prefs.tradeShowAll = it })
                 }
-                if (allPositions.isEmpty()) Text("Flat", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
+                if (allPositions.isEmpty()) Text("No open positions", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
                 allPositions.forEach { p -> androidx.compose.runtime.key(p.id) {
                     val pm = marks[p.feedKey]
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {

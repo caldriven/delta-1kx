@@ -284,7 +284,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
               }
             }
         }
-        if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp)
+        if (locked) Text(repo.prefs.lockMessage(), color = C.down, fontSize = 11.sp)
     }
 
     ask?.let { (headline, detail, run) ->

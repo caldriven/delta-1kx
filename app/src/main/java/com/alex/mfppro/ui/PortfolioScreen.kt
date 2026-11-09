@@ -217,7 +217,7 @@ private fun AccountStrip(s: AccountState, marks: Map<String, Double>, onCloseAll
             Cell("Equity", fmtUsd(r.equity), Modifier.weight(1.2f))
             Cell("Open PnL" + splitTag(), fmtUsd(net(r.upnl), true), Modifier.weight(1f), pnlColor(r.upnl))
             if (r.todayPnl != null) Cell("Today", fmtUsd(net(r.todayPnl), true), Modifier.weight(1f), pnlColor(r.todayPnl))
-            Cell("Room", fmtUsd(r.room), Modifier.weight(1f), roomCol)
+            Cell("Room left", fmtUsd(r.room), Modifier.weight(1f), roomCol)
         }
     }
 }
@@ -428,10 +428,10 @@ private fun AccountHero(repo: Repo, acc: AccountState, marks: Map<String, Double
             Text("Equity", color = C.muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text(fmtUsd(r.equity), style = num.copy(fontSize = 19.sp, fontWeight = FontWeight.Bold, color = C.text))
         }
-        if ((r.ddAllowance ?: 0.0) > 0) RuleLine("Max Drawdown Remaining", r.ddRoom, r.ddAllowance, floor = r.ddFloor)
-        if ((r.dailyAllowance ?: 0.0) > 0) RuleLine("Daily Loss Remaining", r.dailyRoom, r.dailyAllowance, floor = r.dailyFloor)
+        if ((r.ddAllowance ?: 0.0) > 0) RuleLine("Max DD left", r.ddRoom, r.ddAllowance, floor = r.ddFloor)
+        if ((r.dailyAllowance ?: 0.0) > 0) RuleLine("Daily loss left", r.dailyRoom, r.dailyAllowance, floor = r.dailyFloor)
         val goal = r.target?.let { it - start }?.takeIf { it > 0 }
-        if (goal != null) RuleLine("Profit Target Remaining", r.toTarget, goal, target = true)
+        if (goal != null) RuleLine("To target", r.toTarget, goal, target = true)
     }
     if (open) AccountPickerSheet(repo) { open = false }
 }

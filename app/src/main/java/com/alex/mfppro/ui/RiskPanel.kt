@@ -254,7 +254,7 @@ fun LockBanner(repo: Repo) {
     LaunchedEffect(Unit) { while (true) { delay(20_000); locked = repo.prefs.locked() } }
     if (!locked) return
     Text(
-        String.format(Locale.US, "No new trades before %02d:00 Oslo. Closing is allowed.", repo.prefs.lockEnd),
+        repo.prefs.lockMessage(),
         color = C.down, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 6.dp),
     )
 }

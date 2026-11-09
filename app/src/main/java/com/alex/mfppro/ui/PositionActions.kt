@@ -104,7 +104,8 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                 }
             }
             // Reversing opens a new position, so the night rule blocks it.
-            PillBtn("⇅ Reverse", w, enabled = !busy && !repo.prefs.locked()) {
+            PillBtn("⇅ Reverse", w, enabled = !busy) {
+                if (repo.prefs.locked()) { repo.postMessage(repo.prefs.lockMessage()); return@PillBtn }
                 act("Reverse ${ticker(p.symbol, p.provider)}", "Market ${if (p.isLong) "sell" else "buy"} ${usd(p.size * 2)} to flip to ${if (p.isLong) "short" else "long"}", true) { repo.reverse(p) }
             }
         }
@@ -118,7 +119,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
             }
             PillBtn("Limit close", w, enabled = !busy) { limitOpen = true }
             PillBtn("Close all", w, color = Color.White, fill = C.down, enabled = !busy) {
-                act("Close ${p.symbol}", "Market close all ${usd(p.size)} of ${p.symbol}" + (mark?.let { " · PnL ${fmtUsd(p.pnlAt(it), true)}" } ?: ""), true, kind = com.alex.mfppro.data.Confirm.Full) { repo.closePosition(p) }
+                act("Close ${ticker(p.symbol, p.provider)}", "Market close all ${usd(p.size)} of ${ticker(p.symbol, p.provider)}" + (mark?.let { " · PnL ${fmtUsd(net(p.pnlAt(it)), true)}" } ?: ""), true, kind = com.alex.mfppro.data.Confirm.Full) { repo.closePosition(p) }
             }
         }
     }
@@ -161,7 +162,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                         Spacer(Modifier.width(6.dp))
                         Tag("${if (p.isLong) "Long" else "Short"} ${p.leverage.toInt()}x", if (p.isLong) C.up else C.down)
                         Spacer(Modifier.weight(1f))
-                        val pnl = mark?.let(p::pnlAt)
+                        val pnl = net(mark?.let(p::pnlAt))
                         Text(fmtUsd(pnl, true), style = num.copy(fontSize = 15.sp, color = pnlColor(pnl), fontWeight = FontWeight.SemiBold))
                     }
                     Row(Modifier.padding(top = 8.dp)) {

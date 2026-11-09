@@ -88,6 +88,10 @@ class Prefs(ctx: Context) {
         set(v) = plain.edit().putInt("lock_end", v).apply()
 
     fun locked() = tradeLocked(lockEnabled, lockStart, lockEnd)
+    /** "06:00": when the night lock ends. */
+    fun lockUntil() = String.format(java.util.Locale.US, "%02d:00", lockEnd)
+    /** The one night-lock message, everywhere it blocks something. */
+    fun lockMessage() = "Night lock: no new trades until ${lockUntil()} Oslo. Closing still works."
 
     var assetClasses: String
         get() = plain.getString("asset_classes", "")!!

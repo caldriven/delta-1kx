@@ -670,7 +670,7 @@ private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, chartW: Fl
     val top = yy - h / 2
     val bold = style.copy(fontWeight = FontWeight.Bold)
     val segs = listOf(
-        Triple("Net PnL", bold.copy(color = Color.White), 0),
+        Triple("PnL", bold.copy(color = Color.White), 0),
         Triple(b.pnl, bold.copy(color = col), 1),
         Triple("TP", bold.copy(color = C.up), 2),
         Triple("SL", bold.copy(color = C.down), 3),

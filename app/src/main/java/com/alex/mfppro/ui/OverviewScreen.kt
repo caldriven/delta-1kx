@@ -278,7 +278,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
                     Text(fmtPct(h1), style = num.copy(fontSize = 11.sp, color = pnlColor(h1)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(46.dp))
                     Text(fmtPct(x?.week), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.week)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(48.dp))
                     if (fundingCol) Text(
-                        s?.fundingRate?.let { String.format(java.util.Locale.US, "%+.4f%%", it * 100) } ?: "—",
+                        fmtFunding(s?.fundingRate),
                         style = num.copy(fontSize = 10.sp, color = pnlColor(s?.fundingRate)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(54.dp),
                     ) else Text(fmtPct(x?.oi24h), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.oi24h)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(54.dp))
                 }
