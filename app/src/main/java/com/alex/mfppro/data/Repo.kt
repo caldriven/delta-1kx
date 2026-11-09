@@ -369,7 +369,13 @@ class Repo(ctx: Context) {
     private fun refreshRiskSoon() = scope.launch {
         delay(1_500)
         val key = _apiKey.value ?: return@launch
-        for (id in account.accounts.value.keys) refreshAccount(key, id, crossCheck = true)
+        // Only accounts in play (holding something, or the one being traded): with dozens of accounts a
+        // refresh of every one after each order would be a burst of 100+ requests.
+        for (st in account.accounts.value.values) {
+            val busy = st.positions.isNotEmpty() || st.orders.isNotEmpty()
+            if (st.account.status == "active" && (busy || st.account.id == _tradeAccount.value))
+                refreshAccount(key, st.account.id, crossCheck = true)
+        }
     }
 
     fun setApiKey(key: String?) {
@@ -504,6 +510,9 @@ class Repo(ctx: Context) {
         }
     }
 
+    /** Closed accounts already asked once for their risk block (REST may never send one). */
+    private val triedOnce = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
     /** The stream carries realized balance only; floors and rule room come from REST. */
     private fun startRiskRefresh() {
         riskJob?.cancel()
@@ -512,19 +521,29 @@ class Repo(ctx: Context) {
             var tries = 0
             var pass = 0
             while (isActive) {
-                // Active accounts carry live rules; failed/passed ones never change, so skip them.
+                // With many accounts (one key can reach dozens), only the ones that can move right now are polled
+                // fast: those holding positions or orders, and the account being traded. Their drawdown floor can
+                // trail equity. Other active accounts only change through fills, which the stream reports and
+                // which trigger a refresh anyway, so every 2 min is enough. Failed/passed accounts: once.
                 val known = account.accounts.value.values
-                // Give the stream a moment to list the accounts so the active ones go first.
+                // Give the stream a moment to list the accounts.
                 if (known.isEmpty() && tries++ < 10) { delay(1_000); continue }
-                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).map { it.id } }.getOrDefault(emptyList())
-                    else known.filter { it.account.status == "active" || it.account.risk == null }
-                        .sortedBy { if (it.account.status == "active") 0 else 1 }.map { it.account.id }
-                // Floors (drawdown, daily loss) every pass: a trailing floor moves with equity. The position
-                // and order cross-check is a safety net for missed stream events, so once a minute is plenty,
-                // and never in the background, where only the monitor's alerts are running.
                 val vis = _visible.value
-                val check = vis && pass % 4 == 0
-                for (id in ids) refreshAccount(key, id, crossCheck = check)
+                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).map { it.id } }.getOrDefault(emptyList())
+                    else known.filter { s ->
+                        val id = s.account.id
+                        when {
+                            s.account.status != "active" -> s.account.risk == null && triedOnce.add(id)
+                            s.positions.isNotEmpty() || s.orders.isNotEmpty() || id == _tradeAccount.value -> true
+                            else -> pass % 8 == 0
+                        }
+                    }.map { it.account.id }
+                // Position/order cross-check: once a minute, only where there is something to check, never in the background.
+                for (id in ids) {
+                    val st = account.accounts.value[id]
+                    val busy = st == null || st.positions.isNotEmpty() || st.orders.isNotEmpty()
+                    refreshAccount(key, id, crossCheck = vis && pass % 4 == 0 && busy)
+                }
                 pass++
                 delay(if (vis) RISK_REFRESH_MS else 60_000L)
             }
