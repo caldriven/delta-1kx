@@ -510,9 +510,6 @@ class Repo(ctx: Context) {
         }
     }
 
-    /** Closed accounts already asked once for their risk block (REST may never send one). */
-    private val triedOnce = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
-
     /** The stream carries realized balance only; floors and rule room come from REST. */
     private fun startRiskRefresh() {
         riskJob?.cancel()
@@ -524,16 +521,17 @@ class Repo(ctx: Context) {
                 // With many accounts (one key can reach dozens), only the ones that can move right now are polled
                 // fast: those holding positions or orders, and the account being traded. Their drawdown floor can
                 // trail equity. Other active accounts only change through fills, which the stream reports and
-                // which trigger a refresh anyway, so every 2 min is enough. Failed/passed accounts: once.
+                // which trigger a refresh anyway, so every 2 min is enough. Breached or finished accounts: never,
+                // they can't trade and the app doesn't show them.
                 val known = account.accounts.value.values
                 // Give the stream a moment to list the accounts.
                 if (known.isEmpty() && tries++ < 10) { delay(1_000); continue }
                 val vis = _visible.value
-                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).map { it.id } }.getOrDefault(emptyList())
+                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).filter { it.status == "active" }.map { it.id } }.getOrDefault(emptyList())
                     else known.filter { s ->
                         val id = s.account.id
                         when {
-                            s.account.status != "active" -> s.account.risk == null && triedOnce.add(id)
+                            s.account.status != "active" -> false
                             s.positions.isNotEmpty() || s.orders.isNotEmpty() || id == _tradeAccount.value -> true
                             else -> pass % 8 == 0
                         }
