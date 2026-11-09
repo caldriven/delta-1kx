@@ -84,13 +84,16 @@ private fun KeyNotices(repo: Repo, onOpenSettings: () -> Unit): Boolean {
 private fun ScreenHeader(repo: Repo, title: String, onSettings: (() -> Unit)? = null, logo: Boolean = false) {
     val conn by repo.account.conn.collectAsStateWithLifecycle()
     val rtt by repo.account.rtt.collectAsStateWithLifecycle()
+    val upstream by repo.account.upstream.collectAsStateWithLifecycle()
     Box(Modifier.fillMaxWidth()) {
         // Brand mark centred over the header row.
         if (logo) BrandMark(Modifier.align(Alignment.Center))
     Row(Modifier.fillMaxWidth().padding(14.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
         Spacer(Modifier.weight(1f))
-        ConnBadge(conn, rtt)
+        // Tap the badge to pull everything fresh.
+        val scope = rememberCoroutineScope()
+        Box(Modifier.clip(RoundedCornerShape(50)).clickable { scope.launch { repo.refreshAndWait() } }.padding(horizontal = 6.dp, vertical = 4.dp)) { ConnBadge(conn, rtt, upstream) }
         onSettings?.let {
             androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.Settings, "Settings", tint = C.muted,
                 modifier = Modifier.padding(start = 10.dp).clip(CircleShape).clickable(onClick = it).padding(6.dp).size(20.dp))
@@ -119,6 +122,7 @@ fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: 
     // The account picked in the card, or every active account.
     val shown = if (dashAll || tradeAcc == null) all else listOf(tradeAcc)
 
+    RefreshBox(repo) {
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
         item { ScreenHeader(repo, "", onOpenSettings, logo = true) }
         item { if (!KeyNotices(repo, onOpenSettings)) return@item }
@@ -180,6 +184,7 @@ fun PositionsScreen(repo: Repo, onOpenMarket: (String) -> Unit, onOpenSettings: 
             }
         }
     }
+    }
 
     nukeAsk?.let { (ids, n) ->
         ConfirmDialog("Close everything", "Close ALL $n positions", C.down,
@@ -227,10 +232,12 @@ fun AccountsScreen(repo: Repo, onOpenSettings: () -> Unit) {
         val r = riskOf(s, marks)
         AccountView(s, r.upnl, r.equity, r.marksMissing)
     }
+    RefreshBox(repo) {
     LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
         item { ScreenHeader(repo, "Accounts", onOpenSettings) }
         item { KeyNotices(repo, onOpenSettings) }
         items(views, key = { "acc_" + it.state.account.id }) { v -> AccountCard(v, accountName(v.state)) }
+    }
     }
 }
 
@@ -375,10 +382,27 @@ fun PnlBreakdown(p: com.alex.mfppro.data.Position, mark: Double) {
     }
 }
 
+/**
+ * Pull down to refresh: a fresh account snapshot, market socket and REST data,
+ * without restarting the app.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun ConnBadge(conn: Conn, rtt: Long? = null) {
+fun RefreshBox(repo: Repo, content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit) {
+    var refreshing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = { refreshing = true; scope.launch { repo.refreshAndWait(); refreshing = false } },
+        modifier = Modifier.fillMaxSize(),
+        content = content,
+    )
+}
+
+@Composable
+fun ConnBadge(conn: Conn, rtt: Long? = null, upstream: Boolean = true) {
     val (col, txt) = when (conn) {
-        Conn.Live -> C.up to ("Live" + (rtt?.let { " · ${it}ms" } ?: ""))
+        Conn.Live -> if (!upstream) C.accent to "Delayed (MFP)" else C.up to ("Live" + (rtt?.let { " · ${it}ms" } ?: ""))
         Conn.Connecting, Conn.Reconnecting -> C.accent to "Syncing"
         Conn.AuthFailed -> C.down to "Auth failed"
         Conn.Off -> C.muted to "Offline"

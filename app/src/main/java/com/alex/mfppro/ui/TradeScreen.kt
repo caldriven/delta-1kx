@@ -34,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.TrendingDown
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
@@ -170,7 +171,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         while (true) {
             val d = repo.market.candleHistory(market.provider, market.coin, "1d", 40)
             if (d.isNotEmpty()) days = d
-            delay(if (d.isEmpty()) 5_000 else 600_000)
+            // Every 10 min, and right after 00:00 UTC so the day open switches to the new daily candle at once.
+            delay(if (d.isEmpty()) 5_000 else minOf(600_000L, com.alex.mfppro.data.ServerClock.untilUtcMidnight() + 3_000))
         }
     }
 
@@ -259,7 +261,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     fun shows(layer: String) = layer !in hidden
     // Your fills in this market, as candle markers; reloaded when a new fill arrives.
     var fillMarks by remember(market.marketId, tradeAcc?.account?.id) { mutableStateOf<List<FillMark>>(emptyList()) }
-    LaunchedEffect(market.marketId, tradeAcc?.account?.id, shows("fills")) {
+    val tick by repo.refreshTick.collectAsStateWithLifecycle()
+    LaunchedEffect(market.marketId, tradeAcc?.account?.id, shows("fills"), tick) {
         val id = tradeAcc?.account?.id ?: return@LaunchedEffect
         if (!shows("fills")) { fillMarks = emptyList(); return@LaunchedEffect }
         suspend fun load() = runCatching { repo.fills(id, maxPages = 3) }.getOrNull()?.let { list ->
@@ -276,11 +279,15 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             val px = o.limitPrice ?: o.triggerPrice ?: return@mapNotNull null
             val buy = o.side == "buy"
             val kind = (if (o.type.startsWith("stop")) "Stop " else "Limit ") + (if (buy) "buy" else "sell") + (if (o.reduceOnly) " · reduce" else "")
-            PriceLine(px, if (buy) C.up else C.down, kind, parts = listOf(kind, fmtUsd(o.size * px), pctAway(px)))
+            PriceLine(px, if (buy) C.up else C.down, kind, parts = listOf(kind, fmtUsd(o.size * px), pctAway(px)),
+                onRemove = { chartAct(ChartAsk("Cancel order", "$kind ${fmtPrice(px, market)}", C.down,
+                    listOf(ConfirmRow("Value", fmtUsd(o.size * px))), "Cancel order") { repo.cancelOrder(o) }) })
         } + listOfNotNull(draft.price?.takeIf { compact && draft.on }?.let { px ->
             val col = if (draft.buy) C.up else C.down
             PriceLine(px, col, "Limit", parts = listOf(if (draft.buy) "Limit buy · draft" else "Limit sell · draft", pctAway(px)),
-                drag = LineDrag({ p -> "Limit ${fmtPrice(draft.snap(p, market))} · ${pctAway(p)}" to col }) { p -> draft.price = draft.snap(p, market) })
+                drag = LineDrag({ p -> "Limit ${fmtPrice(draft.snap(p, market))} · ${pctAway(p)}" to col }) { p -> draft.price = draft.snap(p, market) },
+                // Drops the draft and puts the quick panel back on market orders.
+                onRemove = { draft.on = false; draft.price = null })
         })
     // Daily pivots on intraday candles; weekly once a candle is 4h or longer, where daily levels crowd together.
     val weeklyPivots = interval in listOf("4h", "1d", "1w", "1M")
@@ -320,9 +327,14 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     },
                 )),
             tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> askExit(p, true, px, tp, sl) }) },
+                drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> askExit(p, true, px, tp, sl) },
+                onRemove = { chartAct(ChartAsk("Remove take profit", "${p.symbol} TP ${fmtPrice(it, market)}", C.down,
+                    listOf(ConfirmRow("Stop loss", sl?.let { s -> fmtPrice(s, market) } ?: "none")), "Remove") { repo.setTpSl(p, null, sl, "Remove TP ${p.symbol}") }) }) },
+            // Removing a stop always asks: the position is left without protection.
             sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(p.pnlAt(it), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> askExit(p, false, px, tp, sl) }) },
+                drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> askExit(p, false, px, tp, sl) },
+                onRemove = { confirmAsk = ChartAsk("Remove stop loss", "${p.symbol} SL ${fmtPrice(it, market)}", C.down,
+                    listOf(ConfirmRow("Position", "stays open without a stop")), "Remove") { repo.setTpSl(p, tp, null, "Remove SL ${p.symbol}") } }) },
             // Where this position takes the account onto each floor, with % away from the last price.
             mark?.takeIf { shows("floors") }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             mark?.takeIf { shows("floors") }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
@@ -358,15 +370,17 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     Column(Modifier.weight(1f).then(if (scrolls) Modifier.verticalScroll(pageScroll) else Modifier)) {
         // Header: market + live price on one line, stats strip below.
         Row(Modifier.fillMaxWidth().padding(10.dp, 4.dp, 12.dp, 0.dp), verticalAlignment = Alignment.CenterVertically) {
-            // The symbol glides over to the market list (or opens the picker when there's no list to go to).
+            // Back to the market list: the ‹ marks the whole symbol as a button.
             Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { onOpenMarkets?.invoke() ?: run { picker = true } }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Markets", tint = C.muted, modifier = Modifier.size(20.dp))
                 MarketLogo(market, AssetClasses.classOf(market, classes), 22.dp)
                 Spacer(Modifier.width(8.dp))
                 Text(market.symbol, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = C.text)
-                Icon(Icons.Filled.ArrowDropDown, null, tint = C.muted, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
                 val pols by repo.policies.collectAsStateWithLifecycle()
                 Text("${com.alex.mfppro.data.maxLeverage(market, tradeAcc?.account, tradeAcc?.account?.id?.let { pols[it] })}x", color = C.muted, fontSize = 10.sp)
-                if (!connected) Text("  ●", color = C.accent, fontSize = 10.sp)
+                if (!connected) Text("  ● tap ↻", color = C.accent, fontSize = 10.sp,
+                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { repo.refreshAll() }.padding(horizontal = 2.dp))
             }
             VenueSwap(market, venues.ifEmpty { markets }, onPickMarket)
             Text(fmtPrice(live), style = num.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold, color = pnlColor(today)))
@@ -399,8 +413,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             }
             ViewChip("Depth", Icons.Filled.StackedLineChart, view == 2) { view = 2 }
             ViewChip("Data", Icons.Filled.Insights, view == 1) { view = 1 }
-            // Order-flow bubbles: still an alpha.
-            ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { view = 3 }
+            // Order-flow bubbles: still an alpha, only when switched on under Settings > About.
+            if (repo.prefs.showFlowChart) ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { view = 3 }
+            else if (view == 3) view = 0
             // The intervals take all the width left after the view chips (a spacer used to claim half of it).
             if (view == 0) IntervalRow(interval, 12.sp, Modifier.weight(1f).padding(start = 4.dp)) { interval = it; repo.prefs.lastInterval = it }
             else Spacer(Modifier.weight(1f))

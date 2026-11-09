@@ -426,13 +426,19 @@ fun triggerSource(provider: String): String = when (provider) {
 fun ExitExecPicker(tp: Boolean, exec: String, provider: String, onChange: (String) -> Unit) {
     val col = if (tp) C.up else C.down
     Column {
-        Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
-            Seg(if (tp) "TP market" else "Stop market", exec == "market", col) { onChange("market") }
-            Seg(if (tp) "TP limit · reduce only" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
+        // A TP either waits for a trigger or rests on the book as a plain reduce-only limit.
+        if (tp) Row(Modifier.padding(bottom = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg("Trigger", exec != "rest", col) { if (exec == "rest") onChange("limit") }
+            Seg("Resting limit · reduce only", exec == "rest", col) { onChange("rest") }
+        }
+        if (!tp || exec != "rest") Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg(if (tp) "Then market" else "Stop market", exec == "market", col) { onChange("market") }
+            Seg(if (tp) "Then limit" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
         }
         val src = triggerSource(provider)
         Text(
             when {
+                tp && exec == "rest" -> "A reduce-only limit sits on the book at your price now: no trigger, it fills as maker when price trades there. MFP refuses it if price is already past."
                 tp && exec == "market" -> "Triggers when $src reaches it, then closes at market."
                 tp -> "Triggers on $src, then a reduce-only limit at your price: never a worse fill, but a quick touch may not fill."
                 exec == "market" -> "Triggers when $src reaches it, then closes at market: fills in a fast move, with slippage."

@@ -26,6 +26,10 @@ class RestApi(private val http: OkHttpClient) {
     suspend fun positions(key: String, accountId: String): List<Position> =
         get<DataList<Position>>(key, "/v1/positions?account_id=" + java.net.URLEncoder.encode(accountId, "UTF-8")).data
 
+    /** Every pending and resting order on the account, as MFP holds it. */
+    suspend fun workingOrders(key: String, accountId: String): List<Order> =
+        get<DataList<Order>>(key, "/v1/orders?status=working&limit=100&account_id=" + java.net.URLEncoder.encode(accountId, "UTF-8")).data
+
     suspend fun fills(key: String, accountId: String, cursor: String?): FillPage =
         get(key, "/v1/fills?limit=100&account_id=" + java.net.URLEncoder.encode(accountId, "UTF-8") +
             (cursor?.let { "&cursor=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: ""))

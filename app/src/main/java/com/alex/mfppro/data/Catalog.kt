@@ -93,9 +93,24 @@ object Logos {
 data class MarketExtra(val week: Double? = null, val oi24h: Double? = null, val dayOpen: Double? = null)
 
 /** UTC session boundaries and the daily candle opens at each of them. */
+/**
+ * MFP's clock, from the market stream's ping replies, so day boundaries don't depend on the
+ * phone's clock (time zones never matter: every boundary here is UTC).
+ */
+object ServerClock {
+    @Volatile var offset = 0L
+    fun now() = System.currentTimeMillis() + offset
+    /** Milliseconds until the next 00:00 UTC. */
+    fun untilUtcMidnight() = 86_400_000L - Math.floorMod(now(), 86_400_000L)
+}
+
+/**
+ * Daily, weekly and monthly opens at 00:00 UTC. Every MFP venue's daily candle opens at 00:00 UTC
+ * (checked for Binance, Bybit, Hyperliquid, Veranta and Ostium), so the day open is today's daily candle.
+ */
 object Opens {
     private val UTC = java.time.ZoneOffset.UTC
-    private fun today() = java.time.LocalDate.now(UTC)
+    private fun today() = java.time.Instant.ofEpochMilli(ServerClock.now()).atZone(UTC).toLocalDate()
     fun dayStart() = today().atStartOfDay(UTC).toInstant().toEpochMilli()
     fun weekStart() = today().with(java.time.DayOfWeek.MONDAY).atStartOfDay(UTC).toInstant().toEpochMilli()
     fun monthStart() = today().withDayOfMonth(1).atStartOfDay(UTC).toInstant().toEpochMilli()

@@ -609,6 +609,12 @@ private fun AboutPage(repo: Repo, open: (String) -> Unit) {
     Section("Alpha testing", ALERTS, Icons.Filled.Info) {
         Text(ALPHA_ABOUT, color = C.text, fontSize = 13.sp, lineHeight = 18.sp)
         Note("Report bugs and wrong numbers to $CREATOR on X.")
+        Text("Build " + com.alex.mfppro.BuildConfig.GIT_SHA + " · " + com.alex.mfppro.BuildConfig.BUILD_TIME + (if (com.alex.mfppro.BuildConfig.DEBUG) " · DEBUG (slow)" else ""),
+            color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    }
+    Section("Alpha features", ALERTS, Icons.Filled.Info) {
+        var flow by remember { mutableStateOf(repo.prefs.showFlowChart) }
+        Toggle("Flow chart", "Order-flow bubbles tab on the Trade screen; rough", flow, ALERTS) { flow = it; repo.prefs.showFlowChart = it }
     }
     Section("Made by", ABOUT, Icons.Filled.AlternateEmail) {
         Row(

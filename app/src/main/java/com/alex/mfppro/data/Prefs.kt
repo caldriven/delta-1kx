@@ -145,6 +145,11 @@ class Prefs(ctx: Context) {
         get() = plain.getBoolean("trade_show_all", false)
         set(v) = plain.edit().putBoolean("trade_show_all", v).apply()
 
+    /** Alpha: the order-flow bubble chart on the Trade screen. Hidden by default. */
+    var showFlowChart: Boolean
+        get() = plain.getBoolean("show_flow", false)
+        set(v) = plain.edit().putBoolean("show_flow", v).apply()
+
     var realtimePnl: Boolean
         get() = plain.getBoolean("realtime_pnl", true)
         set(v) = plain.edit().putBoolean("realtime_pnl", v).apply()

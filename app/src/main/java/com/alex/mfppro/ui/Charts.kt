@@ -71,6 +71,8 @@ data class PriceLine(
     val box: PosBox? = null,
     /** Segmented tag like the position box: first part is the filled label, the rest are values. */
     val parts: List<String> = emptyList(),
+    /** Shows a ✕ at the end of the tag; tapping it removes the order (or draft) behind the line. */
+    val onRemove: (() -> Unit)? = null,
 )
 
 /**
@@ -424,11 +426,14 @@ fun CandleChart(
                     val bx = l.box
                     if (bx != null) boxes += Triple(bx, l.color, yy)
                     else {
-                        val shown = if (l.drag != null) parts + "⇕" else parts
+                        val shown = (if (l.drag != null) parts + "⇕" else parts) + listOfNotNull(if (l.onRemove != null) "✕" else null)
                         val w = tagWidth(tm, shown, pillStyle)
                         val px0 = slot(w, yy - pillH / 2)
                         queued += { tagBox(tm, shown, l.color, Offset(px0, yy - pillH / 2), pillStyle, pillH) }
-                        l.drag?.let { hits += Hit(Rect(px0, yy - pillH / 2, px0 + w, yy + pillH / 2), drag = it) }
+                        // The ✕ goes in first: hits are matched in order, so it wins over the drag on the rest of the pill.
+                        val xw = if (l.onRemove != null) tagWidth(tm, listOf("✕"), pillStyle) else 0f
+                        l.onRemove?.let { hits += Hit(Rect(px0 + w - xw, yy - pillH / 2, px0 + w, yy + pillH / 2), tap = it) }
+                        l.drag?.let { hits += Hit(Rect(px0, yy - pillH / 2, px0 + w - xw, yy + pillH / 2), drag = it) }
                     }
                 } else if (l.box == null) {
                     // Off-screen level: stack a tag on the edge it lies beyond, with its price.

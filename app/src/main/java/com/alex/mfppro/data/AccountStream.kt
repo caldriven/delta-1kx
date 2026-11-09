@@ -75,6 +75,15 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
     private val _rtt = MutableStateFlow<Long?>(null)
     val rtt = _rtt.asStateFlow()
 
+    /** False while MFP's heartbeat says it lost its own data source: events may be delayed. */
+    private val _upstream = MutableStateFlow(true)
+    val upstream = _upstream.asStateFlow()
+
+    // Fill ids already passed on: a reconnect replays recent fills, which must not alert twice.
+    private val seenFills = object : LinkedHashMap<String, Unit>(256, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?) = size > 500
+    }
+
     // Ping every 3s; no frame for 8s (or 2.5s after a probe) means the socket is dead.
     init {
         scope.launch(serial) {
@@ -105,6 +114,18 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
 
     /** Drop the socket and reconnect with the resume cursor (network switched). */
     fun reconnect() = scope.launch(serial) { if (key != null && _conn.value != Conn.AuthFailed) { attempt = 0; reconnectNow() } }
+
+    /**
+     * Drop the resume cursor and take a fresh snapshot of every account (manual refresh,
+     * or back from a long stay in the background). Also retries after an auth failure.
+     */
+    fun resync() = scope.launch(serial) {
+        if (key == null) return@launch
+        streamId = null; lastSeq = 0; lastTime = 0
+        building = null
+        attempt = 0
+        reconnectNow()
+    }
 
     fun start(apiKey: String) = scope.launch(serial) {
         if (key != apiKey) {
@@ -204,6 +225,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             "snapshot" -> applySnapshot(f)
             "snapshot_end" -> building?.let { _accounts.value = it.toMap(); building = null }
             "pong" -> _rtt.value = System.currentTimeMillis() - pingSentAt
+            "heartbeat" -> _upstream.value = f["upstream_connected"]?.jsonPrimitive?.booleanOrNull ?: true
             "reconnect" -> reconnectNow()
             "error" -> Log.w(TAG, "error frame: $text")
             "order" -> mutate(f) { s ->
@@ -230,7 +252,10 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
                     )
                 }
             }
-            "fill" -> f.obj("fill")?.let { _fills.tryEmit(it) }
+            "fill" -> f.obj("fill")?.let { fill ->
+                val id = fill.str("id")
+                if (id == null || seenFills.put(id, Unit) == null) _fills.tryEmit(fill)
+            }
         }
     }
 
@@ -280,6 +305,24 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         if (fresh.keys != cur.positions.keys) {
             Log.w(TAG, "positions out of sync for $accountId, using REST")
             map[accountId] = cur.copy(positions = fresh)
+        }
+        publish()
+    }
+
+    /**
+     * REST cross-check for working orders: if MFP's set, prices or sizes differ from what the
+     * stream gave us (an edit that was accepted but not applied, a missed event), trust REST.
+     */
+    fun reconcileOrders(accountId: String, rest: List<Order>) = scope.launch(serial) {
+        if (building != null) return@launch
+        val map = target()
+        val cur = map[accountId] ?: return@launch
+        val fresh = rest.associateBy { it.id }
+        fun sig(o: Order) = Triple(o.limitPrice, o.triggerPrice, o.size)
+        val differs = fresh.keys != cur.orders.keys || fresh.any { (id, o) -> cur.orders[id]?.let(::sig) != sig(o) }
+        if (differs) {
+            Log.w(TAG, "orders out of sync for $accountId, using REST")
+            map[accountId] = cur.copy(orders = fresh)
         }
         publish()
     }
