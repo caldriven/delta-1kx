@@ -44,7 +44,12 @@ object Competitions {
 
 /** App-only account names (Settings → Accounts), observable so every screen renames at once. */
 object Nicknames {
-    val map = androidx.compose.runtime.mutableStateMapOf<String, String>()
+    /**
+     * Set by the app before the first read: a Compose snapshot-state map, so screens recompose on a
+     * rename. The shared module does not depend on Compose, so it only holds the factory.
+     */
+    @Volatile var factory: () -> MutableMap<String, String> = { java.util.concurrent.ConcurrentHashMap() }
+    val map: MutableMap<String, String> by lazy { factory() }
 }
 
 fun isCompetition(a: Account) = a.id in Competitions.ids || a.name.contains("competition", true)

@@ -1,10 +1,5 @@
 package com.alex.mfppro.data
 
-import android.content.Context
-import android.util.Log
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,8 +12,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import android.net.ConnectivityManager
-import android.net.Network
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.serialization.json.JsonObject
@@ -38,9 +31,8 @@ fun roundSize(size: Double, m: Market?): Double =
 private const val BACKGROUND_GRACE_MS = 20_000L
 private const val RISK_REFRESH_MS = 15_000L
 
-class Repo(ctx: Context) {
+class Repo(val prefs: Prefs) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val prefs = Prefs(ctx)
     private val http = OkHttpClient.Builder()
         .pingInterval(5, TimeUnit.SECONDS)
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -92,19 +84,17 @@ class Repo(ctx: Context) {
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) { _visible.value = true; onForeground() }
-            override fun onStop(owner: LifecycleOwner) { _visible.value = false; onBackground() }
-        })
-        // A new default network (Wi-Fi <-> mobile) leaves old sockets dead: reconnect at once.
-        val cm = ctx.getSystemService(ConnectivityManager::class.java)
-        var first = true
-        cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                if (first) { first = false; return }
-                account.reconnect(); market.reconnect()
-            }
-        })
+    }
+
+    /** The app came on screen or left it (Android process lifecycle; desktop window shown or minimised). */
+    fun setVisible(on: Boolean) {
+        _visible.value = on
+        if (on) onForeground() else onBackground()
+    }
+
+    /** A new default network (Wi-Fi <-> mobile, VPN, dock) leaves old sockets dead: reconnect at once. */
+    fun networkChanged() {
+        account.reconnect(); market.reconnect()
     }
 
     // ---- trading -------------------------------------------------------

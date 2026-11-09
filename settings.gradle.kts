@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "MfpPro"
-include(":app")
+include(":core", ":app", ":desktop")

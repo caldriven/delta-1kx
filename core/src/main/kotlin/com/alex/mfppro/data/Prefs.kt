@@ -1,18 +1,7 @@
 package com.alex.mfppro.data
 
-import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
-
-class Prefs(ctx: Context) {
-    private val secure = EncryptedSharedPreferences.create(
-        ctx,
-        "secure",
-        MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
-    private val plain = ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
+/** App settings. [secure] holds the API key and terms acceptance (encrypted on every platform); [plain] holds the rest. */
+class Prefs(private val secure: KvStore, private val plain: KvStore) {
 
     var apiKey: String?
         get() = secure.getString("api_key", null)
