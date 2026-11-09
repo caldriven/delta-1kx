@@ -291,7 +291,7 @@ private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: 
     var range by remember { mutableStateOf(0.5) }
     // Start as the fast passive close: mid ± 0.05% on the profit side, so it rests and fills on the next small move.
     var offPct by remember { mutableStateOf(0.05 * dir) }
-    var postOnly by remember { mutableStateOf(true) }
+    var postOnly by remember { mutableStateOf(repo.prefs.postOnly) }
     var chasePct by remember { mutableStateOf(0.0) }
     var capPct by remember { mutableStateOf<Double?>(null) }
     // Closing a long sells on the ask side; closing a short buys on the bid side.
@@ -394,7 +394,7 @@ private fun LimitCloseDialog(repo: Repo, p: Position, mark: Double?, onDismiss: 
                             Text("Post only", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                             Text("Never fills at market: MFP rejects it if it would cross the book.", color = C.muted, fontSize = 11.sp, lineHeight = 14.sp)
                         }
-                        AppSwitch(postOnly, { postOnly = it })
+                        AppSwitch(postOnly, { postOnly = it; repo.prefs.postOnly = it })
                     }
                     if (crosses) Text(
                         if (postOnly) "Crosses the book: move it past the ${if (p.isLong) "bid" else "ask"} or turn off post only"

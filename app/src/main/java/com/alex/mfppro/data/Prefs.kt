@@ -165,6 +165,14 @@ class Prefs(ctx: Context) {
     var hideComp: Boolean
         get() = plain.getBoolean("hide_comp", false)
         set(v) = plain.edit().putBoolean("hide_comp", v).apply()
+    /**
+     * Post only for limit orders: a limit at or through the book is refused instead of filling at
+     * market. MFP has no post-only flag; it's leaving out marketable_limit_acknowledged.
+     */
+    var postOnly: Boolean
+        get() = plain.getBoolean("post_only", true)
+        set(v) = plain.edit().putBoolean("post_only", v).apply()
+
     var confirmCloseAll: Boolean
         get() = plain.getBoolean("confirm_close_all", true)
         set(v) = plain.edit().putBoolean("confirm_close_all", v).apply()

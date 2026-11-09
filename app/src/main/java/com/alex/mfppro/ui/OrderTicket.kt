@@ -128,6 +128,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
     var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginModeFor(accountId)) == "isolated") }
     var reduceOnly by remember { mutableStateOf(false) }
+    var postOnly by remember { mutableStateOf(repo.prefs.postOnly) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }
     var tpsl by remember { mutableStateOf(false) }
     var tpText by remember { mutableStateOf("") }
@@ -174,6 +175,8 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         // The smallest rung: 1 of n(n+1)/2 weights when weighted, 1/n when flat.
         scaled && usd * (if (dist == "flat") 1.0 / rungs else 2.0 / (rungs * (rungs + 1))) < market.minNotional -> "Smallest rung is below the ${fmtUsd(market.minNotional)} minimum"
         size <= 0 -> "Enter a size"
+        marketable && postOnly -> "Post only: this price crosses the book. Move it past the ${if (buy) "ask" else "bid"} or turn post only off"
+        ladderCrosses && postOnly -> "Post only: some rungs cross the book. Move the range or turn post only off"
         size < market.minSize -> "Below minimum size ${fmtSize(market.minSize)} ${market.symbol}"
         usd < market.minNotional -> "Below minimum ${fmtUsd(market.minNotional)}"
         tp != null && refPx != null && (if (buy) tp <= refPx else tp >= refPx) -> "Take profit must be ${if (buy) "above" else "below"} the price"
@@ -215,7 +218,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 put("rung_count", rungs); put("distribution", dist)
                 put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
                 if (reduceOnly) put("reduce_only", true)
-                if (ladderCrosses) put("marketable_limit_acknowledged", true)
+                if (ladderCrosses && !postOnly) put("marketable_limit_acknowledged", true)
             }
             scope.launch {
                 val r = repo.placeScaled("Scaled $sideWord ${market.symbol}", ladder)
@@ -239,7 +242,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 capPx?.let { put("chase_cap_price", snapPx(it)) }
             } else if (limit) {
                 put("type", "limit"); put("limit_price", snapPx(limitPx!!))
-                if (marketable) put("marketable_limit_acknowledged", true)
+                if (marketable && !postOnly) put("marketable_limit_acknowledged", true)
             } else {
                 put("type", "market")
                 put("expected_price", quote?.estimatedFillPrice ?: refPx ?: 0.0)
@@ -391,6 +394,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         }
                     }
                 }
+                Check("Post only", postOnly) { postOnly = it; repo.prefs.postOnly = it }
             } else if (limit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NumField("Limit price", priceText, { priceText = it }, Modifier.weight(1f))
@@ -400,7 +404,16 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         priceText = (best ?: mark)?.let(::px) ?: ""
                     }) { Text("Best", color = C.accent) }
                 }
-                if (marketable) Text("Crosses the book: fills immediately as a market order", color = C.accent, fontSize = 11.sp)
+                Check("Post only", postOnly) { postOnly = it; repo.prefs.postOnly = it }
+                Text(
+                    when {
+                        marketable && postOnly -> "Crosses the book: post only blocks it"
+                        marketable -> "Crosses the book: fills immediately as a market order"
+                        postOnly -> "Rests on the book as maker; refused if it would fill at once"
+                        else -> "Rests on the book, or fills at market if the price is already past"
+                    },
+                    color = if (marketable) C.accent else C.muted, fontSize = 11.sp,
+                )
             }
             NumField("Size (USD)", usdText, { usdText = it }, Modifier.fillMaxWidth())
             // Size as a share of buying power (available × leverage).
@@ -499,7 +512,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 stop -> (if (stopLimit) "Stop limit ${fmtPrice(limitPx?.let(::snapPx), market)}" else "Stop market") + " · trigger ${fmtPrice(triggerPx?.let(::snapPx), market)}"
                 chase -> "Chase" + (if (chasePct > 0) String.format(Locale.US, " %s%.2f%%", if (buy) "−" else "+", chasePct) else " at touch") + (capPx?.let { " · cap ${fmtPrice(snapPx(it), market)}" } ?: "")
                 scaled -> "Scaled ${fmtPrice(startPx?.let(::snapPx), market)} → ${fmtPrice(endPx?.let(::snapPx), market)} · $rungs rungs"
-                limit -> "Limit @ ${fmtPrice(limitPx?.let(::snapPx), market)}"
+                limit -> "Limit @ ${fmtPrice(limitPx?.let(::snapPx), market)}" + if (postOnly) " · post only" else ""
                 else -> "Market"
             }),
             if (!limit && !stop && !chase && !scaled) ConfirmRow("Size", "${fmtSize(size)} ${market.symbol}") else null,

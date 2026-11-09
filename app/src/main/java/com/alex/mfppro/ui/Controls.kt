@@ -378,7 +378,7 @@ fun ExitExecPicker(tp: Boolean, exec: String, provider: String, onChange: (Strin
         val src = triggerSource(provider)
         Text(
             when {
-                tp && exec == "rest" -> "A reduce-only limit sits on the book at your price now: no trigger, it fills as maker when price trades there. MFP refuses it if price is already past."
+                tp && exec == "rest" -> "Post only, reduce only: a limit sits on the book at your price now, no trigger, and fills as maker when price trades there. MFP refuses it if price is already past."
                 tp && exec == "market" -> "Triggers when $src reaches it, then closes at market."
                 tp -> "Triggers on $src, then a reduce-only limit at your price: never a worse fill, but a quick touch may not fill."
                 exec == "market" -> "Triggers when $src reaches it, then closes at market: fills in a fast move, with slippage."
