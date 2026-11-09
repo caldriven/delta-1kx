@@ -251,7 +251,16 @@ class Repo(ctx: Context) {
 
     fun exitsOf(p: Position): List<Order> =
         account.accounts.value[p.accountId]?.orders?.values.orEmpty()
-            .filter { it.marketId == p.marketId && it.exitGroup != null }
+            .filter { it.marketId == p.marketId }
+            .mapNotNull { o ->
+                when {
+                    o.exitGroup != null -> o
+                    // A resting reduce-only limit on the closing side for the full size is the TP; a partial
+                    // one is a scale-out the user placed and stays an ordinary order.
+                    o.isRestingExit && o.side == (if (p.isLong) "sell" else "buy") && o.size >= p.size * 0.999 -> o.copy(restingTp = true)
+                    else -> null
+                }
+            }
 
     /**
      * Set (or with null remove) the position's TP and SL in one atomic batch.
@@ -296,7 +305,9 @@ class Repo(ctx: Context) {
             if (price == null) {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else if (keep != null) {
-                ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
+                // Unchanged (e.g. the other leg is being removed): leave it out of the batch.
+                if (keep.exitPrice != price || keep.size != p.size)
+                    ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
                 existing.filter { it !== keep }.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
@@ -405,7 +416,13 @@ class Repo(ctx: Context) {
      * a new market socket with chart history, markets, risk floors, policies and the
      * overview stats, and a tick for screens that loaded REST data.
      */
+    @Volatile private var lastRefreshAt = 0L
+
     fun refreshAll() {
+        // Repeated pulls or badge taps would reopen the account socket each time (MFP caps sockets per key).
+        val now = System.currentTimeMillis()
+        if (now - lastRefreshAt < 3_000) return
+        lastRefreshAt = now
         pauseJob?.cancel()
         account.resync()
         market.refresh()
@@ -419,7 +436,8 @@ class Repo(ctx: Context) {
     /** [refreshAll], then wait (up to 8 s) until the account stream is live again. */
     suspend fun refreshAndWait() {
         refreshAll()
-        delay(300)
+        // conn still reads Live until the serial reconnect runs: first see it leave Live, then come back.
+        kotlinx.coroutines.withTimeoutOrNull(1_500) { account.conn.first { it != Conn.Live } }
         kotlinx.coroutines.withTimeoutOrNull(8_000) {
             account.conn.first { it == Conn.Live || it == Conn.AuthFailed || it == Conn.Off }
         }
@@ -591,8 +609,10 @@ class Repo(ctx: Context) {
             }
         }
         if (acc.status == "active" && crossCheck) {
-            runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it) }
-            runCatching { rest.workingOrders(key, id) }.onSuccess { account.reconcileOrders(id, it) }
+            val asked = System.currentTimeMillis()
+            runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it, asked) }
+            // A full page may be cut off (MFP pages at 100): never drop orders on the strength of it.
+            runCatching { rest.workingOrders(key, id) }.onSuccess { if (it.size < 100) account.reconcileOrders(id, it, asked) }
                 .onFailure { Log.w(TAG, "orders $id: ${it.message}") }
         }
     }

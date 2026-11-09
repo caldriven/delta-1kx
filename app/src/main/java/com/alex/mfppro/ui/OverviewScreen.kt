@@ -94,7 +94,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     }
     // Rolling 1h change from 5m candles: fetched only while this list is open, every 2 min at most.
     val chg1h by repo.chg1h.collectAsStateWithLifecycle()
-    LaunchedEffect(markets) { while (markets.isNotEmpty()) { repo.load1h(markets); kotlinx.coroutines.delay(120_000) } }
+
 
     val classOf = { m: Market -> AssetClasses.classOf(m, classes) }
     // Change since today's 00:00 UTC open; the feed's rolling 24h until the daily candles load.
@@ -137,6 +137,8 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     // Freeze the order between refreshes: re-sorting on every 50 ms tick made rows jump while scrolling.
     // A new sort/filter takes effect at once and starts at the top.
     val latest by androidx.compose.runtime.rememberUpdatedState(live)
+    // Rolling 1h change only for the markets this filter lists, every 2 min at most while the list is open.
+    LaunchedEffect(activeCls, q) { while (true) { if (latest.isNotEmpty()) repo.load1h(latest); kotlinx.coroutines.delay(120_000) } }
     val listKey = listOf(sort, activeCls, q, analysis)
     // Same list as last time: come back to its rows and scroll position instead of the top.
     val returning = remember { ListMemory.key == listKey && ListMemory.order.isNotEmpty() }

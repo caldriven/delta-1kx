@@ -274,7 +274,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     }
     fun pctAway(px: Double) = mark?.let { fmtPct((px / it - 1) * 100) } ?: ""
     // Resting entry orders in this market (not TP/SL, which ride on the position), plus the draft limit.
-    val orderLines = scoped.flatMap { a -> a.orders.values }.filter { o -> shows("orders") && o.exitGroup == null && (o.marketId == market.marketId || o.symbol.equals(market.symbol, true)) }
+    // A position's resting TP draws as its TP line, not as an order line too.
+    val exitIds = myPositions.flatMap { repo.exitsOf(it) }.mapTo(HashSet()) { it.id }
+    val orderLines = scoped.flatMap { a -> a.orders.values }.filter { o -> shows("orders") && o.exitGroup == null && o.id !in exitIds && (o.marketId == market.marketId || o.symbol.equals(market.symbol, true)) }
         .mapNotNull { o ->
             val px = o.limitPrice ?: o.triggerPrice ?: return@mapNotNull null
             val buy = o.side == "buy"

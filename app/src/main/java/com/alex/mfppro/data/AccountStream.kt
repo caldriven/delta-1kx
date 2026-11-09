@@ -141,6 +141,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         reconnectJob?.cancel()
         gen++
         ws?.close(1000, null); ws = null
+        _upstream.value = true
         _conn.value = Conn.Off
         _accounts.value = emptyMap()
     }
@@ -220,6 +221,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
                 streamId = f.str("stream_id") ?: streamId
                 attempt = 0
                 if (!resumed) building = mutableMapOf()
+                _upstream.value = true
                 _conn.value = Conn.Live
             }
             "snapshot" -> applySnapshot(f)
@@ -267,6 +269,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         fun list(vararg keys: String) = keys.firstNotNullOfOrNull { k -> (f[k] ?: frame[k]) as? JsonArray } ?: emptyList()
         val positions = list("positions", "open_positions").mapNotNull { decode<Position>(it.jsonObject) }.associateBy { it.id }
         val orders = list("orders", "working_orders").mapNotNull { decode<Order>(it.jsonObject) }.associateBy { it.id }
+        changedAt[acc.id] = System.currentTimeMillis()
         target()[acc.id] = AccountState(
             // Snapshots don't carry the REST floors; keep the last ones we had.
             account = acc.copy(risk = keepFloors(acc.risk, _accounts.value[acc.id]?.account?.risk)),
@@ -276,6 +279,9 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         )
         publish()
     }
+
+    /** When the stream last changed each account, so an older REST cross-check doesn't undo it. */
+    private val changedAt = HashMap<String, Long>()
 
     /** Snapshots after a non-resumed hello build a fresh map that replaces the old one at snapshot_end. */
     private fun target(): MutableMap<String, AccountState> = building ?: _accounts.value.toMutableMap().also { pending = it }
@@ -289,6 +295,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         val id = f.str("account_id") ?: return
         val map = target()
         val cur = map[id] ?: return
+        changedAt[id] = System.currentTimeMillis()
         map[id] = block(cur)
         publish()
     }
@@ -297,8 +304,9 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
      * REST cross-check: if the open positions REST reports differ from what the
      * stream gave us, trust REST. Guards against a missed or unparsed event.
      */
-    fun reconcilePositions(accountId: String, rest: List<Position>) = scope.launch(serial) {
-        if (building != null) return@launch
+    fun reconcilePositions(accountId: String, rest: List<Position>, askedAt: Long) = scope.launch(serial) {
+        // The stream changed this account after the REST call went out: REST may be the older picture.
+        if (building != null || (changedAt[accountId] ?: 0) >= askedAt) return@launch
         val map = target()
         val cur = map[accountId] ?: return@launch
         val fresh = rest.associateBy { it.id }
@@ -313,8 +321,8 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
      * REST cross-check for working orders: if MFP's set, prices or sizes differ from what the
      * stream gave us (an edit that was accepted but not applied, a missed event), trust REST.
      */
-    fun reconcileOrders(accountId: String, rest: List<Order>) = scope.launch(serial) {
-        if (building != null) return@launch
+    fun reconcileOrders(accountId: String, rest: List<Order>, askedAt: Long) = scope.launch(serial) {
+        if (building != null || (changedAt[accountId] ?: 0) >= askedAt) return@launch
         val map = target()
         val cur = map[accountId] ?: return@launch
         val fresh = rest.associateBy { it.id }
