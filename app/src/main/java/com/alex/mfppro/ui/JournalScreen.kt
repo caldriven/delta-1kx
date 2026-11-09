@@ -84,13 +84,8 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
 
     RefreshBox(repo) {
     LazyColumn(Modifier.fillMaxSize().background(C.bg), state = listState, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
-        item {
-            Row(Modifier.fillMaxWidth().padding(14.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Journal", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
-                Spacer(Modifier.weight(1f))
-                Icon(Icons.Filled.Refresh, "Reload", tint = C.muted, modifier = Modifier.clip(RoundedCornerShape(50)).clickable { reload++ }.padding(6.dp).size(20.dp))
-            }
-        }
+        // Same header as the Dashboard: the Live badge refreshes everything, the journal included.
+        item { ScreenHeader(repo, "Journal", onOpenSettings) }
         if (acc == null) { item { Text("No active account", color = C.muted, modifier = Modifier.padding(16.dp)) }; return@LazyColumn }
         item {
             Row(

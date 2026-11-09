@@ -55,8 +55,6 @@ import com.alex.mfppro.data.breachPrice
 import com.alex.mfppro.data.riskOf
 import kotlin.math.abs
 
-private data class AccountView(val state: AccountState, val upnl: Double, val equity: Double, val marksMissing: Boolean)
-
 /** Failed, passed and closed accounts can't trade, so they stay out of the app. */
 fun activeAccounts(m: Map<String, AccountState>, includeComp: Boolean = false) =
     m.values.filter { it.account.status == "active" && (includeComp || !Comp.hide || !isComp(it)) }.sortedBy { it.account.name }
@@ -80,8 +78,9 @@ private fun KeyNotices(repo: Repo, onOpenSettings: () -> Unit): Boolean {
     return true
 }
 
+/** The one screen header: title, the Live badge (tap to refresh) and the settings gear. */
 @Composable
-private fun ScreenHeader(repo: Repo, title: String, onSettings: (() -> Unit)? = null, logo: Boolean = false) {
+fun ScreenHeader(repo: Repo, title: String, onSettings: (() -> Unit)? = null, logo: Boolean = false) {
     val conn by repo.account.conn.collectAsStateWithLifecycle()
     val rtt by repo.account.rtt.collectAsStateWithLifecycle()
     val upstream by repo.account.upstream.collectAsStateWithLifecycle()
@@ -223,79 +222,6 @@ private fun AccountStrip(s: AccountState, marks: Map<String, Double>, onCloseAll
     }
 }
 
-/** Per-account rule cards. Accounts are independent, so nothing is summed across them. */
-@Composable
-fun AccountsScreen(repo: Repo, onOpenSettings: () -> Unit) {
-    val accounts by repo.account.accounts.collectAsStateWithLifecycle()
-    val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val views = activeAccounts(accounts).map { s ->
-        val r = riskOf(s, marks)
-        AccountView(s, r.upnl, r.equity, r.marksMissing)
-    }
-    RefreshBox(repo) {
-    LazyColumn(Modifier.fillMaxSize().background(C.bg), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
-        item { ScreenHeader(repo, "Accounts", onOpenSettings) }
-        item { KeyNotices(repo, onOpenSettings) }
-        items(views, key = { "acc_" + it.state.account.id }) { v -> AccountCard(v, accountName(v.state)) }
-    }
-    }
-}
-
-/**
- * Funded-trader dashboard for one account, like the website's Overview:
- * pass progress, profit target, daily loss and max drawdown usage, today.
- */
-@Composable
-private fun AccountCard(v: AccountView, name: String) {
-    val s = v.state
-    val a = s.account
-    val r = riskOf(s, emptyMap()).copy(equity = v.equity, upnl = v.upnl)
-    Panel {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(name, color = C.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Spacer(Modifier.width(6.dp))
-            Tag(a.stage.ifBlank { "account" }, C.accent)
-            if (s.lockedOut) { Spacer(Modifier.width(4.dp)); Tag("locked", C.down) }
-            Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
-                Text("Drawdown left", color = C.muted, fontSize = 10.sp)
-                Text(fmtUsd(r.room), style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = roomColor(r.roomFraction)))
-            }
-        }
-        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.Bottom) {
-            Text(fmtUsd(v.equity), style = num.copy(fontSize = 24.sp, fontWeight = FontWeight.Bold))
-            Spacer(Modifier.width(8.dp))
-            r.todayPnl?.let { t -> Text(fmtUsd(net(t), true) + " today", style = num.copy(fontSize = 12.sp, color = pnlColor(t)), modifier = Modifier.padding(bottom = 4.dp)) }
-        }
-        RuleMeters(r, a.startingBalance, Modifier.padding(top = 10.dp))
-        r.target?.takeIf { it > v.equity }?.let { t ->
-            Text("To pass: ${fmtUsd(t - v.equity)} more", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-        }
-    }
-}
-
-private fun lossColor(usedFrac: Double) = when {
-    usedFrac >= 0.75 -> C.down
-    usedFrac >= 0.5 -> C.accent
-    else -> C.up
-}
-
-@Composable
-private fun Meter(label: String, value: String, frac: Double, color: Color, sub: String) {
-    Column(Modifier.padding(top = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-            Text(value, style = num.copy(fontSize = 12.sp, color = color))
-        }
-        LinearProgressIndicator(
-            progress = { frac.toFloat().coerceIn(0f, 1f) },
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).height(5.dp).clip(RoundedCornerShape(3.dp)),
-            color = color, trackColor = C.line, drawStopIndicator = {}, gapSize = 0.dp,
-        )
-        Text(sub, color = C.muted, fontSize = 11.sp)
-    }
-}
-
 /** [breach] = price where this position takes its account onto the nearest floor. */
 @Composable
 fun PositionRow(p: Position, mark: Double?, account: String, showAccount: Boolean, breach: Double? = null, venueMark: Double? = null, tp: Double? = null, sl: Double? = null, market: com.alex.mfppro.data.Market? = null, onClick: () -> Unit) {
@@ -423,14 +349,6 @@ fun Panel(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
 }
 
 @Composable
-fun Stat(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
-    Column(modifier) {
-        Text(label, color = C.muted, fontSize = 11.sp)
-        Text(value, style = num.copy(color = color))
-    }
-}
-
-@Composable
 fun Cell(label: String, value: String, modifier: Modifier = Modifier, color: Color = C.text) {
     Column(modifier) {
         Text(label, color = C.muted, fontSize = 10.sp)
@@ -443,18 +361,6 @@ fun Tag(text: String, color: Color) {
     Text(
         text, color = color, fontSize = 10.sp,
         modifier = Modifier.clip(RoundedCornerShape(3.dp)).background(color.copy(alpha = 0.15f)).padding(horizontal = 5.dp, vertical = 1.dp),
-    )
-}
-
-@Composable
-private fun Chip(label: String, on: Boolean, onClick: () -> Unit) {
-    FilterChip(
-        selected = on, onClick = onClick, label = { Text(label, fontSize = 12.sp) },
-        colors = FilterChipDefaults.filterChipColors(
-            containerColor = C.panel, labelColor = C.muted,
-            selectedContainerColor = C.accent.copy(alpha = 0.18f), selectedLabelColor = C.accent,
-        ),
-        border = null,
     )
 }
 

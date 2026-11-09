@@ -67,10 +67,11 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
     val exits = repo.exitsOf(p)
     val tp = exits.firstOrNull { it.exitGroup == "tp" }?.exitPrice
     val sl = exits.firstOrNull { it.exitGroup == "sl" }?.exitPrice
+    var slRemoveAsk by remember { mutableStateOf<(() -> Unit)?>(null) }
 
-    fun act(title: String, detail: String, danger: Boolean, force: Boolean = false, run: suspend () -> Unit) {
+    fun act(title: String, detail: String, danger: Boolean, kind: com.alex.mfppro.data.Confirm = com.alex.mfppro.data.Confirm.Order, run: suspend () -> Unit) {
         val job = Pending(title, detail, danger, run)
-        if (repo.prefs.confirmOrders || force) pending = job
+        if (repo.prefs.needsConfirm(kind)) pending = job
         else scope.launch { busy = true; run(); busy = false }
     }
 
@@ -103,8 +104,8 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                 }
             }
             // Reversing opens a new position, so the night rule blocks it.
-            PillBtn("⇅ Flip", w, enabled = !busy && !repo.prefs.locked()) {
-                act("Reverse ${p.symbol}", "Market ${if (p.isLong) "sell" else "buy"} ${usd(p.size * 2)} to flip to ${if (p.isLong) "short" else "long"}", true) { repo.reverse(p) }
+            PillBtn("⇅ Reverse", w, enabled = !busy && !repo.prefs.locked()) {
+                act("Reverse ${ticker(p.symbol, p.provider)}", "Market ${if (p.isLong) "sell" else "buy"} ${usd(p.size * 2)} to flip to ${if (p.isLong) "short" else "long"}", true) { repo.reverse(p) }
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -117,16 +118,21 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
             }
             PillBtn("Limit close", w, enabled = !busy) { limitOpen = true }
             PillBtn("Close all", w, color = Color.White, fill = C.down, enabled = !busy) {
-                act("Close ${p.symbol}", "Market close all ${usd(p.size)} of ${p.symbol}" + (mark?.let { " · PnL ${fmtUsd(p.pnlAt(it), true)}" } ?: ""), true, force = repo.prefs.confirmCloseAll) { repo.closePosition(p) }
+                act("Close ${p.symbol}", "Market close all ${usd(p.size)} of ${p.symbol}" + (mark?.let { " · PnL ${fmtUsd(p.pnlAt(it), true)}" } ?: ""), true, kind = com.alex.mfppro.data.Confirm.Full) { repo.closePosition(p) }
             }
         }
     }
 
     pending?.let { job ->
         ConfirmDialog(
-            if (job.danger) "Confirm" else "Confirm", job.title, if (job.danger) C.down else C.accent, note = job.detail,
-            confirm = if (job.danger) "Send" else "Confirm", onDismiss = { pending = null },
+            "Confirm", job.title, if (job.danger) C.down else C.accent, note = job.detail,
+            confirm = "Confirm", onDismiss = { pending = null },
         ) { pending = null; scope.launch { busy = true; job.run(); busy = false } }
+    }
+
+    slRemoveAsk?.let { go ->
+        ConfirmDialog("Remove stop loss", "${ticker(p.symbol, p.provider)} SL ${fmtPrice(sl, pm)}", C.down,
+            note = "The position stays open without a stop.", confirm = "Remove", onDismiss = { slRemoveAsk = null }) { slRemoveAsk = null; go() }
     }
 
     if (tpslOpen) {
@@ -185,7 +191,7 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                         slLine?.let { PriceLine(it, C.down, "SL", parts = listOf(if (newSl == null) "SL?" else "SL", pnlTag(it)),
                             drag = LineDrag({ v -> "SL " + pnlTag(v) to C.down }) { v -> set(v, false) }) },
                         breach?.let { PriceLine(it, C.down, "Breach", parts = listOf("Breach", fmtPrice(it, pm))) },
-                        targetPx?.let { PriceLine(it, Color(0xFF22D3EE), "Target", parts = listOf("Target", fmtPrice(it, pm))) },
+                        targetPx?.let { PriceLine(it, C.target, "Target", parts = listOf("Target", fmtPrice(it, pm))) },
                     )
                     CandleChart(
                         candles[com.alex.mfppro.data.candleKey(p.provider, p.coin, "5m")].orEmpty().withLive(mark), lines,
@@ -235,12 +241,18 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
                 // TP beyond the price in profit direction, SL on the loss side; a typo never silently removes an order.
                 val tpBad = tpText.isNotBlank() && (newTp == null || (if (p.isLong) newTp <= px else newTp >= px))
                 val slBad = slText.isNotBlank() && (newSl == null || (if (p.isLong) newSl >= px else newSl <= px))
-                TextButton(enabled = !tpBad && !slBad, onClick = {
+                val save = {
                     tpslOpen = false
                     repo.prefs.tpExecution = tpExec; repo.prefs.slExecution = slExec
                     scope.launch { busy = true; repo.setTpSl(p, newTp, newSl, tpExec = tpExec, slExec = slExec); busy = false }
-                }) {
-                    Text(when { tpBad -> "TP on wrong side"; slBad -> "SL on wrong side"; else -> "Save" }, color = if (tpBad || slBad) C.down else C.accent)
+                    Unit
+                }
+                TextButton(enabled = !tpBad && !slBad, onClick = { if (newSl == null && sl != null) slRemoveAsk = save else save() }) {
+                    Text(when {
+                        tpBad -> "Take profit must be ${if (p.isLong) "above" else "below"} the price"
+                        slBad -> "Stop loss must be ${if (p.isLong) "below" else "above"} the price"
+                        else -> "Save"
+                    }, color = if (tpBad || slBad) C.down else C.accent)
                 }
             },
             dismissButton = { TextButton(onClick = { tpslOpen = false }) { Text("Cancel", color = C.muted) } },
@@ -473,7 +485,7 @@ fun OrderRow(repo: Repo, o: Order, account: String) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(o.symbol, color = C.text, fontSize = 13.sp)
+                Text(ticker(o.symbol, om?.provider ?: ""), color = C.text, fontSize = 13.sp)
                 Spacer(Modifier.width(6.dp))
                 Tag(o.exitGroup?.uppercase() ?: o.type.replace('_', ' '), if (o.side == "buy") C.up else C.down)
                 Spacer(Modifier.width(6.dp))
@@ -488,8 +500,19 @@ fun OrderRow(repo: Repo, o: Order, account: String) {
         }
         // Removing a stop loss leaves the position unprotected: that one asks first.
         var ask by remember { mutableStateOf(false) }
-        Act("Cancel", color = C.down, modifier = Modifier.padding(start = 8.dp)) { if (o.exitGroup == "sl") ask = true else scope.launch { repo.cancelOrder(o) } }
-        if (ask) ConfirmDialog("Remove stop loss", "${o.symbol} SL ${fmtPrice(o.triggerPrice ?: o.limitPrice, om)}", C.down,
+        var askCancel by remember { mutableStateOf(false) }
+        Act("Cancel", color = C.down, modifier = Modifier.padding(start = 8.dp)) {
+            when {
+                o.exitGroup == "sl" -> ask = true
+                repo.prefs.needsConfirm(com.alex.mfppro.data.Confirm.Order) -> askCancel = true
+                else -> scope.launch { repo.cancelOrder(o) }
+            }
+        }
+        if (askCancel) ConfirmDialog("Cancel order", "${ticker(o.symbol, om?.provider ?: "")} ${fmtPrice(o.limitPrice ?: o.triggerPrice, om)}", C.down,
+            confirm = "Cancel order", onDismiss = { askCancel = false }) {
+            askCancel = false; scope.launch { repo.cancelOrder(o) }
+        }
+        if (ask) ConfirmDialog("Remove stop loss", "${ticker(o.symbol, om?.provider ?: "")} SL ${fmtPrice(o.triggerPrice ?: o.limitPrice, om)}", C.down,
             note = "The position stays open without a stop.", confirm = "Remove", onDismiss = { ask = false }) {
             ask = false; scope.launch { repo.cancelOrder(o) }
         }
@@ -520,18 +543,6 @@ private fun PillBtn(label: String, modifier: Modifier, color: Color = C.text, en
                 else Modifier.background(C.panel2).border(1.dp, if (enabled && color != C.text) color.copy(alpha = 0.6f) else C.line, shape))
             .clickable(enabled = enabled, onClick = onClick).wrapContentHeight(Alignment.CenterVertically),
     )
-}
-
-/** Outlined round icon button. */
-@Composable
-private fun RoundBtn(color: Color = C.text, enabled: Boolean = true, glyph: @Composable (Color) -> Unit, onClick: () -> Unit) {
-    val tint = if (enabled) color else C.muted.copy(alpha = 0.6f)
-    androidx.compose.foundation.layout.Box(
-        Modifier.size(30.dp).clip(androidx.compose.foundation.shape.CircleShape)
-            .border(1.dp, if (enabled) color.copy(alpha = 0.6f) else C.line, androidx.compose.foundation.shape.CircleShape)
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) { glyph(tint) }
 }
 
 /** Fallback when the market isn't loaded: 6 significant digits, without binary noise. */

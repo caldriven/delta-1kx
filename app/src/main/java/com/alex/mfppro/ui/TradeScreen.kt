@@ -225,8 +225,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         chartBusy = true
         tradeScope.launch { try { a.run() } finally { chartBusy = false } }
     }
-    fun chartAct(a: ChartAsk) {
-        if (repo.prefs.confirmOrders || repo.prefs.confirmCloseAll) confirmAsk = a else runChart(a)
+    fun chartAct(a: ChartAsk, kind: com.alex.mfppro.data.Confirm = com.alex.mfppro.data.Confirm.Order) {
+        if (repo.prefs.needsConfirm(kind)) confirmAsk = a else runChart(a)
     }
     // A TP or SL dropped from the chart: snapped to the tick, and only on its own side of the price,
     // since a stop through the price would close the position at once.
@@ -234,7 +234,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val px = repo.market(p.marketId)?.let { snapTick(raw, it) } ?: raw
         val now = mark ?: p.entryPrice
         val wrong = if (tp == p.isLong) px <= now else px >= now
-        if (wrong) repo.postMessage(if (tp) "TP must be ${if (p.isLong) "above" else "below"} the price" else "SL must be ${if (p.isLong) "below" else "above"} the price")
+        if (wrong) repo.postMessage(if (tp) "Take profit must be ${if (p.isLong) "above" else "below"} the price" else "Stop loss must be ${if (p.isLong) "below" else "above"} the price")
         else exitAsk = ExitAsk(p, tp, px, tp0, sl0)
     }
     var showOpens by remember { mutableStateOf(repo.prefs.showOpens) }
@@ -325,17 +325,17 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     },
                     onClose = {
                         chartAct(ChartAsk("Market close", "Close " + ticker(p.symbol, p.provider), C.down,
-                            listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(mark?.let(p::pnlAt), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) })
+                            listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(mark?.let(p::pnlAt), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
                     },
                 )),
             tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
                 drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> askExit(p, true, px, tp, sl) },
-                onRemove = { chartAct(ChartAsk("Remove take profit", "${p.symbol} TP ${fmtPrice(it, market)}", C.down,
+                onRemove = { chartAct(ChartAsk("Remove take profit", "${ticker(p.symbol, p.provider)} TP ${fmtPrice(it, market)}", C.down,
                     listOf(ConfirmRow("Stop loss", sl?.let { s -> fmtPrice(s, market) } ?: "none")), "Remove") { repo.setTpSl(p, null, sl, "Remove TP ${p.symbol}") }) }) },
             // Removing a stop always asks: the position is left without protection.
-            sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(p.pnlAt(it), true), tag.ifBlank { null }),
+            sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
                 drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> askExit(p, false, px, tp, sl) },
-                onRemove = { confirmAsk = ChartAsk("Remove stop loss", "${p.symbol} SL ${fmtPrice(it, market)}", C.down,
+                onRemove = { confirmAsk = ChartAsk("Remove stop loss", "${ticker(p.symbol, p.provider)} SL ${fmtPrice(it, market)}", C.down,
                     listOf(ConfirmRow("Position", "stays open without a stop")), "Remove") { repo.setTpSl(p, tp, null, "Remove SL ${p.symbol}") } }) },
             // Where this position takes the account onto each floor, with % away from the last price.
             mark?.takeIf { shows("floors") }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
@@ -598,7 +598,7 @@ private class ChartAsk(val title: String, val headline: String, val color: Color
 
 private class ExitAsk(val p: com.alex.mfppro.data.Position, val tp: Boolean, val price: Double, val tp0: Double?, val sl0: Double?)
 
-private val PASS = Color(0xFF22D3EE)
+private val PASS get() = C.target
 private val OPEN_D get() = C.openD
 private val OPEN_W = Color(0xFF38BDF8)
 private val OPEN_M = Color(0xFFF472B6)
@@ -683,7 +683,7 @@ private fun BookRow(px: Double, sz: Double, maxSz: Double, color: Color, onClick
     }
 }
 
-private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+private val timeFmt = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US).withZone(com.alex.mfppro.data.OSLO)
 
 @Composable
 private fun TradesTape(repo: Repo, market: Market) {
@@ -761,7 +761,7 @@ private fun TradesTape(repo: Repo, market: Market) {
                 Box(Modifier.width(40.dp)) { VenueTag(venue, 14.dp) }
                 Text(fmtPrice(t.price), style = num.copy(fontSize = 12.sp, color = col), modifier = Modifier.weight(1f))
                 Text("$" + fmtCompact(usd), style = num.copy(fontSize = 12.sp, color = C.text, fontWeight = if (big) FontWeight.Bold else FontWeight.Normal), modifier = Modifier.weight(1f))
-                Text(timeFmt.format(Date(t.time)), style = num.copy(fontSize = 11.sp, color = C.muted))
+                Text(timeFmt.format(java.time.Instant.ofEpochMilli(t.time)), style = num.copy(fontSize = 11.sp, color = C.muted))
             }
             Spacer(Modifier.height(1.dp))
         }
@@ -796,7 +796,7 @@ internal fun MarketPicker(repo: Repo, markets: List<Market>, classes: Map<String
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = C.panel) {
         AppInput("", q, { q = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp), placeholder = "Search")
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            for ((k, label) in listOf("24h" to "24h", "4h" to "4h", "vol" to "Vol", "name" to "A–Z")) {
+            for ((k, label) in listOf("24h" to "Day", "4h" to "4h", "vol" to "Vol", "name" to "A–Z")) {
                 Seg(label, sortBy == k, C.accent) { sortBy = k; repo.prefs.pickerSort = k }
             }
             Spacer(Modifier.weight(1f))
@@ -834,56 +834,6 @@ internal fun MarketPicker(repo: Repo, markets: List<Market>, classes: Map<String
                 }
             }
         }
-    }
-}
-
-/**
- * Open positions on the accounts in view (the trading account, or all of them),
- * always visible on Trade: tap to jump the chart to it, ✕ to market-close it.
- */
-@Composable
-private fun OpenPositionsStrip(repo: Repo, scoped: List<com.alex.mfppro.data.AccountState>, multi: Boolean, markets: List<Market>, current: Market, onPickMarket: (String) -> Unit) {
-    val marks by repo.market.marks.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
-    val positions = scoped.flatMap { a -> a.positions.values.map { a to it } }
-    if (positions.isEmpty()) return
-    var ask by remember { mutableStateOf<com.alex.mfppro.data.Position?>(null) }
-    LazyRow(contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(positions, key = { it.second.id }) { (acc, p) ->
-            val pnl = marks[p.feedKey]?.let(p::pnlAt)
-            val here = p.inMarket(current)
-            val side = if (p.isLong) C.up else C.down
-            Row(
-                Modifier.clip(RoundedCornerShape(10.dp)).background(C.panel)
-                    .border(1.dp, if (here) side.copy(alpha = 0.55f) else C.line.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                    .clickable { markets.firstOrNull { p.inMarket(it) }?.let { onPickMarket(it.marketId) } }
-                    .padding(start = 10.dp, end = 2.dp, top = 5.dp, bottom = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.width(3.dp).height(26.dp).clip(RoundedCornerShape(2.dp)).background(side))
-                Spacer(Modifier.width(7.dp))
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(p.symbol, color = C.text, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-                        Text(" ${p.leverage.toInt()}x", color = side, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                        if (multi) Text("  " + accountName(acc).take(12), color = C.muted, fontSize = 10.sp)
-                    }
-                    Text(fmtUsd(net(pnl), true), style = num.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = pnlColor(pnl)))
-                }
-                Text("✕", color = C.muted, fontSize = 13.sp, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable {
-                    if (repo.prefs.confirmOrders) ask = p else scope.launch { repo.closePosition(p) }
-                }.padding(horizontal = 9.dp, vertical = 6.dp))
-            }
-        }
-    }
-    ask?.let { p ->
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { ask = null }, containerColor = C.panel,
-            title = { Text("Close ${p.symbol}", color = C.down) },
-            text = { Text("Market close all ${fmtUsd(p.size * p.entryPrice)} of ${p.symbol}.", color = C.text) },
-            confirmButton = { TextButton(onClick = { ask = null; scope.launch { repo.closePosition(p) } }) { Text("Close", color = C.down) } },
-            dismissButton = { TextButton(onClick = { ask = null }) { Text("Cancel", color = C.muted) } },
-        )
     }
 }
 

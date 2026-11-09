@@ -176,8 +176,8 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         size <= 0 -> "Enter a size"
         size < market.minSize -> "Below minimum size ${fmtSize(market.minSize)} ${market.symbol}"
         usd < market.minNotional -> "Below minimum ${fmtUsd(market.minNotional)}"
-        tp != null && refPx != null && (if (buy) tp <= refPx else tp >= refPx) -> "Take profit is on the wrong side"
-        sl != null && refPx != null && (if (buy) sl >= refPx else sl <= refPx) -> "Stop loss is on the wrong side"
+        tp != null && refPx != null && (if (buy) tp <= refPx else tp >= refPx) -> "Take profit must be ${if (buy) "above" else "below"} the price"
+        sl != null && refPx != null && (if (buy) sl >= refPx else sl <= refPx) -> "Stop loss must be ${if (buy) "below" else "above"} the price"
         else -> null
     }
     val sideCol = if (buy) C.up else C.down
@@ -307,8 +307,8 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         Text("−", color = if (held == null && lev > 1) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("${lev}×", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold))
-                        Text(if (held != null) "position's" else "max ${maxLev}×", color = C.muted, fontSize = 9.sp)
+                        Text("${lev}x", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold))
+                        Text(if (held != null) "position's" else "max ${maxLev}x", color = C.muted, fontSize = 9.sp)
                     }
                     Box(Modifier.width(48.dp).fillMaxHeight().clickable(enabled = held == null && lev < maxLev) { lev = (lev + 1).coerceAtMost(maxLev) }, contentAlignment = Alignment.Center) {
                         Text("+", color = if (held == null && lev < maxLev) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -317,7 +317,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             }
             if (held == null) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(1, 2, 3, 5, 10, 20, 25, 40, 50).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
-                    Seg("${l}×", l == lev, C.accent) { lev = l }
+                    Seg("${l}x", l == lev, C.accent) { lev = l }
                 }
             }
 
@@ -423,7 +423,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     for (f in listOf(0.25, 0.5, 1.0)) {
                         QuickBtn("${(f * 100).toInt()}%", C.text, Modifier.weight(1f)) {
                             if (busy) return@QuickBtn
-                            if (repo.prefs.confirmOrders || (f == 1.0 && repo.prefs.confirmCloseAll)) closeAsk = f
+                            if (repo.prefs.needsConfirm(if (f == 1.0) com.alex.mfppro.data.Confirm.Full else com.alex.mfppro.data.Confirm.Order)) closeAsk = f
                             else { busy = true; scope.launch { val r = repo.closePosition(h, f); busy = false; if (r is TradeResult.Ok && f == 1.0) onDismiss() } }
                         }
                     }
@@ -506,7 +506,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             if (!limit && !stop && !chase && !scaled) quote?.estimatedFillPrice?.let { ConfirmRow("Est. fill", fmtPrice(it, market)) } else null,
             if (!limit && !stop && !chase && !scaled) ConfirmRow("Max slippage", String.format(Locale.US, "%.2f%%", repo.prefs.slippageBps / 100.0)) else null,
             ConfirmRow("Leverage", "${lev}x ${if (isolated) "isolated" else "cross"}"),
-            ConfirmRow("Account", acc?.account?.name ?: ""),
+            ConfirmRow("Account", acc?.let(::accountName) ?: ""),
             if (reduceOnly) ConfirmRow("Reduce only", "yes") else null,
             tp?.let { ConfirmRow("Take profit", fmtPrice(snapPx(it), market), C.up) },
             sl?.let { ConfirmRow("Stop loss", fmtPrice(snapPx(it), market), C.down) },

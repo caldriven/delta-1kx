@@ -165,6 +165,15 @@ class Prefs(ctx: Context) {
         get() = plain.getBoolean("confirm_close_all", true)
         set(v) = plain.edit().putBoolean("confirm_close_all", v).apply()
 
+    /**
+     * The one confirm rule, as Settings words it: "Confirm orders" covers new orders, partial closes,
+     * reversals and cancels; "Confirm full closes" covers closing a whole position or everything.
+     */
+    fun needsConfirm(kind: Confirm) = when (kind) {
+        Confirm.Order -> confirmOrders
+        Confirm.Full -> confirmCloseAll
+    }
+
     var showSessions: Boolean
         get() = plain.getBoolean("show_sessions", true)
         set(v) = plain.edit().putBoolean("show_sessions", v).apply()
@@ -369,3 +378,6 @@ class Prefs(ctx: Context) {
         get() = plain.getBoolean("chip_pos", true)
         set(v) = plain.edit().putBoolean("chip_pos", v).apply()
 }
+
+/** What a confirm guards: an order-like action, or a full close (see [Prefs.needsConfirm]). */
+enum class Confirm { Order, Full }

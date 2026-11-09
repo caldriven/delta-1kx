@@ -122,22 +122,6 @@ fun AppInput(
     }
 }
 
-/** Underlined text tabs. */
-@Composable
-fun AppTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
-    Row(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        labels.forEachIndexed { i, t ->
-            val on = i == selected
-            Column(Modifier.weight(1f).clickable { onSelect(i) }, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(t, color = if (on) C.text else C.muted, fontSize = 13.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 9.dp))
-                Box(Modifier.width(28.dp).height(2.dp).clip(CircleShape).background(if (on) C.accent else Color.Transparent))
-            }
-        }
-    }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(C.line))
-}
-
 /**
  * [mode] (0/1) marks a button that flips between two views: while it's the open tab its label
  * reads as a switch ([modes], e.g. Chart / Trade) with the active side lit in that view's colour.
@@ -243,51 +227,6 @@ fun BottomBar(
         }
     }
 }
-
-/** Share-of-position glyph: a ring with the closed slice filled, so 25% / 50% / 100% read at a glance. */
-@Composable
-fun PieGlyph(fraction: Float, color: Color, modifier: Modifier = Modifier.size(16.dp)) {
-    androidx.compose.foundation.Canvas(modifier) {
-        val stroke = 1.5.dp.toPx()
-        val r = size.minDimension / 2 - stroke / 2
-        val tl = androidx.compose.ui.geometry.Offset(center.x - r, center.y - r)
-        val sz = androidx.compose.ui.geometry.Size(r * 2, r * 2)
-        drawCircle(color, r, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
-        drawArc(color, -90f, 360f * fraction, true, tl, sz)
-    }
-}
-
-/**
- * Icon-over-label action tile. [glyph] draws the icon so callers can pass
- * a Material icon or a custom drawing (see [PieGlyph]).
- */
-@Composable
-fun IconAct(
-    label: String,
-    modifier: Modifier = Modifier,
-    color: Color = C.text,
-    enabled: Boolean = true,
-    fill: Color? = null,
-    glyph: @Composable (Color) -> Unit,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(9.dp)
-    val tint = if (enabled) color else C.muted.copy(alpha = 0.6f)
-    Column(
-        modifier.height(46.dp).clip(shape)
-            .then(if (fill != null) Modifier.background(if (enabled) fill else fill.copy(alpha = 0.3f)) else Modifier.background(C.panel2).border(1.dp, C.line, shape))
-            .clickable(enabled = enabled, onClick = onClick).padding(top = 6.dp, bottom = 5.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
-    ) {
-        glyph(tint)
-        Text(label, color = tint, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-    }
-}
-
-/** Material icon sized for [IconAct]. */
-@Composable
-fun ActIcon(icon: ImageVector, tint: Color) = Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
 
 /** The venue's own logo, small; falls back to a muted dot when there's no logo. */
 @Composable

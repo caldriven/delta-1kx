@@ -197,7 +197,9 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
             " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
             (if (reduceOnly) ", reduce only" else "") + " on ${accountName(acc)}." +
             (if (!reduceOnly && breachMove != null) String.format(Locale.US, "\nA %.2f%% move against it reaches your drawdown floor.", breachMove) else "")
-        if (repo.prefs.confirmOrders) ask = Triple("$word ${market.symbol} ≈ ${fmtUsd(usd)}", detail, run)
+        // Reducing by the whole position is a full close and follows that setting.
+        val full = reduceOnly && held != null && size >= held.size * 0.999
+        if (repo.prefs.needsConfirm(if (full) com.alex.mfppro.data.Confirm.Full else com.alex.mfppro.data.Confirm.Order)) ask = Triple("$word ${market.symbol} ≈ ${fmtUsd(usd)}", detail, run)
         else scope.launch { busy = true; run(); busy = false }
     }
 

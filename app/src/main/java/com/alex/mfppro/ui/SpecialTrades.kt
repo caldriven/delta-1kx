@@ -531,7 +531,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
             Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
                 Text("Leverage", color = C.muted, fontSize = 12.sp, modifier = Modifier.width(60.dp))
                 listOf(1, 2, 3, 5, 10, 20).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
-                    Seg("${l}×", l == lev, C.accent) { lev = l }; Spacer(Modifier.width(4.dp))
+                    Seg("${l}x", l == lev, C.accent) { lev = l }; Spacer(Modifier.width(4.dp))
                 }
             }
 
@@ -610,7 +610,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
             ConfirmRow("Hedge", if (beta && stat != null) String.format(Locale.US, "β %.2f", hedge) else "Dollar neutral"),
             stat?.let { ConfirmRow("Spread z", fmtZ(it.z)) },
             ConfirmRow("Leverage", "${lev}x ${if (isolated) "isolated" else "cross"}"),
-            ConfirmRow("Account", acc?.account?.name ?: ""),
+            ConfirmRow("Account", acc?.let(::accountName) ?: ""),
         ),
         confirm = "Send both", onDismiss = { confirm = false },
     ) { confirm = false; submit() }
