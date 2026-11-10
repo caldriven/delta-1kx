@@ -97,7 +97,8 @@ fun Watchlist(repo: Repo, selectedId: String?, onSelect: (String) -> Unit, modif
     LaunchedEffect(markets.size) {
         if (markets.isEmpty()) return@LaunchedEffect
         repo.loadOverviewExtras()
-        while (true) { repo.load1h(); repo.load4h(); delay(60_000) }
+        // Not while the window is minimised: nobody is looking, and it's a hundred-odd requests a round.
+        while (true) { if (repo.visible.value) { repo.load1h(); repo.load4h() }; delay(60_000) }
     }
     // Re-sort every few seconds, not on every tick, so rows don't jump about under the mouse.
     var tick by remember { mutableStateOf(0) }

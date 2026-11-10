@@ -16,8 +16,11 @@ import com.alex.mfppro.data.Killzones
 import java.time.DayOfWeek
 import java.time.Instant
 
-/** Which session overlays to draw on intraday charts. [markets]: the market-hours strip along the top. */
-data class SessionOpts(val markets: Boolean, val killzones: Boolean)
+/**
+ * Which session overlays to draw on intraday charts: [markets] the market-hours strip along the top,
+ * [killzones] the killzone strip along the bottom, [weekend] the grey weekend band.
+ */
+data class SessionOpts(val markets: Boolean, val killzones: Boolean, val weekend: Boolean = markets)
 
 private val WINDOWS = Killzones.KILLZONES + Killzones.MARKETS
 private val KZ_COUNT = Killzones.KILLZONES.size
@@ -60,7 +63,7 @@ internal fun DrawScope.sessions(slice: List<Candle>, xOf: (Int) -> Float, barW: 
     var prevWeekend = false
     for (i in times.indices) {
         val x = xOf(i) - barW / 2
-        val wk = weekend(times[i])
+        val wk = opts.weekend && weekend(times[i])
         if (wk) {
             drawRect(Color(0xFF808080).copy(alpha = 0.06f), Offset(x, 0f), Size(barW, chartH))
             if (!prevWeekend) {

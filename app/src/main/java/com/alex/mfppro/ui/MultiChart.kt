@@ -115,7 +115,7 @@ fun MultiChart(repo: Repo, onOpenMarket: (String) -> Unit) {
                         }
                         CandleChart(candles[candleKey(m.provider, m.coin, interval)].orEmpty().withLive(mark), emptyList(),
                             Modifier.weight(1f).fillMaxWidth().padding(top = 2.dp), compactAxis = true,
-                            sessions = if (repo.prefs.showSessions) SessionOpts(false, repo.prefs.killzones) else null)
+                            sessions = if (repo.prefs.killzones || repo.prefs.showSessions) SessionOpts(repo.prefs.showSessions, repo.prefs.killzones) else null)
                     }
                 }
             }

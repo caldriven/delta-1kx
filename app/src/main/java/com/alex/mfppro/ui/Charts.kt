@@ -16,6 +16,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.FitScreen
@@ -85,13 +86,13 @@ class PosBox(val pnl: String, val tp: LineDrag, val sl: LineDrag, val onReverse:
 data class FillMark(val time: Long, val buy: Boolean, val price: Double)
 
 /**
- * Liquidation overlay, worked out off the main thread from the chart's bars: untouched pools (heat at
- * the right edge), the sweep target on each side, optional leverage bands (index-aligned with the
- * bars), and how compressed the range is.
+ * Liquidation overlay, worked out off the main thread from the chart's bars: liquidation pivots from
+ * the last compressed range, optional untouched pools (heat at the right edge), optional leverage
+ * bands (index-aligned with the bars), and how compressed the market is now.
  */
 class LiqOverlay(
     val pools: List<com.alex.mfppro.data.Liquidity.Pool>,
-    val magnets: List<com.alex.mfppro.data.Liquidity.Magnet>,
+    val pivots: List<com.alex.mfppro.data.Liquidity.Pivots>,
     val bands: List<com.alex.mfppro.data.Liquidity.Band>,
     val compression: Double?,
 )
@@ -155,6 +156,8 @@ fun CandleChart(
     var dragging by remember { mutableStateOf<Pair<LineDrag, Float>?>(null) }
     // Crosshair: long-press to show, drag to move, tap to clear.
     var cross by remember { mutableStateOf<Offset?>(null) }
+    // The card a tapped liquidation level opens: what it is and how to trade around it.
+    var info by remember { mutableStateOf<List<com.alex.mfppro.data.LiqGuide.Line>?>(null) }
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     // The crosshair button: each press toggles it, starting at the chart centre.
     val canvasSize = remember { FloatArray(2) }
@@ -274,7 +277,8 @@ fun CandleChart(
                                 cross = Offset(it.x, (it.y - 60.dp.toPx()).coerceAtLeast(0f))
                             }
                         },
-                        onTap = { cross = null },
+                        // The tap callback comes after the double-tap wait, so it must not close a card a label just opened.
+                        onTap = { pos -> cross = null; if (hits.none { it.rect.inflate(6.dp.toPx()).contains(pos) }) info = null },
                     )
                 }
         ) {
@@ -442,6 +446,8 @@ fun CandleChart(
             // Text labels at the right edge of the plot (opens, sPOC) and price tags on the axis are
             // collected and laid out at the end so neither overlaps.
             val sideLabels = ArrayList<Pair<Float, androidx.compose.ui.text.TextLayoutResult>>()
+            // Labels that open a card when tapped (liquidation levels), by identity of their layout.
+            val sideTaps = java.util.IdentityHashMap<androidx.compose.ui.text.TextLayoutResult, () -> Unit>()
             val axisTags = ArrayList<AxisTag>()
             for (l in lines.filter { it.ref }) {
                 if (l.price !in lo..hi) continue
@@ -515,17 +521,89 @@ fun CandleChart(
                 drawLine(POC_C.copy(alpha = 0.6f), Offset(x0, y(pp)), Offset(chartW, y(pp)), 1f, pathEffect = dot)
                 sideLabels += y(pp) to tm.measure("nPOC", axisStyle.copy(color = POC_C.copy(alpha = 0.85f), fontSize = 9.sp))
             }
-            // Sweep targets: the pocket of liquidations price is most likely to run to on each side.
+            // Liquidation pivots. Each source (compressed range, long flush, pump) leaves fixed levels, drawn as
+            // the stretches in which they held: |----| ends where a candle closed through, a new |---- starts at a
+            // retest. Dots are hits; a level holding now runs to the right edge with its hit count.
             val edgeNotes = ArrayList<Pair<Boolean, androidx.compose.ui.text.TextLayoutResult>>()
-            liq?.magnets?.forEach { mg ->
-                val col = if (mg.longs) C.down else C.up
-                val txt = (if (mg.longs) "▼ long liqs " else "▲ short liqs ") + fmtPct(mg.distPct)
-                val layout = tm.measure(txt, axisStyle.copy(color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold))
-                if (mg.price in lo..hi) {
-                    val my = y(mg.price)
-                    drawLine(col.copy(alpha = 0.85f), Offset(chartW * 0.55f, my), Offset(chartW, my), 1.2f, pathEffect = dash)
-                    sideLabels += my to layout
-                } else edgeNotes += (mg.price > hi) to layout
+            fun xAtTime(t: Long): Float {
+                if (slice.isEmpty() || t < slice.first().openTime) return 0f
+                val i = slice.indexOfFirst { it.openTime >= t }.let { if (it < 0) slice.size else it }
+                return chartW - (slice.size - i + gap) * barW
+            }
+            val px0 = candles.last().c
+            val now0 = System.currentTimeMillis()
+            val atrP = com.alex.mfppro.data.Liquidity.atrPct(candles)
+            fun ago(t: Long): String { val mins = (now0 - t) / 60_000; return when { mins < 60 -> "${mins}m"; mins < 1440 -> "${mins / 60}h"; else -> "${mins / 1440}d" } }
+            val pivots = liq?.pivots.orEmpty()
+            val finished = pivots.filter { !it.forming }.sortedBy { it.end }
+            val newest = finished.lastOrNull()
+            val offscreen = ArrayList<Pair<com.alex.mfppro.data.Liquidity.PivotLevel, com.alex.mfppro.data.Liquidity.Pivots>>()
+            val cap = 4.dp.toPx()
+            for (pv in pivots) {
+                val rank = finished.size - 1 - finished.indexOf(pv)
+                val fade = if (pv.forming) 1f else (1f - 0.25f * rank).coerceAtLeast(0.4f)
+                val bx0 = xAtTime(pv.start)
+                val bx1 = (xAtTime(pv.end) + barW).coerceAtMost(chartW)
+                if (bx1 > 0f && bx0 < chartW && pv.hi >= lo && pv.lo <= hi) when (pv.origin) {
+                    com.alex.mfppro.data.Liquidity.Origin.RANGE -> {
+                        val top = y(pv.hi); val bot = y(pv.lo)
+                        drawRect(C.accent.copy(alpha = 0.06f * fade), Offset(bx0, top), Size(bx1 - bx0, bot - top))
+                        drawRect(C.accent.copy(alpha = 0.35f * fade), Offset(bx0, top), Size(bx1 - bx0, bot - top), style = Stroke(1f, pathEffect = if (pv.forming) dash else null))
+                    }
+                    else -> {
+                        val down = pv.origin == com.alex.mfppro.data.Liquidity.Origin.FLUSH
+                        val col = if (down) C.down else C.up
+                        val t = tm.measure(if (down) "\u25BC flush" else "\u25B2 pump", axisStyle.copy(color = col.copy(alpha = 0.6f + 0.4f * fade), fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                        val ty = if (down) y(pv.lo) + 3.dp.toPx() else y(pv.hi) - t.size.height - 3.dp.toPx()
+                        drawText(t, topLeft = Offset(bx0, ty))
+                    }
+                }
+                if (pv.forming) continue
+                if (pv == newest && pv.anchor in lo..hi) {
+                    drawLine(C.text.copy(alpha = 0.45f), Offset(bx0, y(pv.anchor)), Offset(chartW, y(pv.anchor)), 1f, pathEffect = dash)
+                    sideLabels += y(pv.anchor) to tm.measure(pv.origin.short + " avg", axisStyle.copy(color = C.text.copy(alpha = 0.75f), fontSize = 9.sp))
+                }
+                for (l in pv.levels) {
+                    if (l.hidden) continue
+                    if (l.price !in lo..hi) { if (l.active) offscreen += l to pv; continue }
+                    val col = liqTierColor(l.lev)
+                    val ly = y(l.price)
+                    for (sg in l.segments) {
+                        val sx = if (sg.start <= pv.end) bx1 else xAtTime(sg.start) + barW / 2
+                        val ex = sg.end?.let { xAtTime(it) + barW / 2 } ?: chartW
+                        if (ex <= 0f || sx >= chartW || ex <= sx) continue
+                        val live = sg.end == null
+                        if (!live && pv != newest) continue
+                        val hot = live && (sg.touches.size >= 2 || l.stacked > 1)
+                        val a = (if (live) 0.9f else 0.4f) * fade
+                        if (hot) drawRect(col.copy(alpha = 0.1f), Offset(sx.coerceAtLeast(0f), ly - 3.dp.toPx()), Size(chartW - sx.coerceAtLeast(0f), 6.dp.toPx()))
+                        drawLine(col.copy(alpha = a), Offset(sx.coerceAtLeast(0f), ly), Offset(ex.coerceAtMost(chartW), ly),
+                            if (hot) 2.dp.toPx() else if (live) 1.4f else 1f, pathEffect = if (live) null else dash)
+                        if (sg.start > pv.end && sx in 0f..chartW) drawLine(col.copy(alpha = a), Offset(sx, ly - cap), Offset(sx, ly + cap), 1.5f)
+                        if (!live && ex in 0f..chartW) drawLine(col.copy(alpha = a), Offset(ex, ly - cap), Offset(ex, ly + cap), 1.5f)
+                        for (t in sg.touches) {
+                            val tx = xAtTime(t) + barW / 2
+                            if (tx in 0f..chartW) drawCircle(col.copy(alpha = a), 2.2.dp.toPx(), Offset(tx, ly))
+                        }
+                    }
+                    if (l.active) {
+                        val txt = "${l.lev}x ${if (l.longs) "longs" else "shorts"}" + (if (l.hits > 0) " \u00D7${l.hits}" else "") +
+                            (if (l.stacked > 1) " \u00B7 ${l.stacked} stacked" else "") + (if (pv == newest) "" else " \u00B7 ${pv.origin.short} ${ago(pv.end)}")
+                        val lay = tm.measure("$txt \u24D8", axisStyle.copy(color = col.copy(alpha = 0.55f + 0.45f * fade), fontSize = 9.sp,
+                            fontWeight = if (l.hits >= 2 || l.stacked > 1 || pv == newest) FontWeight.Bold else FontWeight.Normal))
+                        sideLabels += ly to lay
+                        sideTaps[lay] = { info = com.alex.mfppro.data.LiqGuide.explain(l, pv, px0, atrP, System.currentTimeMillis()) { fmtPrice(it) } }
+                    }
+                }
+            }
+            for (above in listOf(true, false)) {
+                offscreen.filter { (l, _) -> (l.price > px0) == above }.minByOrNull { (l, _) -> abs(l.price - px0) }?.let { (l, pv) ->
+                    val lay = tm.measure((if (above) "\u25B2 " else "\u25BC ") + "${l.lev}x ${if (l.longs) "longs" else "shorts"} liq " +
+                        fmtPct((l.price / px0 - 1) * 100) + (if (l.hits > 0) " \u00D7${l.hits}" else "") + (if (pv == newest) "" else " \u00B7 ${pv.origin.short} ${ago(pv.end)}") + " \u24D8",
+                        axisStyle.copy(color = liqTierColor(l.lev), fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                    edgeNotes += above to lay
+                    sideTaps[lay] = { info = com.alex.mfppro.data.LiqGuide.explain(l, pv, px0, atrP, System.currentTimeMillis()) { fmtPrice(it) } }
+                }
             }
 
             // Ghost line under the finger while dragging a line, plus a Cancel target.
@@ -577,20 +655,23 @@ fun CandleChart(
             for ((yy, t) in sideLabels.sortedBy { it.first }) {
                 val top = maxOf(yy - t.size.height - 1.dp.toPx(), nextTop)
                 drawText(t, topLeft = Offset(chartW - t.size.width - 4.dp.toPx(), top))
+                sideTaps[t]?.let { tap -> hits += Hit(Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + t.size.height).inflate(4.dp.toPx()), tap = tap) }
                 nextTop = top + t.size.height
             }
             var noteTop = 4.dp.toPx()
-            var noteBottom = chartH - 4.dp.toPx()
+            // Above the killzone strip and its labels along the bottom.
+            var noteBottom = chartH - (if (sessions?.killzones == true) 18.dp.toPx() else 4.dp.toPx())
             for ((above, t) in edgeNotes) {
                 val ty = if (above) noteTop else noteBottom - t.size.height
                 val tx = chartW - t.size.width - 6.dp.toPx()
                 drawRoundRect(C.bg.copy(alpha = 0.85f), Offset(tx - 3.dp.toPx(), ty - 1f), Size(t.size.width + 6.dp.toPx(), t.size.height + 2f), androidx.compose.ui.geometry.CornerRadius(4f, 4f))
                 drawText(t, topLeft = Offset(tx, ty))
+                sideTaps[t]?.let { tap -> hits += Hit(Rect(tx - 3.dp.toPx(), ty - 2f, chartW, ty + t.size.height + 2f).inflate(3.dp.toPx()), tap = tap) }
                 if (above) noteTop += t.size.height + 3.dp.toPx() else noteBottom -= t.size.height + 3.dp.toPx()
             }
-            // A coiled range with pools close on both sides: when a stop run tends to come.
-            liq?.compression?.takeIf { it < 0.65 }?.let { comp ->
-                val t = tm.measure(String.format(java.util.Locale.US, "Compressed · ATR %.2f× · sweep risk", comp), axisStyle.copy(color = C.accent, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+            // A coil building now: its liquidation levels get fixed when it breaks.
+            liq?.compression?.takeIf { it < 0.7 && liq.pivots.any { p -> p.forming } }?.let { comp ->
+                val t = tm.measure(String.format(java.util.Locale.US, "Compressing \u00B7 ATR %.2f\u00D7 \u00B7 new liq pivots on the break", comp), axisStyle.copy(color = C.accent, fontSize = 9.sp, fontWeight = FontWeight.Bold))
                 val cx = chartW / 2 - t.size.width / 2
                 drawRoundRect(C.accent.copy(alpha = 0.14f), Offset(cx - 5.dp.toPx(), 3.dp.toPx()), Size(t.size.width + 10.dp.toPx(), t.size.height + 4.dp.toPx()), androidx.compose.ui.geometry.CornerRadius(6f, 6f))
                 drawText(t, topLeft = Offset(cx, 5.dp.toPx()))
@@ -639,6 +720,30 @@ fun CandleChart(
             }
         }
         overlay()
+        // A tapped level's card; tap it (or the chart) to close.
+        info?.let { lines ->
+            androidx.compose.foundation.layout.Column(
+                Modifier.align(Alignment.TopStart).padding(6.dp).widthIn(max = 300.dp)
+                    .clip(RoundedCornerShape(10.dp)).background(C.bg.copy(alpha = 0.96f))
+                    .border(1.dp, C.line, RoundedCornerShape(10.dp)).clickable { info = null }.padding(10.dp),
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(5.dp),
+            ) {
+                for (ln in lines) Text(
+                    ln.text,
+                    color = when (ln.tone) {
+                        com.alex.mfppro.data.LiqGuide.Tone.TITLE, com.alex.mfppro.data.LiqGuide.Tone.TEXT -> C.text
+                        com.alex.mfppro.data.LiqGuide.Tone.MUTED -> C.muted
+                        com.alex.mfppro.data.LiqGuide.Tone.UP -> C.up
+                        com.alex.mfppro.data.LiqGuide.Tone.DOWN -> C.down
+                        com.alex.mfppro.data.LiqGuide.Tone.ACCENT -> C.accent
+                    },
+                    fontSize = if (ln.tone == com.alex.mfppro.data.LiqGuide.Tone.TITLE) 13.sp else 11.sp,
+                    fontWeight = if (ln.tone == com.alex.mfppro.data.LiqGuide.Tone.TITLE) FontWeight.Bold else FontWeight.Normal,
+                    lineHeight = 15.sp,
+                )
+                Text("Tap to close", color = C.muted, fontSize = 10.sp)
+            }
+        }
         // Fit to screen: drops the manual price range.
         if (manual != null) androidx.compose.foundation.layout.Row(
             Modifier.align(Alignment.BottomEnd).padding(end = 6.dp, bottom = 4.dp)
@@ -673,12 +778,13 @@ private val VA_C = Color(0xFF9AA8BC)
 private fun DrawScope.volumeProfile(all: List<Candle>, slice: List<Candle>, since: Long?, chartW: Float, y: (Double) -> Float) {
     val pr = com.alex.mfppro.data.VolumeProfile.of(if (since != null) all.filter { it.openTime >= since } else slice, 48) ?: return
     val va = pr.valueArea
-    val maxW = chartW * 0.24f
+    // Kept light and narrow: on a phone the profile shares the left edge with the position tags.
+    val maxW = chartW * 0.18f
     for (i in 0 until pr.bins) {
         val top = y(pr.lo + pr.step * (i + 1))
         val bot = y(pr.lo + pr.step * i)
         val h = max(1f, bot - top - 1f)
-        val a = when (i) { pr.poc -> 0.6f; in va -> 0.32f; else -> 0.13f }
+        val a = when (i) { pr.poc -> 0.42f; in va -> 0.2f; else -> 0.08f }
         val wB = (pr.buy[i] / pr.max * maxW).toFloat()
         val wS = (pr.sell[i] / pr.max * maxW).toFloat()
         drawRect(C.up.copy(alpha = a), Offset(0f, top + 0.5f), Size(wB, h))

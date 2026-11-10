@@ -93,10 +93,17 @@ fun PositionActions(repo: Repo, p: Position, mark: Double?) {
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             val w = Modifier.weight(1f)
             PillBtn("TP / SL", w, color = C.accent, enabled = !busy) { tpslOpen = true }
-            // A stop at entry only makes sense while the position is in profit.
+            // In profit: a stop at entry. Underwater: a stop there is impossible, so with the setting on it
+            // becomes a reduce-only limit at entry that closes the position if price comes back.
             val inProfit = mark != null && p.pnlAt(mark) > 0
-            PillBtn("Breakeven", w, enabled = !busy && inProfit) {
-                act("Breakeven ${p.symbol}", "Move stop loss to entry ${fmtPrice(p.entryPrice, pm)}", false) { repo.breakeven(p) }
+            val inLoss = mark != null && p.pnlAt(mark) < 0
+            val beLimit = repo.prefs.breakevenLimit && inLoss
+            PillBtn(if (beLimit) "BE limit" else "Breakeven", w, enabled = !busy && (inProfit || beLimit)) {
+                if (beLimit) act("Breakeven limit ${p.symbol}",
+                    "Reduce-only limit ${if (p.isLong) "sell" else "buy"} of ${usd(p.size)} at entry ${fmtPrice(p.entryPrice, pm)}. " +
+                        "It rests on the book and closes the ${if (p.isLong) "long" else "short"} if price comes back to entry. " +
+                        "It shows as the position's TP.", false) { repo.breakevenLimit(p) }
+                else act("Breakeven ${p.symbol}", "Move stop loss to entry ${fmtPrice(p.entryPrice, pm)}", false) { repo.breakeven(p) }
             }
             PillBtn("Guard SL", w, enabled = !busy && guardSl != null) {
                 guardSl?.let { px ->
@@ -548,3 +555,61 @@ private fun PillBtn(label: String, modifier: Modifier, color: Color = C.text, en
 
 /** Fallback when the market isn't loaded: 6 significant digits, without binary noise. */
 private fun roundTick(v: Double): Double = java.math.BigDecimal.valueOf(v).round(java.math.MathContext(6)).toDouble()
+
+/**
+ * The quick-trade screen's exits, one row: a post-only limit close, a chase close and a market close.
+ * The full set of position tools lives on the Dashboard.
+ *
+ * Post-only close: a reduce-only limit for the whole position at the touch on its own side (the best ask
+ * when closing a long, the best bid when closing a short), [Prefs.closeMarginBps] further out. Sitting a
+ * little behind the touch, it rests on the book as a maker order instead of being refused when the
+ * price ticks while it travels.
+ */
+@Composable
+fun QuickClose(repo: Repo, p: Position, mark: Double?) {
+    val scope = rememberCoroutineScope()
+    val pm = remember(p.marketId) { repo.market(p.marketId) }
+    var pending by remember { mutableStateOf<Pending?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    fun act(title: String, detail: String, danger: Boolean, kind: com.alex.mfppro.data.Confirm = com.alex.mfppro.data.Confirm.Order, run: suspend () -> Unit) {
+        val job = Pending(title, detail, danger, run)
+        if (repo.prefs.needsConfirm(kind)) pending = job else scope.launch { busy = true; run(); busy = false }
+    }
+    val book = repo.market.books.value[p.feedKey]
+    val margin = repo.prefs.closeMarginBps / 10_000.0
+    // Closing a long sells: rest at or above the best ask. Closing a short buys: at or below the best bid.
+    val touch = if (p.isLong) book?.asks?.firstOrNull()?.px ?: mark else book?.bids?.firstOrNull()?.px ?: mark
+    val limitPx = touch?.let { t ->
+        val raw = if (p.isLong) t * (1 + margin) else t * (1 - margin)
+        // Round away from the book so tick rounding never pulls it across.
+        val tick = pm?.tickSize?.takeIf { it > 0 }
+        if (tick == null) raw else (if (p.isLong) kotlin.math.ceil(raw / tick) else kotlin.math.floor(raw / tick)) * tick
+    }
+    val bpsTxt = String.format(java.util.Locale.US, "%.0f bp", repo.prefs.closeMarginBps)
+    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(top = 2.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        val w = Modifier.weight(1f)
+        PillBtn("Post-only close", w, color = C.accent, enabled = !busy && limitPx != null) {
+            val px = limitPx ?: return@PillBtn
+            act("Post-only close ${ticker(p.symbol, p.provider)}",
+                "Reduce-only limit ${if (p.isLong) "sell" else "buy"} of ${fmtUsd(p.size * px)} at ${fmtPrice(px, pm)}: the best ${if (p.isLong) "ask" else "bid"} + $bpsTxt. " +
+                    "It rests on the book as a maker order" + (mark?.let { " · PnL at that price ${fmtUsd(net(p.pnlAt(px)), true)}" } ?: "") + ".", false) {
+                repo.closePosition(p, 1.0, limitPrice = px, postOnly = true)
+            }
+        }
+        PillBtn("Chase close", w, enabled = !busy) {
+            act("Chase close ${ticker(p.symbol, p.provider)}",
+                "Reduce-only limit that MFP keeps on the best ${if (p.isLong) "ask" else "bid"} until the whole position is closed.", false) {
+                repo.chaseClose(p, 1.0, 0.0, null)
+            }
+        }
+        PillBtn("Market close", w, color = Color.White, fill = C.down, enabled = !busy) {
+            act("Close ${ticker(p.symbol, p.provider)}", "Market close all ${fmtUsd(p.size * (mark ?: p.entryPrice))} of ${ticker(p.symbol, p.provider)}" +
+                (mark?.let { " · PnL ${fmtUsd(net(p.pnlAt(it)), true)}" } ?: ""), true, kind = com.alex.mfppro.data.Confirm.Full) { repo.closePosition(p) }
+        }
+    }
+    pending?.let { job ->
+        ConfirmDialog("Confirm", job.title, if (job.danger) C.down else C.accent, note = job.detail, confirm = "Confirm", onDismiss = { pending = null }) {
+            pending = null; scope.launch { busy = true; job.run(); busy = false }
+        }
+    }
+}

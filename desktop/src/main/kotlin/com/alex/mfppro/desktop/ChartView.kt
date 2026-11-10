@@ -1,6 +1,13 @@
 package com.alex.mfppro.desktop
 
 import androidx.compose.foundation.Canvas
+import com.alex.mfppro.data.LiqGuide
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -66,7 +73,7 @@ private class Calc(
     val base: DoubleArray?,
     val bands: List<Liquidity.Band>,
     val pools: List<Liquidity.Pool>,
-    val magnets: List<Liquidity.Magnet>,
+    val pivots: List<Liquidity.Pivots>,
     val compression: Double?,
     val npocs: List<Pair<Long, Double>>,
     val levels: List<Killzones.Level>,
@@ -75,13 +82,13 @@ private class Calc(
 private fun calc(bars: List<Candle>, days: List<Candle>, ind: Ind): Calc {
     val s = ind.liqSettings
     val base = if (ind.liqBands && bars.isNotEmpty()) Liquidity.base(bars, s) else null
-    val pools = if ((ind.liqPools || ind.liqMagnets) && bars.size > 20) Liquidity.pools(bars, s) else emptyList()
+    val pools = if (ind.liqPools && bars.size > 20) Liquidity.pools(bars, s) else emptyList()
     val last = bars.lastOrNull()?.c ?: 0.0
     return Calc(
         base = base,
         bands = if (base != null) Liquidity.bands(base, s) else emptyList(),
         pools = pools,
-        magnets = if (ind.liqMagnets) Liquidity.magnets(pools, last, Liquidity.atrPct(bars)) else emptyList(),
+        pivots = if (ind.liqPivots) Liquidity.pivots(bars, s, keepRanges = ind.liqHistory, keepEvents = ind.liqHistory, events = ind.liqEvents) else emptyList(),
         compression = Liquidity.compression(bars),
         npocs = if (ind.vp && ind.nakedPocs) VolumeProfile.nakedPocs(bars) else emptyList(),
         levels = if (ind.opens) Killzones.levels(bars, days).filter {
@@ -123,6 +130,10 @@ fun ChartView(
     var hover by remember { mutableStateOf<Offset?>(null) }
     var drag by remember { mutableStateOf<Pair<Int, Offset>?>(null) } // mode (1 pan, 2 axis), last position
     var lastClick by remember { mutableLongStateOf(0L) }
+    var pressAt by remember { mutableStateOf<Offset?>(null) }
+    // A clicked liquidation level's card, and where each clickable label was drawn last frame.
+    var info by remember { mutableStateOf<List<LiqGuide.Line>?>(null) }
+    val tagHits = remember { ArrayList<Pair<androidx.compose.ui.geometry.Rect, () -> List<LiqGuide.Line>>>() }
     val geom = remember { DoubleArray(4) } // hi, lo, plotH, plotW
     val kzCache = remember { HashMap<Long, FloatArray>() }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -154,9 +165,17 @@ fun ChartView(
                     val t = System.currentTimeMillis()
                     if (t - lastClick < 320) { count = if (compact) 90f else 140f; shift = -6f; manual = null; drag = null; lastClick = 0; return@onPointerEvent }
                     lastClick = t
+                    pressAt = p
                     drag = (if (p.x > geom[3]) 2 else 1) to p
                 }
-                .onPointerEvent(PointerEventType.Release) { drag = null }
+                .onPointerEvent(PointerEventType.Release) { e ->
+                    drag = null
+                    // A click (not a drag): a level's label opens its card, anywhere else closes it.
+                    val p = e.changes.first().position
+                    val from = pressAt
+                    pressAt = null
+                    if (from != null && (p - from).getDistance() < 5f) info = tagHits.firstOrNull { it.first.contains(p) }?.second?.invoke()
+                }
                 .onPointerEvent(PointerEventType.Move) { e ->
                     val p = e.changes.first().position
                     hover = p
@@ -180,6 +199,7 @@ fun ChartView(
                 }
                 .onPointerEvent(PointerEventType.Exit) { hover = null; drag = null },
         ) {
+            tagHits.clear()
             if (bars.isEmpty()) return@Canvas
             val px = { v: Float -> v.dp.toPx() }
             val timeH = px(18f)
@@ -242,7 +262,7 @@ fun ChartView(
             }
 
             val sideTags = ArrayList<SideTag>()   // right-edge labels inside the plot
-            val edgeTags = ArrayList<Triple<Boolean, String, Color>>() // above?, text, colour: levels off screen
+            val edgeTags = ArrayList<EdgeTag>() // levels off screen, pinned to the edge they lie beyond
             val axisTags = ArrayList<AxisTag>()   // filled tags on the price axis
 
             clipRect(0f, 0f, plotW, plotH) {
@@ -394,15 +414,92 @@ fun ChartView(
                     }
                 }
 
-                // ---- sweep targets ------------------------------------------------------------------
-                for (mg in c.magnets) {
-                    val col = if (mg.longs) D.down else D.up
-                    val text = (if (mg.longs) "▼ long liqs " else "▲ short liqs ") + fmtPct(mg.distPct)
-                    // Off the visible range: pinned to the edge it lies beyond, so the target is never lost.
-                    if (mg.price !in lo..hi) { edgeTags += Triple(mg.price > hi, text, col); continue }
-                    val my = y(mg.price)
-                    drawLine(col.copy(alpha = 0.85f), Offset(xOf(iTo), my), Offset(plotW, my), px(1.2f), pathEffect = dash)
-                    sideTags += SideTag(my, text, col, bold = true)
+                // ---- liquidation pivots ---------------------------------------------------------------
+                // Every source (compressed range, long flush, pump) leaves fixed levels, drawn as the stretches
+                // in which they held: |-------| ends where a candle closed through, a new |------ starts where
+                // price came back to retest it. Dots are hits (a wick in and a close back); a level holding now
+                // runs to the right edge with its hit count, thicker once it has been hit twice or more.
+                val finished = c.pivots.filter { !it.forming }.sortedBy { it.end }
+                val newest = finished.lastOrNull()
+                fun ago(t: Long): String { val mins = (now - t) / 60_000; return when { mins < 60 -> "${mins}m"; mins < 1440 -> "${mins / 60}h"; else -> "${mins / 1440}d" } }
+                val tagSmall = TextStyle(fontFamily = Inter, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                val offscreen = ArrayList<Pair<Liquidity.PivotLevel, Liquidity.Pivots>>()
+                val cap = px(4f)
+                for (pv in c.pivots) {
+                    val rank = finished.size - 1 - finished.indexOf(pv)
+                    val fade = if (pv.forming) 1f else (1f - 0.2f * rank).coerceAtLeast(0.4f)
+                    val bx0 = xAt(pv.start).coerceAtLeast(0f)
+                    val bx1 = (xAt(pv.end) + slot).coerceAtMost(plotW)
+                    if (bx1 > 0f && bx0 < plotW) when (pv.origin) {
+                        Liquidity.Origin.RANGE -> {
+                            val top = y(pv.hi); val bot = y(pv.lo)
+                            drawRect(D.accent.copy(alpha = 0.06f * fade), Offset(bx0, top), Size(bx1 - bx0, bot - top))
+                            drawRect(D.accent.copy(alpha = 0.35f * fade), Offset(bx0, top), Size(bx1 - bx0, bot - top),
+                                style = Stroke(1f, pathEffect = if (pv.forming) dash else null))
+                            if (pv.forming || pv == newest) {
+                                val t = tm.measure(if (pv.forming) "compressing…" else "range", tagSmall.copy(color = D.accent.copy(alpha = 0.8f)))
+                                if (bx1 - bx0 > t.size.width + px(4f)) drawText(t, topLeft = Offset(bx0 + px(2f), top - t.size.height - px(1f)))
+                            }
+                        }
+                        // Forced moves get a marker on their candle: where liquidations fired and new positions opened.
+                        Liquidity.Origin.FLUSH, Liquidity.Origin.SQUEEZE -> {
+                            val down = pv.origin == Liquidity.Origin.FLUSH
+                            val col = if (down) D.down else D.up
+                            val t = tm.measure(if (down) "▼ flush" else "▲ pump", tagSmall.copy(color = col.copy(alpha = 0.6f + 0.4f * fade)))
+                            val ty = if (down) y(pv.lo) + px(3f) else y(pv.hi) - t.size.height - px(3f)
+                            drawRoundRect(D.bg.copy(alpha = 0.7f), Offset(bx0 - px(2f), ty), Size(t.size.width + px(4f), t.size.height.toFloat()), CornerRadius(px(3f)))
+                            drawText(t, topLeft = Offset(bx0, ty))
+                        }
+                    }
+                    if (pv.forming) continue
+                    if (pv == newest && pv.anchor in lo..hi) {
+                        drawLine(D.text.copy(alpha = 0.45f), Offset(bx0, y(pv.anchor)), Offset(plotW, y(pv.anchor)), 1f, pathEffect = dash)
+                        sideTags += SideTag(y(pv.anchor), pv.origin.short + " avg", D.text.copy(alpha = 0.8f))
+                    }
+                    for (l in pv.levels) {
+                        if (l.hidden) continue
+                        if (l.price !in lo..hi) { if (l.active) offscreen += l to pv; continue }
+                        val col = tierColor(l.lev)
+                        val ly = y(l.price)
+                        for (sg in l.segments) {
+                            val sx = if (sg.start <= pv.end) bx1 else xAt(sg.start) + slot / 2
+                            val ex = sg.end?.let { xAt(it) + slot / 2 } ?: plotW
+                            if (ex <= 0f || sx >= plotW || ex <= sx) continue
+                            val live = sg.end == null
+                            // Older sources show only what still holds; their broken stretches would be clutter.
+                            if (!live && pv != newest) continue
+                            val hot = live && sg.touches.size >= 2
+                            val a = (if (live) 0.9f else 0.4f) * fade
+                            // An active area: a faint band behind the line.
+                            if (hot || (live && l.stacked > 1)) drawRect(col.copy(alpha = 0.1f), Offset(sx.coerceAtLeast(0f), ly - px(3f)), Size(plotW - sx.coerceAtLeast(0f), px(6f)))
+                            drawLine(col.copy(alpha = a), Offset(sx.coerceAtLeast(0f), ly), Offset(ex.coerceAtMost(plotW), ly),
+                                if (hot) px(2f) else if (live) px(1.3f) else 1f, pathEffect = if (live) null else dash)
+                            // |------| caps: a retest start, and the close-through end.
+                            if (sg.start > pv.end && sx in 0f..plotW) drawLine(col.copy(alpha = a), Offset(sx, ly - cap), Offset(sx, ly + cap), px(1.3f))
+                            if (!live && ex in 0f..plotW) drawLine(col.copy(alpha = a), Offset(ex, ly - cap), Offset(ex, ly + cap), px(1.3f))
+                            for (t in sg.touches) {
+                                val tx = xAt(t) + slot / 2
+                                if (tx in 0f..plotW) drawCircle(col.copy(alpha = a), px(2.2f), Offset(tx, ly))
+                            }
+                        }
+                        if (l.active) {
+                            val hits = l.hits
+                            val src = if (pv == newest) "" else " · ${pv.origin.short} ${ago(pv.end)}"
+                            val hitTxt = (if (hits > 0) " ×$hits" else "") + (if (l.stacked > 1) " · ${l.stacked} stacked" else "")
+                            sideTags += SideTag(ly, "${l.lev}x ${if (l.longs) "longs" else "shorts"}$hitTxt$src ⓘ", col.copy(alpha = 0.55f + 0.45f * fade), bold = hits >= 2 || pv == newest,
+                                info = { LiqGuide.explain(l, pv, bars.last().c, Liquidity.atrPct(bars), System.currentTimeMillis()) { fmtPrice(it, m) } })
+                        }
+                    }
+                }
+                // Off screen: only the nearest level still holding on each side, tagged at that edge.
+                val px0 = bars.last().c
+                for (above in listOf(true, false)) {
+                    offscreen.filter { (l, _) -> (l.price > px0) == above }.minByOrNull { (l, _) -> abs(l.price - px0) }?.let { (l, pv) ->
+                        val src = if (pv == newest) "" else " · ${pv.origin.short} ${ago(pv.end)}"
+                        edgeTags += EdgeTag(above, (if (above) "▲ " else "▼ ") + "${l.lev}x ${if (l.longs) "longs" else "shorts"} liq " +
+                            fmtPct((l.price / px0 - 1) * 100) + (if (l.hits > 0) " ×${l.hits}" else "") + src + " ⓘ", tierColor(l.lev),
+                            info = { LiqGuide.explain(l, pv, bars.last().c, Liquidity.atrPct(bars), System.currentTimeMillis()) { fmtPrice(it, m) } })
+                    }
                 }
 
                 // ---- positions -------------------------------------------------------------------------
@@ -421,7 +518,7 @@ fun ChartView(
             // Merge labels at the same height (D open and W open on one price) into one.
             val merged = sideTags.sortedBy { it.y }.fold(ArrayList<SideTag>()) { acc, t ->
                 val prev = acc.lastOrNull()
-                if (prev != null && abs(prev.y - t.y) < 1.5f) acc[acc.lastIndex] = prev.copy(text = prev.text + " · " + t.text) else acc += t
+                if (prev != null && abs(prev.y - t.y) < 1.5f) acc[acc.lastIndex] = prev.copy(text = prev.text + " · " + t.text, info = prev.info ?: t.info) else acc += t
                 acc
             }
             for (t in merged) {
@@ -431,17 +528,19 @@ fun ChartView(
                 val left = plotW - r.size.width - px(6f)
                 drawRoundRect(D.bg.copy(alpha = 0.75f), Offset(left - px(3f), top), Size(r.size.width + px(6f), r.size.height.toFloat()), CornerRadius(px(3f)))
                 drawText(r, topLeft = Offset(left, top))
+                t.info?.let { tagHits += androidx.compose.ui.geometry.Rect(left - px(4f), top - px(2f), plotW, top + r.size.height + px(2f)) to it }
                 nextTop = top + r.size.height + 1f
             }
 
             var edgeTop = px(26f); var edgeBottom = plotH - px(24f)
-            for ((above, text, col) in edgeTags) {
+            for ((above, text, col, tagInfo) in edgeTags) {
                 val r = tm.measure(text, tagStyle.copy(color = col, fontWeight = FontWeight.Bold))
                 val top = if (above) edgeTop else edgeBottom - r.size.height
                 val left = plotW - r.size.width - px(6f)
                 drawRoundRect(D.bg.copy(alpha = 0.85f), Offset(left - px(4f), top - px(1f)), Size(r.size.width + px(8f), r.size.height + px(2f)), CornerRadius(px(3f)))
                 drawRoundRect(col.copy(alpha = 0.6f), Offset(left - px(4f), top - px(1f)), Size(r.size.width + px(8f), r.size.height + px(2f)), CornerRadius(px(3f)), style = Stroke(1f))
                 drawText(r, topLeft = Offset(left, top))
+                tagInfo?.let { tagHits += androidx.compose.ui.geometry.Rect(left - px(4f), top - px(2f), plotW, top + r.size.height + px(2f)) to it }
                 if (above) edgeTop += r.size.height + px(4f) else edgeBottom -= r.size.height + px(4f)
             }
 
@@ -505,10 +604,10 @@ fun ChartView(
                 if (!compact) append("  Vol $").append(fmtCompact(k.v * k.c))
             }
             drawText(tm.measure(legend, num.copy(fontSize = (fs + 0.5f).sp, color = kc)), topLeft = Offset(px(8f), px(6f)))
-            // A compressed range with pools stacked close on both sides is when a sweep tends to come.
+            // A coil building now: its liquidation levels get fixed when it breaks.
             val comp = c.compression
-            if (comp != null && comp < 0.65 && (ind.liqPools || ind.liqMagnets)) {
-                val txt = "Range compressed · ATR ${String.format(Locale.US, "%.2f", comp)}× normal · sweep risk"
+            if (comp != null && comp < 0.7 && ind.liqPivots && c.pivots.any { it.forming }) {
+                val txt = "Range compressing · ATR ${String.format(Locale.US, "%.2f", comp)}× normal · new liq pivots when it breaks"
                 val r = tm.measure(txt, TextStyle(fontFamily = Inter, fontSize = (fs - 0.5f).sp, fontWeight = FontWeight.SemiBold, color = D.accent))
                 val top = px(8f) + r.size.height + px(6f)
                 drawRoundRect(D.accent.copy(alpha = 0.14f), Offset(px(6f), top - px(2f)), Size(r.size.width + px(10f), r.size.height + px(4f)), CornerRadius(px(4f)))
@@ -519,10 +618,38 @@ fun ChartView(
                 drawText(r, topLeft = Offset(plotW - r.size.width - px(8f), plotH - r.size.height - px(8f)))
             }
         }
+        info?.let { LevelCard(it, onClose = { info = null }, modifier = Modifier.align(androidx.compose.ui.Alignment.TopStart).padding(start = 8.dp, top = 52.dp)) }
     }
 }
 
-private data class SideTag(val y: Float, val text: String, val color: Color, val bold: Boolean = false)
+private data class SideTag(val y: Float, val text: String, val color: Color, val bold: Boolean = false, val info: (() -> List<LiqGuide.Line>)? = null)
+private data class EdgeTag(val above: Boolean, val text: String, val color: Color, val info: (() -> List<LiqGuide.Line>)? = null)
+
+/** A clicked level's card: what it is, where it came from, and how to trade around it. Click to close. */
+@Composable
+private fun LevelCard(lines: List<LiqGuide.Line>, onClose: () -> Unit, modifier: Modifier) {
+    androidx.compose.foundation.layout.Column(
+        modifier.width(360.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)).background(D.bg.copy(alpha = 0.96f))
+            .border(1.dp, D.line, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .clickable(onClick = onClose).padding(12.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+    ) {
+        for (ln in lines) androidx.compose.material3.Text(
+            ln.text,
+            color = when (ln.tone) {
+                LiqGuide.Tone.TITLE, LiqGuide.Tone.TEXT -> D.text
+                LiqGuide.Tone.MUTED -> D.muted
+                LiqGuide.Tone.UP -> D.up
+                LiqGuide.Tone.DOWN -> D.down
+                LiqGuide.Tone.ACCENT -> D.accent
+            },
+            fontSize = if (ln.tone == LiqGuide.Tone.TITLE) 14.sp else 12.sp,
+            fontWeight = if (ln.tone == LiqGuide.Tone.TITLE) FontWeight.Bold else FontWeight.Normal,
+            lineHeight = 16.sp,
+        )
+        androidx.compose.material3.Text("Click to close", color = D.muted, fontSize = 10.sp)
+    }
+}
 private class AxisTag(val y: Float, val bg: Color, val text: String, val fg: Color)
 
 /** 1, 2 or 5 × 10^k at or above [v], for grid lines. */

@@ -97,6 +97,37 @@ class GridState(private val store: JsonFileStore) {
             ?: all.getOrNull(i)
 }
 
+/**
+ * What a chart shows of your trading in [m]: each position's entry, liquidation, TP and SL, and the
+ * resting orders, on the accounts in view. Distances are from the live price.
+ */
+fun chartLines(repo: Repo, m: Market, accounts: Collection<com.alex.mfppro.data.AccountState>, mark: Double?): List<ChartLine> {
+    fun away(px: Double) = mark?.let { "  " + fmtPct((px / it - 1) * 100) } ?: ""
+    val out = ArrayList<ChartLine>()
+    for (acc in accounts) {
+        for (p in acc.positions.values.filter { it.inMarket(m) }) {
+            val col = if (p.isLong) D.up else D.down
+            val pnl = mark?.let(p::pnlAt)
+            out += ChartLine(p.entryPrice, col, (if (p.isLong) "Long " else "Short ") + com.alex.mfppro.ui.fmtUsd(p.size * p.entryPrice) +
+                (pnl?.let { "  " + com.alex.mfppro.ui.fmtUsd(it, signed = true) } ?: ""))
+            p.liquidationPrice?.let { out += ChartLine(it, Color(0xFFFF7A00), "Liq" + away(it), dotted = true) }
+            for (o in repo.exitsOf(p)) {
+                val px = o.exitPrice ?: continue
+                val tp = o.exitGroup == "tp"
+                out += ChartLine(px, if (tp) D.up else D.down, (if (tp) "TP" else "SL") + away(px) + "  " + com.alex.mfppro.ui.fmtUsd(p.pnlAt(px), signed = true))
+            }
+        }
+        for (o in acc.orders.values) {
+            if (o.exitGroup != null || !(o.marketId == m.marketId || o.symbol.equals(m.symbol, true))) continue
+            val px = o.limitPrice ?: o.triggerPrice ?: continue
+            val buy = o.side == "buy"
+            val kind = (if (o.type.startsWith("stop")) "Stop " else "Limit ") + (if (buy) "buy" else "sell") + (if (o.reduceOnly) " · reduce" else "")
+            out += ChartLine(px, (if (buy) D.up else D.down).copy(alpha = 0.8f), kind + "  " + com.alex.mfppro.ui.fmtUsd(o.size * px) + away(px), dotted = true)
+        }
+    }
+    return out
+}
+
 /** Every chart in the grid, with the grid's toolbar on top. */
 @Composable
 fun ChartGrid(repo: Repo, grid: GridState, ind: Ind, onInd: (Ind) -> Unit, modifier: Modifier) {
@@ -106,6 +137,7 @@ fun ChartGrid(repo: Repo, grid: GridState, ind: Ind, onInd: (Ind) -> Unit, modif
     val marks by repo.market.marks.collectAsState()
     val stats by repo.market.stats.collectAsState()
     val accounts by repo.account.accounts.collectAsState()
+    val selected by repo.selected.collectAsState()
     val all = markets + venues.filter { v -> markets.none { it.marketId == v.marketId } }
     val shape = PRESETS.firstOrNull { it.first == grid.preset }?.second ?: listOf(1)
 
@@ -128,13 +160,7 @@ fun ChartGrid(repo: Repo, grid: GridState, ind: Ind, onInd: (Ind) -> Unit, modif
         fun cell(i: Int, mod: Modifier) {
             val m = grid.market(i, all)
             ChartCell(repo, grid, i, m, all, candles, marks[m?.feedKey] ?: m?.let { stats[it.feedKey]?.markPx }, stats[m?.feedKey]?.change24hPct,
-                if (m == null) emptyList() else accounts.values.flatMap { it.positions.values }.filter { it.inMarket(m) }.flatMap { p ->
-                    val col = if (p.isLong) D.up else D.down
-                    listOfNotNull(
-                        ChartLine(p.entryPrice, col, (if (p.isLong) "Long " else "Short ") + com.alex.mfppro.ui.fmtUsd(p.size * p.entryPrice)),
-                        p.liquidationPrice?.let { ChartLine(it, Color(0xFFFF7A00), "Liq", dotted = true) },
-                    )
-                }, ind, mod)
+                if (m == null) emptyList() else chartLines(repo, m, accounts.values.filter { selected.isEmpty() || it.account.id in selected }, marks[m.feedKey]), ind, mod)
         }
 
         val maxed = grid.maxed

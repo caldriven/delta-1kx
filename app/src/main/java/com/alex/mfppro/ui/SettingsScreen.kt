@@ -282,6 +282,15 @@ private fun TradingPage(repo: Repo) {
         Label("Stop loss")
         Box(Modifier.padding(top = 4.dp)) { ExitExecPicker(false, sl, "binance") { sl = it; p.slExecution = it } }
         Note("Triggers watch the last traded price on Binance, Bybit and Hyperliquid, and the venue mid price on Veranta (forex) and Ostium.")
+        var cm by remember { mutableStateOf(p.closeMarginBps) }
+        Label("Post-only close margin")
+        androidx.compose.foundation.layout.Row(Modifier.padding(top = 4.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)) {
+            for (b in listOf(0f, 1f, 2f, 5f, 10f)) Seg(if (b == 0f) "at touch" else "${b.toInt()} bp", cm == b, ORDERS) { cm = b; p.closeMarginBps = b }
+        }
+        Note("How far behind the best bid/ask the Trade screen's post-only close rests. More margin: less chance MFP refuses it as crossing, but it fills a little later.")
+        var beLimit by remember { mutableStateOf(p.breakevenLimit) }
+        Toggle("Breakeven limit when underwater", "Breakeven on a losing position places a reduce-only limit at entry (a sell for a long, a buy for a short). In profit it stays a stop at entry.",
+            beLimit, ORDERS) { beLimit = it; p.breakevenLimit = it }
     }
 }
 
@@ -471,16 +480,15 @@ private fun ChartPage(repo: Repo) {
     val realtime by repo.realtime.collectAsStateWithLifecycle()
     Section("Chart", DATA, Icons.Filled.Bolt) {
         Toggle("Real-time position value", "Live order book instead of slower mark", realtime, DATA) { repo.setRealtime(it) }
-        var sess by remember { mutableStateOf(p.showSessions) }
-        Toggle("Sessions on the chart", "Killzone and market-hour strips, weekend band", sess, DATA) { sess = it; p.showSessions = it }
         var kz by remember { mutableStateOf(p.killzones) }
-        Toggle("Killzones", "Asia, London, NY AM and London close along the bottom", kz, DATA) { kz = it; p.killzones = it }
-        var eu by remember { mutableStateOf(p.sessionEu) }
-        Toggle("Market hours", "Tokyo, London and New York along the top", eu, DATA) { eu = it; p.sessionEu = it }
+        Toggle("Killzones", "Asia, London, NY AM and London close as a strip along the bottom", kz, DATA) { kz = it; p.killzones = it }
+        var sess by remember { mutableStateOf(p.showSessions) }
+        Toggle("Market hours", "Tokyo, London and New York along the top, weekend band", sess, DATA) { sess = it; p.showSessions = it }
     }
     Section("Liquidation levels", DATA, Icons.Filled.Bolt) {
-        Note("Estimated from volume: each candle opens positions at its average price over the leverage tiers. " +
-            "A pool stays until price trades through it. The brightest pocket each side, weighed by distance, is the sweep target.")
+        Note("Pivots: when the market coils (short ATR under 0.7\u00D7 its normal for 12+ bars), the range's volume-weighted " +
+            "average is where its positions were opened. Each tier's long and short liquidation price from it is a fixed level " +
+            "until the next range forms, and dims once price trades through it.")
         var tiers by remember { mutableStateOf(p.liqTiers) }
         androidx.compose.foundation.layout.Row(Modifier.padding(top = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)) {
             for (lev in listOf(5, 10, 20, 25, 50, 75, 100)) Seg("${lev}x", lev in tiers, liqTierColor(lev)) {
@@ -488,6 +496,16 @@ private fun ChartPage(repo: Repo) {
                 if (next.isNotEmpty()) { tiers = next.sorted(); p.liqTiers = tiers }
             }
         }
+        var ev by remember { mutableStateOf(p.liqEvents) }
+        Toggle("From flushes and pumps", "Volume spikes (3\u00D7 normal on a bar 2\u00D7 the ATR) are sources too, marked on their candle", ev, DATA) { ev = it; p.liqEvents = it }
+        var hist by remember { mutableStateOf(p.liqHistory) }
+        androidx.compose.foundation.layout.Row(Modifier.padding(top = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("History", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(end = 6.dp))
+            for (k in listOf(1, 2, 3, 5)) Seg(if (k == 1) "latest" else "$k", hist == k, DATA) { hist = k; p.liqHistory = k }
+        }
+        var heat by remember { mutableStateOf(p.liqHeat) }
+        Toggle("Liquidity pools heat", "Untouched liquidations from every candle, along the right edge", heat, DATA) { heat = it; p.liqHeat = it }
         var bands by remember { mutableStateOf(p.liqBands) }
         Toggle("Leverage bands", "Long and short liquidation lines around the average price", bands, DATA) { bands = it; p.liqBands = it }
         if (bands) {
@@ -510,9 +528,11 @@ private fun ChartPage(repo: Repo) {
         var pc by remember { mutableStateOf(p.chipPoc) }
         Toggle("Session POC", "Busiest price, value area edges and naked POCs", pc, DATA) { pc = it; p.chipPoc = it }
         var se by remember { mutableStateOf(p.chipSess) }
-        Toggle("Sessions", "Killzone and market-hour strips", se, DATA) { se = it; p.chipSess = it }
+        Toggle("Market hours", "Tokyo, London, New York strip and weekend band", se, DATA) { se = it; p.chipSess = it }
+        var kzc by remember { mutableStateOf(p.chipKz) }
+        Toggle("Killzones", "Killzone strip along the bottom", kzc, DATA) { kzc = it; p.chipKz = it }
         var lq by remember { mutableStateOf(p.chipLiq) }
-        Toggle("Liquidation levels", "Liquidity pools and sweep targets", lq, DATA) { lq = it; p.chipLiq = it }
+        Toggle("Liquidation levels", "Liquidation pivots from compressed ranges", lq, DATA) { lq = it; p.chipLiq = it }
     }
 }
 

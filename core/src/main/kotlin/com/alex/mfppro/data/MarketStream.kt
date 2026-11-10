@@ -365,7 +365,9 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
 
     /**
      * Every 5 s: reload a chart's history when its bars fall behind the clock (a stalled feed or a gap
-     * after a reconnect), or when the forming candle sits over 1% from the live price for 15 s.
+     * after a reconnect), or when the forming candle sits over 1.5% from the venue's mark for 20 s.
+     * The venue's own mark, not the book mid that real-time mode puts in [marks]: on mid-priced
+     * venues the mid can sit apart from the traded candle without anything being wrong.
      */
     private fun audit(now: Long) {
         for (sub in activeIds.keys.toList()) {
@@ -375,11 +377,11 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
             val key = candleKey(sub.provider, sub.coin, iv)
             if (historyJobs[key]?.isActive == true || now < (auditAt[key] ?: 0)) continue
             val last = candlesBuf[key]?.lastEntry()?.value
-            val mark = marksBuf[sub.feed] ?: venueBuf[sub.feed]
-            val drift = last != null && mark != null && mark > 0 && last.openTime + ms > now && abs(last.c / mark - 1) > 0.01
+            val mark = venueBuf[sub.feed] ?: marksBuf[sub.feed]
+            val drift = last != null && mark != null && mark > 0 && last.openTime + ms > now && abs(last.c / mark - 1) > 0.015
             if (drift) mismatchSince.getOrPut(key) { now } else mismatchSince.remove(key)
             val stale = last == null || behind(last, ms, now)
-            if (stale || (drift && now - (mismatchSince[key] ?: now) >= 15_000)) {
+            if (stale || (drift && now - (mismatchSince[key] ?: now) >= 20_000)) {
                 Log.i(TAG, "reloading candles $key: " + if (stale) "behind" else "off the live price")
                 mismatchSince.remove(key)
                 auditAt[key] = now + 60_000
@@ -449,7 +451,12 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 while (q.size > MAX_TRADES) q.removeLast()
                 dirty += "trades"
             }
-            "candle" -> putCandle(candleKey(provider, coin, e.str("interval") ?: return), e)
+            "candle" -> {
+                val iv = e.str("interval") ?: return
+                // Events still in flight after a release would bring back a few stale bars that nothing clears.
+                if (Sub("candles", provider, coin, iv) !in refs) return
+                putCandle(candleKey(provider, coin, iv), e)
+            }
             "marketStats" -> {
                 val old = statsBuf[key] ?: Stats()
                 fun d(k: String, prev: Double?) = if (!e.containsKey(k)) prev else if (e[k] is JsonNull) null else e.dbl(k)

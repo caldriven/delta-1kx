@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.HorizontalRule
 import androidx.compose.material.icons.filled.Reorder
@@ -242,20 +243,25 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     var showVp by remember { mutableStateOf(repo.prefs.showVp) }
     var showPoc by remember { mutableStateOf(repo.prefs.showPoc) }
     var showSess by remember { mutableStateOf(repo.prefs.showSessions) }
+    var showKz by remember { mutableStateOf(repo.prefs.killzones) }
     var showLiq by remember { mutableStateOf(repo.prefs.showLiq) }
-    // Liquidation pools, sweep targets and naked POCs, worked out off the main thread as the bars change.
+    // Bumped when the quick Liq menu changes a setting, so the overlay is worked out again at once.
+    var liqRev by remember { mutableStateOf(0) }
+    // Liquidation pivots (and optional pools heat) and naked POCs, worked out off the main thread as the bars change.
     var liqOv by remember(market.marketId, interval) { mutableStateOf<LiqOverlay?>(null) }
     var npocs by remember(market.marketId, interval) { mutableStateOf<List<Pair<Long, Double>>>(emptyList()) }
-    LaunchedEffect(chartCandles, showLiq, showPoc, interval) {
+    LaunchedEffect(chartCandles, showLiq, showPoc, interval, liqRev) {
         val bars = chartCandles.orEmpty()
         val settings = repo.prefs.liqSettings()
         val bands = repo.prefs.liqBands
+        val heat = repo.prefs.liqHeat
+        val history = repo.prefs.liqHistory
+        val events = repo.prefs.liqEvents
         val (ov, np) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val ov = if (showLiq && bars.size > 20) {
-                val pools = com.alex.mfppro.data.Liquidity.pools(bars, settings)
                 LiqOverlay(
-                    pools,
-                    com.alex.mfppro.data.Liquidity.magnets(pools, bars.last().c, com.alex.mfppro.data.Liquidity.atrPct(bars)),
+                    if (heat) com.alex.mfppro.data.Liquidity.pools(bars, settings) else emptyList(),
+                    com.alex.mfppro.data.Liquidity.pivots(bars, settings, keepRanges = history, keepEvents = history, events = events),
                     if (bands) com.alex.mfppro.data.Liquidity.bands(com.alex.mfppro.data.Liquidity.base(bars, settings), settings) else emptyList(),
                     com.alex.mfppro.data.Liquidity.compression(bars),
                 )
@@ -265,7 +271,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         liqOv = ov; npocs = np
     }
     var landscape by rememberSaveable { mutableStateOf(false) }
-    val sessOpts = if (showSess) SessionOpts(repo.prefs.sessionEu, repo.prefs.killzones) else null
+    // Two separate overlays: market hours (with the weekend band) and killzones.
+    val sessOpts = if (showSess || showKz) SessionOpts(markets = showSess, killzones = showKz) else null
 
     // Dragging the position line sets TP (profit side) or SL (loss side); TP/SL lines drag to move.
     fun exitPreview(p: com.alex.mfppro.data.Position, px: Double, kind: String?): Pair<String, Color> {
@@ -451,17 +458,20 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             run {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Scrolls sideways when the chips don't fit, instead of squeezing the last ones.
+                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPosPick = !showPos; repo.prefs.showPosLines = showPosPick }
                     if (repo.prefs.chipOpens) OverlayChip("D/W/M", showOpens, Icons.Filled.HorizontalRule) { showOpens = !showOpens; repo.prefs.showOpens = showOpens }
                     if (repo.prefs.chipPivots) OverlayChip("Pivots", showPivots, Icons.Filled.Reorder) { showPivots = !showPivots; repo.prefs.showPivots = showPivots }
                     if (repo.prefs.chipVp) OverlayChip("VP", showVp, Icons.AutoMirrored.Filled.Notes) { showVp = !showVp; repo.prefs.showVp = showVp }
                     if (repo.prefs.chipPoc) OverlayChip("POC", showPoc, Icons.Filled.Adjust) { showPoc = !showPoc; repo.prefs.showPoc = showPoc }
-                    if (repo.prefs.chipSess) OverlayChip("Sess", showSess, Icons.Filled.Schedule) { showSess = !showSess; repo.prefs.showSessions = showSess }
+                    if (repo.prefs.chipKz) OverlayChip("KZ", showKz, Icons.Filled.Schedule) { showKz = !showKz; repo.prefs.killzones = showKz }
+                    if (repo.prefs.chipSess) OverlayChip("Sess", showSess, Icons.Filled.Public) { showSess = !showSess; repo.prefs.showSessions = showSess }
                     if (repo.prefs.chipLiq) OverlayChip("Liq", showLiq, Icons.Filled.Adjust) { showLiq = !showLiq; repo.prefs.showLiq = showLiq }
+                    if (repo.prefs.chipLiq && showLiq) LiqQuickMenu(repo) { liqRev++ }
                 }
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
             // Layers: what the chart draws for your trades.
             Box {
                 var layersOpen by remember { mutableStateOf(false) }
@@ -520,7 +530,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     val br = pm?.let { mk -> tradeAcc?.let { riskOf(it, marks).room }?.let { breachPrice(p, mk, it) } }
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
                         PositionRow(p, pm, "", showAccount = false, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl"), market = repo.market(p.marketId)) { onPickMarket(p.marketId) }
-                        PositionActions(repo, p, pm)
+                        QuickClose(repo, p, pm)
                     }
                 }
             }
@@ -548,7 +558,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     Column(Modifier.padding(horizontal = 8.dp, vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(C.panel)) {
                         val br = accounts[p.accountId]?.let { a -> pm?.let { mk -> riskOf(a, marks).room?.let { breachPrice(p, mk, it) } } }
                         PositionRow(p, pm, accounts[p.accountId]?.let(::accountName) ?: "", showAccount = multi, breach = br, venueMark = venue[p.feedKey], tp = repo.exitPrice(p, "tp"), sl = repo.exitPrice(p, "sl"), market = repo.market(p.marketId)) { repo.setTradeAccount(p.accountId); onPickMarket(p.marketId) }
-                        PositionActions(repo, p, pm)
+                        QuickClose(repo, p, pm)
                     }
                 } }
                 Spacer(Modifier.height(8.dp))
@@ -579,7 +589,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val since = if (interval in listOf("1m", "5m", "15m", "1h")) Opens.dayStart() else null
         androidx.compose.runtime.SideEffect {
             Overlay.content = {
-                LandscapeChart(market.symbol, interval, { interval = it; repo.prefs.lastInterval = it }, lc, lines, showVp, showPoc, since, sessOpts) { landscape = false }
+                LandscapeChart(market.symbol, interval, { interval = it; repo.prefs.lastInterval = it }, lc, lines, showVp, showPoc, since, sessOpts, liqOv, npocs) { landscape = false }
             }
         }
         DisposableEffect(Unit) { onDispose { Overlay.content = null } }
@@ -903,7 +913,8 @@ private fun TopOfBook(b: Book?) {
 private fun LandscapeChart(
     symbol: String, interval: String, onInterval: (String) -> Unit,
     candles: List<com.alex.mfppro.data.Candle>, lines: List<PriceLine>,
-    showVp: Boolean, showPoc: Boolean, vpSince: Long?, sessions: SessionOpts?, onClose: () -> Unit,
+    showVp: Boolean, showPoc: Boolean, vpSince: Long?, sessions: SessionOpts?,
+    liq: LiqOverlay?, npocs: List<Pair<Long, Double>>, onClose: () -> Unit,
 ) {
     val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
     DisposableEffect(Unit) {
@@ -919,7 +930,7 @@ private fun LandscapeChart(
             Spacer(Modifier.width(8.dp))
             Icon(Icons.Filled.FullscreenExit, "Exit", tint = C.text, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClose).padding(6.dp).size(22.dp))
         }
-        CandleChart(candles, lines, Modifier.fillMaxSize(), showVp = showVp, showPoc = showPoc, vpSince = vpSince, sessions = sessions)
+        CandleChart(candles, lines, Modifier.fillMaxSize(), showVp = showVp, showPoc = showPoc, vpSince = vpSince, sessions = sessions, liq = liq, npocs = npocs)
     }
 }
 
@@ -1004,4 +1015,66 @@ private fun PillTabs(labels: List<Pair<String, Int>>, selected: Int, onSelect: (
             }
         }
     }
+}
+
+
+/**
+ * The Liq chip's quick menu: which leverage tiers and sources the chart uses, how much history, and the
+ * legend. Changes apply at once ([onChange]).
+ */
+@Composable
+private fun LiqQuickMenu(repo: Repo, onChange: () -> Unit) {
+    val p = repo.prefs
+    var open by remember { mutableStateOf(false) }
+    var guide by remember { mutableStateOf(false) }
+    Box {
+        Text("\u25BE", color = C.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { open = true }.padding(horizontal = 6.dp, vertical = 2.dp))
+        androidx.compose.material3.DropdownMenu(open, onDismissRequest = { open = false }, containerColor = C.panel) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Liquidation levels", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                var tiers by remember { mutableStateOf(p.liqTiers) }
+                Text("Leverage tiers", color = C.muted, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (lev in listOf(10, 25, 50, 100)) Seg("${lev}x", lev in tiers, liqTierColor(lev)) {
+                        val next = if (lev in tiers) tiers - lev else tiers + lev
+                        if (next.isNotEmpty()) { tiers = next.sorted(); p.liqTiers = tiers; onChange() }
+                    }
+                }
+                var hist by remember { mutableStateOf(p.liqHistory) }
+                Text("Sources kept", color = C.muted, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (k in listOf(1, 2, 3, 5)) Seg(if (k == 1) "latest" else "$k", hist == k, C.accent) { hist = k; p.liqHistory = k; onChange() }
+                }
+                var ev by remember { mutableStateOf(p.liqEvents) }
+                AppCheck("Flushes and pumps too", ev) { ev = it; p.liqEvents = it; onChange() }
+                var heat by remember { mutableStateOf(p.liqHeat) }
+                AppCheck("Pools heat on the right edge", heat) { heat = it; p.liqHeat = it; onChange() }
+                Text("Tap a level's label for what it means and how to trade around it.", color = C.muted, fontSize = 11.sp, lineHeight = 14.sp)
+                Text("How to read it \u2192", color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { open = false; guide = true }.padding(vertical = 4.dp))
+            }
+        }
+    }
+    if (guide) LiqGuideDialog { guide = false }
+}
+
+/** The legend: every mark the liquidation levels draw, in plain words. */
+@Composable
+fun LiqGuideDialog(onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss, containerColor = C.panel,
+        title = { Text("Reading the liquidation levels", color = C.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Where positions were opened (a quiet range, or a flush or pump on heavy volume), and where they get liquidated at each leverage. " +
+                    "Forced buying or selling there tends to pull price in and spike it.", color = C.muted, fontSize = 12.sp, lineHeight = 16.sp)
+                for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Column {
+                    Text(mark, color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(meaning, color = C.text, fontSize = 12.sp, lineHeight = 16.sp)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Got it", color = C.accent) } },
+    )
 }

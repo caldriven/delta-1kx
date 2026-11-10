@@ -189,6 +189,22 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var chipLiq: Boolean
         get() = plain.getBoolean("chip_liq", true)
         set(v) = plain.edit().putBoolean("chip_liq", v).apply()
+    /** Liquidation levels also from forced moves (long flushes and pumps), not only compressed ranges. */
+    var liqEvents: Boolean
+        get() = plain.getBoolean("liq_events", true)
+        set(v) = plain.edit().putBoolean("liq_events", v).apply()
+    /** How many past sources of each kind the chart keeps. */
+    var liqHistory: Int
+        get() = plain.getInt("liq_history", 2)
+        set(v) = plain.edit().putInt("liq_history", v).apply()
+    /** Post-only limit close: how far past the touch, in basis points, so the order rests instead of being refused. */
+    var closeMarginBps: Float
+        get() = plain.getFloat("close_margin_bps", 2f)
+        set(v) = plain.edit().putFloat("close_margin_bps", v).apply()
+    /** Untouched liquidity pools as heat along the chart's right edge, with the pivots. */
+    var liqHeat: Boolean
+        get() = plain.getBoolean("liq_heat", false)
+        set(v) = plain.edit().putBoolean("liq_heat", v).apply()
     /** Leverage bands (long/short liquidation lines around the average price) with the pools. */
     var liqBands: Boolean
         get() = plain.getBoolean("liq_bands", false)
@@ -243,6 +259,9 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var chipSess: Boolean
         get() = plain.getBoolean("chip_sess", true)
         set(v) = plain.edit().putBoolean("chip_sess", v).apply()
+    var chipKz: Boolean
+        get() = plain.getBoolean("chip_kz", true)
+        set(v) = plain.edit().putBoolean("chip_kz", v).apply()
     var indBarOpen: Boolean
         get() = plain.getBoolean("ind_bar_open", true)
         set(v) = plain.edit().putBoolean("ind_bar_open", v).apply()
@@ -340,6 +359,14 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var slExecution: String
         get() = plain.getString("sl_exec", "market") ?: "market"
         set(v) = plain.edit().putString("sl_exec", v).apply()
+
+    /**
+     * Breakeven on a losing position: a resting reduce-only limit at entry (a sell for a long, a buy
+     * for a short) instead of being unavailable. In profit, Breakeven is always a stop at entry.
+     */
+    var breakevenLimit: Boolean
+        get() = plain.getBoolean("breakeven_limit", false)
+        set(v) = plain.edit().putBoolean("breakeven_limit", v).apply()
 
     fun priceDecimals(marketId: String): Int? = plain.getInt("dec_$marketId", -1).takeIf { it >= 0 }
     fun setPriceDecimals(marketId: String, v: Int?) = plain.edit().apply { if (v == null) remove("dec_$marketId") else putInt("dec_$marketId", v) }.apply()

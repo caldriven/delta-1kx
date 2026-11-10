@@ -352,6 +352,24 @@ class Repo(val prefs: Prefs) {
         return setTpSl(p, tp, p.entryPrice, "Breakeven ${p.symbol}")
     }
 
+    /**
+     * Breakeven for a losing position: a reduce-only limit at the entry price for the full size, a sell
+     * closing a long or a buy closing a short. It rests on the book and closes the position if price
+     * comes back to entry. Sent post-only (no marketable acknowledgement), so if price has already
+     * crossed entry MFP turns it down instead of filling it at market.
+     */
+    suspend fun breakevenLimit(p: Position): TradeResult {
+        val m = market(p.marketId)
+        return placeOrder("Breakeven limit ${p.symbol}", buildJsonObject {
+            put("type", "limit"); put("account_id", p.accountId); put("market_id", p.marketId)
+            put("side", if (p.isLong) "sell" else "buy")
+            put("size", roundSize(p.size, m))
+            put("leverage", p.leverage); put("margin_mode", p.marginMode)
+            put("reduce_only", true)
+            put("limit_price", m?.let { com.alex.mfppro.ui.snapTick(p.entryPrice, it) } ?: p.entryPrice)
+        })
+    }
+
     suspend fun cancelOrder(o: Order): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         return report("Cancel ${o.symbol}", trade.cancelOrder(key, o.id))

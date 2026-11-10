@@ -63,6 +63,18 @@ fun main(): Unit = runBlocking {
             Liquidity.magnets(pools, last, Liquidity.atrPct(chart)).forEach {
                 println("  sweep target: ${if (it.longs) "long liqs" else "short liqs"} at ${"%.1f".format(it.price)} (${"%+.2f".format(it.distPct)}%, ${"%.0f".format(it.share * 100)}% of that side)")
             }
+            Liquidity.pivots(chart, s).forEach { pv ->
+                println("liq source ${pv.origin.short} ${java.time.Instant.ofEpochMilli(pv.end)} avg ${"%.1f".format(pv.anchor)}${if (pv.forming) " (forming)" else ""}: " +
+                    pv.levels.joinToString { l -> "${l.lev}x ${if (l.longs) "L" else "S"} ${"%.0f".format(l.price)} ${if (l.active) "holding x${l.hits}" else "broken"} (${l.segments.size} seg)" })
+            }
+            // What one chart update costs: everything the chart recomputes when its bars change.
+            run {
+                val days0 = repo.history(btc, "1d", 40)
+                repeat(20) { Liquidity.pivots(chart, s); VolumeProfile.of(chart); VolumeProfile.nakedPocs(chart); Killzones.levels(chart, days0) }
+                val t0 = System.nanoTime()
+                repeat(50) { Liquidity.pivots(chart, s); VolumeProfile.of(chart); VolumeProfile.nakedPocs(chart); Killzones.levels(chart, days0); Liquidity.compression(chart) }
+                println("indicator update: ${"%.2f".format((System.nanoTime() - t0) / 50 / 1e6)} ms per chart")
+            }
             println("compression (ATR14/ATR100): ${Liquidity.compression(chart)?.let { "%.2f".format(it) }}")
             val vp = VolumeProfile.of(chart)!!
             println("profile: POC ${"%.1f".format(vp.price(vp.poc))}, VA ${"%.1f".format(vp.vaLow)}..${"%.1f".format(vp.vah)}, LVNs ${vp.lvns.size}, naked POCs ${VolumeProfile.nakedPocs(chart).size}")

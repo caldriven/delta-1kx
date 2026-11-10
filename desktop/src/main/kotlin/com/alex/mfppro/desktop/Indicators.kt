@@ -55,8 +55,12 @@ data class Ind(
     val liqTiers: List<Int> = listOf(10, 25, 50, 100),
     val liqOn: List<Int> = listOf(25, 50, 100),
     val liqMmr: Double = 0.005,
-    val liqPools: Boolean = true,
-    val liqMagnets: Boolean = true,
+    val liqPools: Boolean = false,
+    val liqPivots: Boolean = true,
+    /** Also anchor levels on forced moves: long flushes and pumps (volume spikes). */
+    val liqEvents: Boolean = true,
+    /** How many past sources of each kind to keep on the chart. */
+    val liqHistory: Int = 2,
     // Sessions and opens
     val killzones: Boolean = true,
     val markets: Boolean = false,
@@ -112,8 +116,23 @@ fun IndicatorMenu(ind: Ind, onChange: (Ind) -> Unit) {
                 }
 
                 Section("Liquidation levels")
-                Check("Liquidity pools (untouched liquidations)", ind.liqPools) { onChange(ind.copy(liqPools = it)) }
-                Check("Sweep targets above and below", ind.liqMagnets) { onChange(ind.copy(liqMagnets = it)) }
+                Check("Liquidation pivots from the last compressed range", ind.liqPivots) { onChange(ind.copy(liqPivots = it)) }
+                if (ind.liqPivots) Indent {
+                    Check("Also from flushes and pumps (volume spikes)", ind.liqEvents) { onChange(ind.copy(liqEvents = it)) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("History", style = label, modifier = Modifier.width(62.dp))
+                        listOf(1, 2, 3, 5).forEach { k -> Pill(if (k == 1) "latest" else "$k", ind.liqHistory == k) { onChange(ind.copy(liqHistory = k)) } }
+                    }
+                }
+                Check("Liquidity pools heat (right edge)", ind.liqPools) { onChange(ind.copy(liqPools = it)) }
+                var legend by remember { mutableStateOf(false) }
+                Pill(if (legend) "Hide the legend" else "How to read it · click a level's ⓘ label for its card", legend) { legend = !legend }
+                if (legend) Column(Modifier.padding(start = 4.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Column {
+                        Text(mark, color = D.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text(meaning, style = label.copy(fontSize = 11.sp, lineHeight = 14.sp, color = D.text), modifier = Modifier.widthIn(max = 380.dp))
+                    }
+                }
                 Check("Leverage bands around the average", ind.liqBands) { onChange(ind.copy(liqBands = it)) }
                 Indent {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -147,9 +166,12 @@ fun IndicatorMenu(ind: Ind, onChange: (Ind) -> Unit) {
                         listOf(0.004, 0.005, 0.01).forEach { m -> Pill(String.format(java.util.Locale.US, "%.1f%%", m * 100), ind.liqMmr == m) { onChange(ind.copy(liqMmr = m)) } }
                     }
                     Text(
-                        "Pools: each candle's volume as positions opened at its average price, spread over the tiers. " +
-                            "A pool stays until price trades through it and fades over ~300 bars. The brightest pocket on each " +
-                            "side, weighed by distance, is the sweep target.",
+                        "Pivots: a coiled range (14-bar ATR well under the 100-bar ATR for 12+ bars) or a forced move " +
+                            "(volume 3× normal on a bar 2× the ATR: a flush or a pump) is where positions were opened. Each tier's " +
+                            "long and short liquidation price from its volume-weighted average is a level. Solid while it holds, " +
+                            "dots are hits (a wick in, a close back), |---| caps where a close went through and where a retest " +
+                            "brought it back. Thicker with a band: hit twice or more, or levels from several sources stacked within 0.1%. " +
+                            "Older sources fade and show only what still holds.",
                         style = label.copy(fontSize = 10.sp, lineHeight = 13.sp), modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
                     )
                 }

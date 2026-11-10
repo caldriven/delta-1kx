@@ -160,6 +160,219 @@ object Liquidity {
         return out
     }
 
+    // ---- liquidation pivots ---------------------------------------------------------------------
+
+    /**
+     * A stretch of time in which a level held. [end]: open time of the bar that closed through it, or null
+     * while it still holds. [touches]: open times of the bars that wicked into it and closed back.
+     */
+    data class Segment(val start: Long, val end: Long?, val touches: List<Long>)
+
+    /**
+     * One leverage tier's liquidation price off a source's average, and the stretches in which it held.
+     * A close through the level ends a segment; a later retest from the other side starts a new one.
+     */
+    data class PivotLevel(
+        val lev: Int, val longs: Boolean, val price: Double, val segments: List<Segment>,
+        /** Holding levels from this many sources (this one included) sit within 0.1% of it. */
+        val stacked: Int = 1,
+        /** Folded into a newer source's level at about the same price; not drawn on its own. */
+        val hidden: Boolean = false,
+    ) {
+        /** Holding right now: the price is still respecting it. */
+        val active get() = segments.lastOrNull()?.end == null
+        /** Hits in the segment running now. */
+        val hits get() = if (active) segments.last().touches.size else 0
+        /** Closed through at least once. */
+        val swept get() = segments.any { it.end != null }
+    }
+
+    /** Where a set of levels comes from. */
+    enum class Origin(val label: String, val short: String) {
+        /** A compressed range: positions built up quietly around its average. */
+        RANGE("range", "range"),
+        /** A long liquidation cascade: a big red candle on a volume spike. Dip buyers and late shorts open there. */
+        FLUSH("long flush", "flush"),
+        /** A short squeeze or pump: a big green candle on a volume spike. Breakout longs and faders open there. */
+        SQUEEZE("short squeeze", "pump"),
+    }
+
+    /**
+     * A source of positions and the liquidation levels it leaves behind. [anchor] is its volume-weighted
+     * average price: where those positions were opened on average. [forming]: a range still building, so
+     * its levels are not drawn yet. [volume]: its traded volume, for weighing sources against each other.
+     */
+    data class Pivots(
+        val origin: Origin, val start: Long, val end: Long, val hi: Double, val lo: Double, val anchor: Double,
+        val levels: List<PivotLevel>, val forming: Boolean, val volume: Double,
+    )
+
+    /**
+     * Liquidation pivots: fixed levels that stay until price trades through them, from two kinds of source.
+     *
+     * Ranges: a bar is compressed when its 14-bar ATR is under a threshold x its 100-bar ATR. The threshold
+     * is the quietest quarter of this chart's own history, kept between [minRatio] and [maxRatio]. A run of
+     * at least [minBars] such bars (gaps of up to 3 allowed) is a range; it starts 13 bars before its first
+     * compressed bar, since those bars built the low ATR.
+     *
+     * Events: a bar whose volume is [volMult] x the 20-bar average and whose true range is [rangeMult] x the
+     * 14-bar ATR, with the close in the outer third of the bar, is a forced move. Red is a long flush, green a
+     * squeeze; neighbouring such bars merge into one cascade.
+     *
+     * Each source's levels run from its end until the first bar that trades through them, so older levels
+     * stay visible with where they were taken. The newest [keepRanges] ranges and [keepEvents] events are
+     * returned, oldest first, plus a range still building now.
+     */
+    fun pivots(
+        cs: List<Candle>, s: Settings, keepRanges: Int = 3, keepEvents: Int = 4, events: Boolean = true,
+        minRatio: Double = 0.7, maxRatio: Double = 0.85, minBars: Int = 12, volMult: Double = 3.0, rangeMult: Double = 2.0,
+    ): List<Pivots> {
+        val n = cs.size
+        if (n < 120 || s.tiers.isEmpty()) return emptyList()
+        val tr = DoubleArray(n) { i -> if (i == 0) cs[0].h - cs[0].l else max(cs[i].h, cs[i - 1].c) - min(cs[i].l, cs[i - 1].c) }
+        val pre = DoubleArray(n + 1).also { for (i in 0 until n) it[i + 1] = it[i] + tr[i] }
+        val vpre = DoubleArray(n + 1).also { for (i in 0 until n) it[i + 1] = it[i] + cs[i].v }
+        fun atr(i: Int, len: Int) = (pre[i + 1] - pre[i + 1 - len]) / len
+        // How far a close must go through a level to break it, and price must move off before a retest counts.
+        fun buffer(i: Int) = 0.3 * atr(max(i, 14), 14)
+
+        // Levels and how they held after the source ends.
+        fun build(origin: Origin, r: IntRange, forming: Boolean): Pivots {
+            var pv = 0.0; var v = 0.0; var hi = -Double.MAX_VALUE; var lo = Double.MAX_VALUE
+            for (k in r) { val c = cs[k]; pv += typical(c) * c.v; v += c.v; hi = max(hi, c.h); lo = min(lo, c.l) }
+            val anchor = if (v > 1e-12) pv / v else (hi + lo) / 2
+            val levels = s.tiers.flatMap { lev ->
+                val lp = longLiq(anchor, lev, s.mmr); val sp = shortLiq(anchor, lev, s.mmr)
+                listOf(PivotLevel(lev, true, lp, segments(cs, r.last + 1, lp, ::buffer)), PivotLevel(lev, false, sp, segments(cs, r.last + 1, sp, ::buffer)))
+            }
+            return Pivots(origin, cs[r.first].openTime, cs[r.last].openTime, hi, lo, anchor, levels, forming, v)
+        }
+
+        val out = ArrayList<Pivots>()
+
+        // Ranges.
+        val ratios = DoubleArray(n) { i -> if (i >= 100) atr(i, 14) / atr(i, 100).coerceAtLeast(1e-12) else Double.NaN }
+        val quiet = ratios.filter { !it.isNaN() }.sorted().let { it[it.size / 4] }
+        val ratio = quiet.coerceIn(minRatio, maxRatio)
+        val tight = BooleanArray(n) { i -> i >= 100 && ratios[i] < ratio }
+        val runs = ArrayList<IntRange>()
+        var i = 0
+        while (i < n) {
+            if (!tight[i]) { i++; continue }
+            val a = i
+            var b = i
+            var j = i + 1
+            while (j < n) {
+                if (tight[j]) { b = j; j++ } else if (j - b <= 3) j++ else break
+            }
+            if (b - a + 1 >= minBars) runs += max(0, a - 13)..b
+            i = b + 1
+        }
+        val building = runs.lastOrNull()?.takeIf { it.last >= n - 1 }
+        runs.filter { it !== building }.takeLast(keepRanges).forEach { out += build(Origin.RANGE, it, false) }
+        building?.let { out += build(Origin.RANGE, it, true) }
+
+        // Forced moves: volume spikes with a wide bar closing near its extreme.
+        if (events) {
+            val found = ArrayList<Pair<IntRange, Boolean>>() // bars, down?
+            var k = 20
+            while (k < n) {
+                val c = cs[k]
+                val avgV = (vpre[k] - vpre[k - 20]) / 20
+                val prevAtr = atr(k - 1, 14)
+                val span = c.h - c.l
+                val down = c.c < c.o
+                val nearExtreme = span > 0 && (if (down) (c.c - c.l) / span <= 0.34 else (c.h - c.c) / span <= 0.34)
+                if (avgV > 0 && c.v >= volMult * avgV && tr[k] >= rangeMult * prevAtr && nearExtreme) {
+                    // A cascade: following bars in the same direction that are still heavy belong to it.
+                    var e = k
+                    while (e + 1 < n && (cs[e + 1].c < cs[e + 1].o) == down && cs[e + 1].v >= 1.5 * avgV) e++
+                    found += (k..e) to down
+                    k = e + 1
+                } else k++
+            }
+            found.takeLast(keepEvents).forEach { (r, down) -> out += build(if (down) Origin.FLUSH else Origin.SQUEEZE, r, false) }
+        }
+        return stack(out.sortedBy { it.end })
+    }
+
+    /**
+     * Holding levels from different sources within 0.1% of each other are one area: the newest source
+     * keeps the line and counts the others as stacked; the older ones are hidden.
+     */
+    private fun stack(sources: List<Pivots>): List<Pivots> {
+        data class Ref(val src: Int, val lvl: Int, val l: PivotLevel)
+        val holding = sources.flatMapIndexed { si, pv -> if (pv.forming) emptyList() else pv.levels.mapIndexedNotNull { li, l -> if (l.active) Ref(si, li, l) else null } }
+        val stacked = HashMap<Pair<Int, Int>, Int>()
+        val hidden = HashSet<Pair<Int, Int>>()
+        for (side in listOf(true, false)) {
+            val list = holding.filter { it.l.longs == side }.sortedBy { it.l.price }
+            var a = 0
+            while (a < list.size) {
+                var b = a
+                while (b + 1 < list.size && list[b + 1].l.price / list[a].l.price - 1 <= 0.001) b++
+                val group = list.subList(a, b + 1)
+                val keep = group.maxBy { it.src }
+                stacked[keep.src to keep.lvl] = group.size
+                group.filter { it !== keep }.forEach { hidden += it.src to it.lvl }
+                a = b + 1
+            }
+        }
+        return sources.mapIndexed { si, pv ->
+            pv.copy(levels = pv.levels.mapIndexed { li, l ->
+                l.copy(stacked = stacked[si to li] ?: 1, hidden = (si to li) in hidden)
+            })
+        }
+    }
+
+    /**
+     * How a level at [px] held from bar [from] on. It holds while bars that reach it close back on their
+     * side (each such bar after a clean one is a hit). A close through it ends the segment. Once price
+     * comes back to it from the other side, a new segment starts there.
+     */
+    private fun segments(cs: List<Candle>, from: Int, px: Double, buffer: (Int) -> Double): List<Segment> {
+        if (from >= cs.size) return listOf(Segment(cs.last().openTime, null, emptyList()))
+        val out = ArrayList<Segment>()
+        // Which side the price is on: the level holds price above it (true) or below it.
+        var above = cs[from - 1].c >= px
+        var active = true
+        var start = cs[from].openTime
+        var touches = ArrayList<Long>()
+        var prevTouched = false
+        // After a break, price has to move clear of the level before coming back counts as a retest.
+        var clear = false
+        for (k in from until cs.size) {
+            val c = cs[k]
+            val reached = c.l <= px && c.h >= px
+            val buf = buffer(k)
+            if (active) {
+                // A break is a close clearly through, not a close a tick past it.
+                val through = if (above) c.c < px - buf else c.c > px + buf
+                if (through) {
+                    out += Segment(start, c.openTime, touches)
+                    active = false
+                    above = !above
+                    prevTouched = false
+                    clear = false
+                } else {
+                    if (reached && !prevTouched) touches.add(c.openTime)
+                    prevTouched = reached
+                }
+            } else if (!clear) {
+                clear = if (above) c.l > px + 2 * buf else c.h < px - 2 * buf
+            } else if (reached) {
+                // Retest from the other side: the level is back in play.
+                active = true
+                start = c.openTime
+                touches = arrayListOf(c.openTime)
+                prevTouched = true
+                above = c.c >= px
+            }
+        }
+        if (active) out += Segment(start, null, touches)
+        return out
+    }
+
     /** Average true range over the last [n] bars, as a percent of the last close. */
     fun atrPct(cs: List<Candle>, n: Int = 14): Double {
         if (cs.size < 2) return 0.0
