@@ -1,10 +1,5 @@
 package com.alex.mfppro.data
 
-import android.content.Context
-import android.util.Log
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,8 +13,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import android.net.ConnectivityManager
-import android.net.Network
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.serialization.json.JsonObject
@@ -40,9 +33,8 @@ private const val BACKGROUND_GRACE_MS = 20_000L
 private const val RISK_REFRESH_MS = 15_000L
 private const val STALE_AFTER_MS = 60_000L
 
-class Repo(ctx: Context) {
+class Repo(val prefs: Prefs) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val prefs = Prefs(ctx)
     private val http = OkHttpClient.Builder()
         .pingInterval(5, TimeUnit.SECONDS)
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -94,19 +86,17 @@ class Repo(ctx: Context) {
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) { _visible.value = true; onForeground() }
-            override fun onStop(owner: LifecycleOwner) { _visible.value = false; onBackground() }
-        })
-        // A new default network (Wi-Fi <-> mobile) leaves old sockets dead: reconnect at once.
-        val cm = ctx.getSystemService(ConnectivityManager::class.java)
-        var first = true
-        cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                if (first) { first = false; return }
-                account.reconnect(); market.reconnect()
-            }
-        })
+    }
+
+    /** The app came on screen or left it (Android process lifecycle; desktop window shown or minimised). */
+    fun setVisible(on: Boolean) {
+        _visible.value = on
+        if (on) onForeground() else onBackground()
+    }
+
+    /** A new default network (Wi-Fi <-> mobile, VPN, dock) leaves old sockets dead: reconnect at once. */
+    fun networkChanged() {
+        account.reconnect(); market.reconnect()
     }
 
     // ---- trading -------------------------------------------------------
@@ -360,6 +350,24 @@ class Repo(ctx: Context) {
     suspend fun breakeven(p: Position): TradeResult {
         val tp = exitsOf(p).firstOrNull { it.exitGroup == "tp" }?.exitPrice
         return setTpSl(p, tp, p.entryPrice, "Breakeven ${p.symbol}")
+    }
+
+    /**
+     * Breakeven for a losing position: a reduce-only limit at the entry price for the full size, a sell
+     * closing a long or a buy closing a short. It rests on the book and closes the position if price
+     * comes back to entry. Sent post-only (no marketable acknowledgement), so if price has already
+     * crossed entry MFP turns it down instead of filling it at market.
+     */
+    suspend fun breakevenLimit(p: Position): TradeResult {
+        val m = market(p.marketId)
+        return placeOrder("Breakeven limit ${p.symbol}", buildJsonObject {
+            put("type", "limit"); put("account_id", p.accountId); put("market_id", p.marketId)
+            put("side", if (p.isLong) "sell" else "buy")
+            put("size", roundSize(p.size, m))
+            put("leverage", p.leverage); put("margin_mode", p.marginMode)
+            put("reduce_only", true)
+            put("limit_price", m?.let { com.alex.mfppro.ui.snapTick(p.entryPrice, it) } ?: p.entryPrice)
+        })
     }
 
     suspend fun cancelOrder(o: Order): TradeResult {

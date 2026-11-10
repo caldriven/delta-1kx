@@ -1,18 +1,7 @@
 package com.alex.mfppro.data
 
-import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
-
-class Prefs(ctx: Context) {
-    private val secure = EncryptedSharedPreferences.create(
-        ctx,
-        "secure",
-        MasterKey.Builder(ctx).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-    )
-    private val plain = ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
+/** App settings. [secure] holds the API key and terms acceptance (encrypted on every platform); [plain] holds the rest. */
+class Prefs(private val secure: KvStore, private val plain: KvStore) {
 
     var apiKey: String?
         get() = secure.getString("api_key", null)
@@ -192,6 +181,46 @@ class Prefs(ctx: Context) {
     var sessionEu: Boolean
         get() = plain.getBoolean("session_eu", false)
         set(v) = plain.edit().putBoolean("session_eu", v).apply()
+
+    /** Liquidation overlay: untouched liquidity pools at the right edge plus the sweep target each side. */
+    var showLiq: Boolean
+        get() = plain.getBoolean("show_liq", true)
+        set(v) = plain.edit().putBoolean("show_liq", v).apply()
+    var chipLiq: Boolean
+        get() = plain.getBoolean("chip_liq", true)
+        set(v) = plain.edit().putBoolean("chip_liq", v).apply()
+    /** Liquidation levels also from forced moves (long flushes and pumps), not only compressed ranges. */
+    var liqEvents: Boolean
+        get() = plain.getBoolean("liq_events", true)
+        set(v) = plain.edit().putBoolean("liq_events", v).apply()
+    /** How many past sources of each kind the chart keeps. */
+    var liqHistory: Int
+        get() = plain.getInt("liq_history", 2)
+        set(v) = plain.edit().putInt("liq_history", v).apply()
+    /** Post-only limit close: how far past the touch, in basis points, so the order rests instead of being refused. */
+    var closeMarginBps: Float
+        get() = plain.getFloat("close_margin_bps", 2f)
+        set(v) = plain.edit().putFloat("close_margin_bps", v).apply()
+    /** Untouched liquidity pools as heat along the chart's right edge, with the pivots. */
+    var liqHeat: Boolean
+        get() = plain.getBoolean("liq_heat", false)
+        set(v) = plain.edit().putBoolean("liq_heat", v).apply()
+    /** Leverage bands (long/short liquidation lines around the average price) with the pools. */
+    var liqBands: Boolean
+        get() = plain.getBoolean("liq_bands", false)
+        set(v) = plain.edit().putBoolean("liq_bands", v).apply()
+    /** Leverage tiers for the liquidation overlay, e.g. "25,50,100". */
+    var liqTiers: List<Int>
+        get() = (plain.getString("liq_tiers", null) ?: "25,50,100").split(',').mapNotNull { it.trim().toIntOrNull() }.filter { it in 2..500 }.distinct().sorted()
+        set(v) = plain.edit().putString("liq_tiers", v.distinct().sorted().joinToString(",")).apply()
+    var liqBase: String
+        get() = plain.getString("liq_base", null) ?: Liquidity.Base.VWMA.name
+        set(v) = plain.edit().putString("liq_base", v).apply()
+
+    fun liqSettings() = Liquidity.Settings(
+        tiers = liqTiers.ifEmpty { listOf(25, 50, 100) },
+        base = runCatching { Liquidity.Base.valueOf(liqBase) }.getOrDefault(Liquidity.Base.VWMA),
+    )
     var killzones: Boolean
         get() = plain.getBoolean("killzones", true)
         set(v) = plain.edit().putBoolean("killzones", v).apply()
@@ -230,6 +259,9 @@ class Prefs(ctx: Context) {
     var chipSess: Boolean
         get() = plain.getBoolean("chip_sess", true)
         set(v) = plain.edit().putBoolean("chip_sess", v).apply()
+    var chipKz: Boolean
+        get() = plain.getBoolean("chip_kz", true)
+        set(v) = plain.edit().putBoolean("chip_kz", v).apply()
     var indBarOpen: Boolean
         get() = plain.getBoolean("ind_bar_open", true)
         set(v) = plain.edit().putBoolean("ind_bar_open", v).apply()
@@ -327,6 +359,14 @@ class Prefs(ctx: Context) {
     var slExecution: String
         get() = plain.getString("sl_exec", "market") ?: "market"
         set(v) = plain.edit().putString("sl_exec", v).apply()
+
+    /**
+     * Breakeven on a losing position: a resting reduce-only limit at entry (a sell for a long, a buy
+     * for a short) instead of being unavailable. In profit, Breakeven is always a stop at entry.
+     */
+    var breakevenLimit: Boolean
+        get() = plain.getBoolean("breakeven_limit", false)
+        set(v) = plain.edit().putBoolean("breakeven_limit", v).apply()
 
     fun priceDecimals(marketId: String): Int? = plain.getInt("dec_$marketId", -1).takeIf { it >= 0 }
     fun setPriceDecimals(marketId: String, v: Int?) = plain.edit().apply { if (v == null) remove("dec_$marketId") else putInt("dec_$marketId", v) }.apply()

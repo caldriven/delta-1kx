@@ -1,6 +1,5 @@
 package com.alex.mfppro.data
 
-import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,6 +27,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.TreeMap
+import kotlin.math.abs
 import kotlin.random.Random
 
 private const val TAG = "MarketStream"
@@ -43,6 +43,13 @@ data class Sub(val channel: String, val provider: String, val coin: String, val 
 }
 
 fun candleKey(provider: String, coin: String, interval: String) = "$provider|$coin|$interval"
+
+/** Length of one candle, or null for calendar intervals ("1M") whose length varies. */
+fun intervalMs(iv: String): Long? {
+    if (iv.length < 2 || iv.endsWith("M")) return null
+    val n = iv.dropLast(1).toLongOrNull() ?: return null
+    return n * when (iv.last()) { 's' -> 1_000L; 'm' -> 60_000L; 'h' -> 3_600_000L; 'd' -> 86_400_000L; 'w' -> 7 * 86_400_000L; else -> return null }
+}
 
 /**
  * Public market socket. Subscriptions are reference counted so screens can
@@ -85,12 +92,21 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     private val candlesBuf = HashMap<String, TreeMap<Long, Candle>>()
     private val oiBuf = HashMap<String, ArrayList<OiPoint>>()
     private val dirty = HashSet<String>()
+    // Candle and OI series are long: only the keys that changed are copied on a flush.
+    private val dirtyCandles = HashSet<String>()
+    private val dirtyOi = HashSet<String>()
 
     private val refs = HashMap<Sub, Int>()
     private val activeIds = HashMap<Sub, Int>()
     private val idToSub = HashMap<Int, Sub>()
-    private val historyReqs = HashMap<Int, String>()
     private var nextId = 1
+
+    // Chart history per candle key: the running load, when the key may next be checked, and since
+    // when its forming candle has disagreed with the live price.
+    private val historyJobs = HashMap<String, Job>()
+    private val auditAt = HashMap<String, Long>()
+    private val mismatchSince = HashMap<String, Long>()
+    private var lastAudit = 0L
 
     private var ws: WebSocket? = null
     private var gen = 0
@@ -111,6 +127,8 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 if (paused) continue
                 flush()
                 watchdog()
+                val now = System.currentTimeMillis()
+                if (_live.value && now - lastAudit >= 5_000) { lastAudit = now; audit(now) }
             }
         }
     }
@@ -142,11 +160,18 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
 
     private val oneShots = HashMap<Int, CompletableDeferred<JsonElement?>>()
     private val pingSent = HashMap<Int, Long>()
-    // The server allows 4 concurrent history requests; keep one free for the chart.
-    private val historySlots = Semaphore(3)
+    // The server answers at most 4 history requests at once and turns the rest down. Every request
+    // takes one of [allSlots]; one-offs (overview stats, scanners) also need one of [bulkSlots], so the
+    // charts on screen always have a slot even while the overview loads a hundred markets.
+    private val allSlots = Semaphore(4)
+    private val bulkSlots = Semaphore(3)
 
     /** One-off candle history (for overview stats), or empty if unavailable. */
-    suspend fun candleHistory(provider: String, coin: String, interval: String, limit: Int): List<Candle> = historySlots.withPermit {
+    suspend fun candleHistory(provider: String, coin: String, interval: String, limit: Int): List<Candle> =
+        bulkSlots.withPermit { allSlots.withPermit { requestHistory(provider, coin, interval, limit) } }.orEmpty()
+
+    /** One history request over the socket; null when it failed or timed out (empty = no candles). */
+    private suspend fun requestHistory(provider: String, coin: String, interval: String, limit: Int): List<Candle>? {
         val d = CompletableDeferred<JsonElement?>()
         var sent = false
         // Send once; retry only while the socket is down.
@@ -164,9 +189,9 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
             if (sent) break
             delay(500)
         }
-        if (!sent) return emptyList()
-        val res = withTimeoutOrNull(10_000) { d.await() } as? JsonArray ?: return emptyList()
-        res.mapNotNull { e ->
+        if (!sent) return null
+        val res = withTimeoutOrNull(10_000) { d.await() } as? JsonArray ?: return null
+        return res.mapNotNull { e ->
             val c = e as? JsonObject ?: return@mapNotNull null
             Candle(c.long("openTime") ?: return@mapNotNull null, c.dbl("open") ?: 0.0, c.dbl("high") ?: 0.0, c.dbl("low") ?: 0.0, c.dbl("close") ?: 0.0, c.dbl("volume") ?: 0.0)
         }.sortedBy { it.openTime }
@@ -190,6 +215,13 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         activeIds.remove(sub)?.let { id ->
             idToSub.remove(id)
             ws?.send("""{"op":"unsub","id":$id}""")
+        }
+        // Without a feed the bars go stale at once; drop them so a later chart starts from fresh history.
+        if (sub.channel == "candles" && sub.interval != null) {
+            val key = candleKey(sub.provider, sub.coin, sub.interval)
+            historyJobs.remove(key)?.cancel()
+            auditAt.remove(key); mismatchSince.remove(key)
+            if (candlesBuf.remove(key) != null) dirtyCandles += key
         }
     }
 
@@ -219,14 +251,8 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         if (refs.isEmpty()) return@launch
         val socket = ws
         if (socket == null || !_live.value || System.currentTimeMillis() - lastFrameAt > 4_000) { attempt = 0; connect(); return@launch }
-        for (sub in refs.keys) if (sub.channel == "candles" && sub.interval != null) {
-            val hid = nextId++
-            historyReqs[hid] = candleKey(sub.provider, sub.coin, sub.interval)
-            socket.send(buildJsonObject {
-                put("op", "req"); put("id", hid); put("method", "candles.history")
-                put("payload", buildJsonObject { put("provider", sub.provider); put("symbol", sub.coin); put("interval", sub.interval); put("limit", 500) })
-            }.toString())
-        }
+        // Through the shared limiter, with retries, replacing any bars from before a gap.
+        for (sub in refs.keys.toList()) if (sub.channel == "candles" && sub.interval != null) loadChartHistory(sub)
     }
 
     private fun connect() {
@@ -235,7 +261,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         ws?.cancel()
         val myGen = gen
         lastFrameAt = System.currentTimeMillis()
-        activeIds.clear(); idToSub.clear(); historyReqs.clear()
+        activeIds.clear(); idToSub.clear()
         oneShots.values.forEach { it.complete(null) }; oneShots.clear()
         ws = http.newWebSocket(Request.Builder().url(URL).build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -288,16 +314,79 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         socket.send(buildJsonObject {
             put("op", "sub"); put("id", id); put("channel", sub.channel); put("payload", payload)
         }.toString())
-        if (sub.channel == "candles" && sub.interval != null) {
-            val hid = nextId++
-            historyReqs[hid] = candleKey(sub.provider, sub.coin, sub.interval)
-            socket.send(buildJsonObject {
-                put("op", "req"); put("id", hid); put("method", "candles.history")
-                put("payload", buildJsonObject {
-                    put("provider", sub.provider); put("symbol", sub.coin)
-                    put("interval", sub.interval); put("limit", 500)
-                })
-            }.toString())
+        if (sub.channel == "candles" && sub.interval != null) loadChartHistory(sub)
+    }
+
+    /**
+     * Fetch 500 bars for a chart's candle feed and lay them under the live bars. Retries until it
+     * lands: a turned-down request used to leave the chart on old bars until the app restarted.
+     */
+    private fun loadChartHistory(sub: Sub) {
+        val iv = sub.interval ?: return
+        val key = candleKey(sub.provider, sub.coin, iv)
+        // Bars from before a pause would draw a wrong chart until the history lands: show none instead.
+        val ms = intervalMs(iv)
+        val last = candlesBuf[key]?.lastEntry()?.value
+        if (last != null && ms != null && System.currentTimeMillis() - last.openTime > 2 * ms) {
+            candlesBuf.remove(key); dirtyCandles += key
+        }
+        historyJobs[key]?.cancel()
+        historyJobs[key] = scope.launch {
+            for (attempt in 0 until 6) {
+                val list = allSlots.withPermit { requestHistory(sub.provider, sub.coin, iv, 500) }
+                if (list != null) {
+                    withContext(serial) { if (sub in refs) mergeHistory(key, list) }
+                    break
+                }
+                delay(1_000L * (attempt + 1))
+            }
+            withContext(serial) {
+                val now = System.currentTimeMillis()
+                // Still behind after a fresh load: the market is quiet or shut, so look again much later.
+                val l = candlesBuf[key]?.lastEntry()?.value
+                auditAt[key] = now + if (ms != null && (l == null || behind(l, ms, now))) 300_000 else 60_000
+            }
+        }
+    }
+
+    /** History is the truth for its span: bars older than it are from before a gap and go. */
+    private fun mergeHistory(key: String, list: List<Candle>) {
+        if (list.isEmpty()) return
+        val map = candlesBuf.getOrPut(key) { TreeMap() }
+        map.headMap(list.first().openTime).clear()
+        val lastT = list.last().openTime
+        // The forming bar may already have newer live updates than the snapshot; keep those.
+        for (c in list) if (c.openTime < lastT || c.openTime !in map) map[c.openTime] = c
+        dirtyCandles += key
+    }
+
+    /** The last bar ended over 30 s ago, so at least one candle is missing. */
+    private fun behind(last: Candle, ms: Long, now: Long) = now - (last.openTime + ms) > 30_000
+
+    /**
+     * Every 5 s: reload a chart's history when its bars fall behind the clock (a stalled feed or a gap
+     * after a reconnect), or when the forming candle sits over 1.5% from the venue's mark for 20 s.
+     * The venue's own mark, not the book mid that real-time mode puts in [marks]: on mid-priced
+     * venues the mid can sit apart from the traded candle without anything being wrong.
+     */
+    private fun audit(now: Long) {
+        for (sub in activeIds.keys.toList()) {
+            val iv = sub.interval ?: continue
+            if (sub.channel != "candles") continue
+            val ms = intervalMs(iv) ?: continue
+            val key = candleKey(sub.provider, sub.coin, iv)
+            if (historyJobs[key]?.isActive == true || now < (auditAt[key] ?: 0)) continue
+            val last = candlesBuf[key]?.lastEntry()?.value
+            val mark = venueBuf[sub.feed] ?: marksBuf[sub.feed]
+            val drift = last != null && mark != null && mark > 0 && last.openTime + ms > now && abs(last.c / mark - 1) > 0.015
+            if (drift) mismatchSince.getOrPut(key) { now } else mismatchSince.remove(key)
+            val stale = last == null || behind(last, ms, now)
+            if (stale || (drift && now - (mismatchSince[key] ?: now) >= 20_000)) {
+                Log.i(TAG, "reloading candles $key: " + if (stale) "behind" else "off the live price")
+                mismatchSince.remove(key)
+                auditAt[key] = now + 60_000
+                loadChartHistory(sub)
+            }
         }
     }
 
@@ -315,9 +404,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                     ServerClock.offset = server - (sent + now) / 2
                     return
                 }
-                oneShots.remove(id)?.let { it.complete(f["result"]); return }
-                val key = historyReqs.remove(id) ?: return
-                f.arr("result").forEach { (it as? JsonObject)?.let { c -> putCandle(key, c) } }
+                oneShots.remove(id)?.complete(f["result"])
             }
             "end" -> {
                 val sub = idToSub.remove(f.long("id")?.toInt() ?: return) ?: return
@@ -364,7 +451,12 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 while (q.size > MAX_TRADES) q.removeLast()
                 dirty += "trades"
             }
-            "candle" -> putCandle(candleKey(provider, coin, e.str("interval") ?: return), e)
+            "candle" -> {
+                val iv = e.str("interval") ?: return
+                // Events still in flight after a release would bring back a few stale bars that nothing clears.
+                if (Sub("candles", provider, coin, iv) !in refs) return
+                putCandle(candleKey(provider, coin, iv), e)
+            }
             "marketStats" -> {
                 val old = statsBuf[key] ?: Stats()
                 fun d(k: String, prev: Double?) = if (!e.containsKey(k)) prev else if (e[k] is JsonNull) null else e.dbl(k)
@@ -386,7 +478,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                     if (list.isEmpty() || list.last().time < t) {
                         list += OiPoint(t, oi)
                         if (list.size > MAX_OI) list.subList(0, list.size - MAX_OI).clear()
-                        dirty += "oi"
+                        dirtyOi += key
                     }
                 }
             }
@@ -398,7 +490,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         val map = candlesBuf.getOrPut(key) { TreeMap() }
         map[t] = Candle(t, c.dbl("open") ?: 0.0, c.dbl("high") ?: 0.0, c.dbl("low") ?: 0.0, c.dbl("close") ?: 0.0, c.dbl("volume") ?: 0.0)
         while (map.size > MAX_CANDLES) map.pollFirstEntry()
-        dirty += "candles"
+        dirtyCandles += key
     }
 
     private fun levels(e: JsonObject, side: String) = e.arr(side).mapNotNull {
@@ -407,14 +499,23 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     }
 
     private fun flush() {
+        if (dirtyCandles.isNotEmpty()) {
+            // Copying every chart's 1,500 bars ten times a second was most of the app's garbage.
+            _candles.value = HashMap(_candles.value).apply {
+                for (k in dirtyCandles) { val b = candlesBuf[k]; if (b != null) put(k, b.values.toList()) else remove(k) }
+            }
+            dirtyCandles.clear()
+        }
+        if (dirtyOi.isNotEmpty()) {
+            _oi.value = HashMap(_oi.value).apply { for (k in dirtyOi) { val b = oiBuf[k]; if (b != null) put(k, b.toList()) } }
+            dirtyOi.clear()
+        }
         if (dirty.isEmpty()) return
         if ("marks" in dirty) _marks.value = HashMap(marksBuf)
         if ("vmarks" in dirty) _venueMarks.value = HashMap(venueBuf)
         if ("stats" in dirty) _stats.value = HashMap(statsBuf)
         if ("books" in dirty) _books.value = HashMap(booksBuf)
         if ("trades" in dirty) _trades.value = tradesBuf.mapValues { it.value.toList() }
-        if ("candles" in dirty) _candles.value = candlesBuf.mapValues { it.value.values.toList() }
-        if ("oi" in dirty) _oi.value = oiBuf.mapValues { it.value.toList() }
         dirty.clear()
     }
 }
