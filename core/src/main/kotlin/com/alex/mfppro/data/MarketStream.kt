@@ -145,7 +145,10 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
             connect()
         } else if (_live.value && now - lastPingAt >= 3_000) {
             lastPingAt = now
-            socket.send("""{"op":"req","id":${nextId++},"method":"ping"}""")
+            val id = nextId++
+            pingSent[id] = now
+            if (pingSent.size > 20) pingSent.keys.minOrNull()?.let { pingSent.remove(it) }
+            socket.send("""{"op":"req","id":$id,"method":"ping"}""")
         }
     }
 
@@ -156,6 +159,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     }
 
     private val oneShots = HashMap<Int, CompletableDeferred<JsonElement?>>()
+    private val pingSent = HashMap<Int, Long>()
     // The server answers at most 4 history requests at once and turns the rest down. Every request
     // takes one of [allSlots]; one-offs (overview stats, scanners) also need one of [bulkSlots], so the
     // charts on screen always have a slot even while the overview loads a hundred markets.
@@ -231,7 +235,24 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
 
     fun resume() = scope.launch(serial) {
         paused = false
-        if (ws == null && refs.isNotEmpty()) { attempt = 0; connect() } else if (ws != null) probe()
+        // A socket that went quiet while the app was frozen is reconnected now rather than
+        // after the probe times out, so the screen isn't showing old prices for seconds.
+        val stale = System.currentTimeMillis() - lastFrameAt > 8_000
+        if (refs.isNotEmpty() && (ws == null || stale)) { attempt = 0; connect() } else if (ws != null) probe()
+    }
+
+    /**
+     * Manual refresh. MFP asks clients not to reconnect just to get a fresh snapshot, so a
+     * healthy socket stays open and only the chart history is backfilled; a dead or quiet one
+     * is replaced.
+     */
+    fun refresh() = scope.launch(serial) {
+        paused = false
+        if (refs.isEmpty()) return@launch
+        val socket = ws
+        if (socket == null || !_live.value || System.currentTimeMillis() - lastFrameAt > 4_000) { attempt = 0; connect(); return@launch }
+        // Through the shared limiter, with retries, replacing any bars from before a gap.
+        for (sub in refs.keys.toList()) if (sub.channel == "candles" && sub.interval != null) loadChartHistory(sub)
     }
 
     private fun connect() {
@@ -374,6 +395,13 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
             "events" -> f.arr("events").forEach { (it as? JsonObject)?.let(::onEvent) }
             "res" -> {
                 val id = f.long("id")?.toInt() ?: return
+                // Ping replies carry the server's time: keep the clock offset for UTC day boundaries.
+                pingSent.remove(id)?.let { sent ->
+                    val server = f.long("result") ?: return
+                    val now = System.currentTimeMillis()
+                    ServerClock.offset = server - (sent + now) / 2
+                    return
+                }
                 oneShots.remove(id)?.complete(f["result"])
             }
             "end" -> {

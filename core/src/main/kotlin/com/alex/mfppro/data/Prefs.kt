@@ -77,6 +77,10 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
         set(v) = plain.edit().putInt("lock_end", v).apply()
 
     fun locked() = tradeLocked(lockEnabled, lockStart, lockEnd)
+    /** "06:00": when the night lock ends. */
+    fun lockUntil() = String.format(java.util.Locale.US, "%02d:00", lockEnd)
+    /** The one night-lock message, everywhere it blocks something. */
+    fun lockMessage() = "Night lock: no new trades until ${lockUntil()} Oslo. Closing still works."
 
     var assetClasses: String
         get() = plain.getString("asset_classes", "")!!
@@ -134,6 +138,11 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
         get() = plain.getBoolean("trade_show_all", false)
         set(v) = plain.edit().putBoolean("trade_show_all", v).apply()
 
+    /** Alpha: the order-flow bubble chart on the Trade screen. Hidden by default. */
+    var showFlowChart: Boolean
+        get() = plain.getBoolean("show_flow", false)
+        set(v) = plain.edit().putBoolean("show_flow", v).apply()
+
     var realtimePnl: Boolean
         get() = plain.getBoolean("realtime_pnl", true)
         set(v) = plain.edit().putBoolean("realtime_pnl", v).apply()
@@ -145,9 +154,26 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var hideComp: Boolean
         get() = plain.getBoolean("hide_comp", false)
         set(v) = plain.edit().putBoolean("hide_comp", v).apply()
+    /**
+     * Post only for limit orders: a limit at or through the book is refused instead of filling at
+     * market. MFP has no post-only flag; it's leaving out marketable_limit_acknowledged.
+     */
+    var postOnly: Boolean
+        get() = plain.getBoolean("post_only", true)
+        set(v) = plain.edit().putBoolean("post_only", v).apply()
+
     var confirmCloseAll: Boolean
         get() = plain.getBoolean("confirm_close_all", true)
         set(v) = plain.edit().putBoolean("confirm_close_all", v).apply()
+
+    /**
+     * The one confirm rule, as Settings words it: "Confirm orders" covers new orders, partial closes,
+     * reversals and cancels; "Confirm full closes" covers closing a whole position or everything.
+     */
+    fun needsConfirm(kind: Confirm) = when (kind) {
+        Confirm.Order -> confirmOrders
+        Confirm.Full -> confirmCloseAll
+    }
 
     var showSessions: Boolean
         get() = plain.getBoolean("show_sessions", true)
@@ -377,3 +403,6 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
         get() = plain.getBoolean("chip_pos", true)
         set(v) = plain.edit().putBoolean("chip_pos", v).apply()
 }
+
+/** What a confirm guards: an order-like action, or a full close (see [Prefs.needsConfirm]). */
+enum class Confirm { Order, Full }

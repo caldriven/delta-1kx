@@ -1,9 +1,24 @@
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+// Commit and build time, so the installed APK says which code it is (About and Android app info).
+val gitSha: String = runCatching {
+    providers.exec { commandLine("git", "rev-parse", "--short", "HEAD"); isIgnoreExitValue = true }
+        .standardOutput.asText.get().trim().ifBlank { "unknown" }
+}.getOrDefault("unknown") + runCatching {
+    // Built from uncommitted changes: say so, the commit alone isn't the whole story.
+    val dirty = providers.exec { commandLine("git", "status", "--porcelain", "--untracked-files=no"); isIgnoreExitValue = true }
+        .standardOutput.asText.get().isNotBlank()
+    if (dirty) "+dirty" else ""
+}.getOrDefault("")
+val buildTime: String = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
 
 android {
     namespace = "com.alex.mfppro"
@@ -13,8 +28,10 @@ android {
         applicationId = "com.alex.mfppro"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2-$gitSha"
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
     }
 
     buildTypes {
@@ -30,7 +47,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 }
 
 dependencies {

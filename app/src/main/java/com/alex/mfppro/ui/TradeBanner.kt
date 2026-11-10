@@ -72,7 +72,7 @@ fun BoxScope.TradeResultBanner(repo: Repo) {
         enter = slideInVertically { -it } + fadeIn(), exit = slideOutVertically { -it } + fadeOut(),
     ) {
         val e = last ?: return@AnimatedVisibility
-        val col = when (e.ok) { true -> Color(0xFF22C55E); false -> Color(0xFFEF4444); null -> Color(0xFFF59E0B) }
+        val col = when (e.ok) { true -> C.up; false -> C.down; null -> C.accent }
         val shape = RoundedCornerShape(16.dp)
         Row(
             Modifier.fillMaxWidth().shadow(12.dp, shape).clip(shape).background(C.panel).border(2.dp, col, shape)

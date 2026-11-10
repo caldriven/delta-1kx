@@ -54,7 +54,7 @@ import com.alex.mfppro.data.Market
 import com.alex.mfppro.data.Repo
 import com.alex.mfppro.data.Sub
 
-private enum class SortKey(val label: String) { VOL("Volume"), CHG("24h"), WEEK("7d"), OI("OI"), OIC("OI 24h"), FUND("Funding"), NAME("Name") }
+private enum class SortKey(val label: String) { VOL("Volume"), CHG("Day"), H1("1h"), WEEK("7d"), OI("OI"), OIC("OI 24h"), FUND("Funding"), NAME("Name") }
 
 /** Where the market list was, so opening a chart and coming back lands on the same rows. */
 private object ListMemory {
@@ -85,7 +85,16 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
         subs.forEach { repo.market.acquire(it) }
         onDispose { subs.forEach { repo.market.release(it) } }
     }
-    LaunchedEffect(markets) { if (markets.isNotEmpty()) repo.loadOverviewExtras() }
+    // Reloads at most every 15 min, and as soon as a new UTC day starts (new daily candle, new day open).
+    LaunchedEffect(markets) {
+        while (markets.isNotEmpty()) {
+            repo.loadOverviewExtras()
+            kotlinx.coroutines.delay(minOf(60_000L, com.alex.mfppro.data.ServerClock.untilUtcMidnight() + 3_000))
+        }
+    }
+    // Rolling 1h change from 5m candles: fetched only while this list is open, every 2 min at most.
+    val chg1h by repo.chg1h.collectAsStateWithLifecycle()
+
 
     val classOf = { m: Market -> AssetClasses.classOf(m, classes) }
     // Change since today's 00:00 UTC open; the feed's rolling 24h until the daily candles load.
@@ -110,6 +119,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
                 when (key) {
                     SortKey.NAME -> null
                     SortKey.CHG -> dayChg(m)
+                    SortKey.H1 -> chg1h[m.marketId]
                     SortKey.WEEK -> extras[m.marketId]?.week
                     SortKey.VOL -> s?.dayNtlVlm
                     SortKey.OI -> s?.openInterestUsd
@@ -127,6 +137,8 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
     // Freeze the order between refreshes: re-sorting on every 50 ms tick made rows jump while scrolling.
     // A new sort/filter takes effect at once and starts at the top.
     val latest by androidx.compose.runtime.rememberUpdatedState(live)
+    // Rolling 1h change only for the markets this filter lists, every 2 min at most while the list is open.
+    LaunchedEffect(activeCls, q) { while (true) { if (latest.isNotEmpty()) repo.load1h(latest); kotlinx.coroutines.delay(120_000) } }
     val listKey = listOf(sort, activeCls, q, analysis)
     // Same list as last time: come back to its rows and scroll position instead of the top.
     val returning = remember { ListMemory.key == listKey && ListMemory.order.isNotEmpty() }
@@ -229,9 +241,11 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
         // Column headers double as sort shortcuts.
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 4.dp)) {
             HeaderCell("Market", Modifier.weight(1f), TextAlign.Start) { setSort(SortKey.NAME) }
-            HeaderCell("Price · 24h", Modifier.width(88.dp)) { setSort(SortKey.CHG) }
-            HeaderCell("7d", Modifier.width(54.dp)) { setSort(SortKey.WEEK) }
-            HeaderCell(if (fundingCol) "Funding" else "OI 24h", Modifier.width(58.dp)) { setSort(if (fundingCol) SortKey.FUND else SortKey.OIC) }
+            // "Day" is the change since today's 00:00 UTC open (rolling 24h until daily candles load).
+            HeaderCell("Price · Day", Modifier.width(84.dp)) { setSort(SortKey.CHG) }
+            HeaderCell("1h", Modifier.width(46.dp)) { setSort(SortKey.H1) }
+            HeaderCell("7d", Modifier.width(48.dp)) { setSort(SortKey.WEEK) }
+            HeaderCell(if (fundingCol) "Funding" else "OI 24h", Modifier.width(54.dp)) { setSort(if (fundingCol) SortKey.FUND else SortKey.OIC) }
         }
         LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = 12.dp)) {
             // Not keyed: after a re-sort the list stays at the same index (the top), not on the old first row.
@@ -256,15 +270,17 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
                             style = num.copy(fontSize = 10.sp, color = C.muted), maxLines = 1,
                         )
                     }
-                    Column(Modifier.width(88.dp), horizontalAlignment = Alignment.End) {
+                    Column(Modifier.width(84.dp), horizontalAlignment = Alignment.End) {
                         Text(fmtPrice(s?.markPx), style = num.copy(fontSize = 13.sp), maxLines = 1)
                         ChangePill(chg)
                     }
-                    Text(fmtPct(x?.week), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.week)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(54.dp))
+                    val h1 = chg1h[m.marketId]
+                    Text(fmtPct(h1), style = num.copy(fontSize = 11.sp, color = pnlColor(h1)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(46.dp))
+                    Text(fmtPct(x?.week), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.week)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(48.dp))
                     if (fundingCol) Text(
-                        s?.fundingRate?.let { String.format(java.util.Locale.US, "%+.4f%%", it * 100) } ?: "—",
-                        style = num.copy(fontSize = 10.sp, color = pnlColor(s?.fundingRate)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(58.dp),
-                    ) else Text(fmtPct(x?.oi24h), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.oi24h)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(58.dp))
+                        fmtFunding(s?.fundingRate),
+                        style = num.copy(fontSize = 10.sp, color = pnlColor(s?.fundingRate)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(54.dp),
+                    ) else Text(fmtPct(x?.oi24h), style = num.copy(fontSize = 11.sp, color = pnlColor(x?.oi24h)), textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.width(54.dp))
                 }
             }
         }

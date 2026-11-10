@@ -482,7 +482,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
                 AccountSwitcher(repo, Modifier.weight(1f))
                 risk?.let {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("Drawdown left", color = C.muted, fontSize = 10.sp)
+                        Text("Room left", color = C.muted, fontSize = 10.sp)
                         Text(fmtUsd(it.room), style = num.copy(fontWeight = FontWeight.Bold, color = roomColor(it.roomFraction)))
                     }
                 }
@@ -531,7 +531,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
             Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
                 Text("Leverage", color = C.muted, fontSize = 12.sp, modifier = Modifier.width(60.dp))
                 listOf(1, 2, 3, 5, 10, 20).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
-                    Seg("${l}×", l == lev, C.accent) { lev = l }; Spacer(Modifier.width(4.dp))
+                    Seg("${l}x", l == lev, C.accent) { lev = l }; Spacer(Modifier.width(4.dp))
                 }
             }
 
@@ -589,14 +589,14 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
                 }
             }
             if (locked) Text(
-                String.format(Locale.US, "No new trades before %02d:00 Oslo (now %s).", repo.prefs.lockEnd, java.time.LocalTime.now(OSLO).withNano(0).withSecond(0)),
+                repo.prefs.lockMessage(),
                 color = C.down, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(bottom = 8.dp),
             )
         }
         Column(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 14.dp, vertical = 8.dp)) {
             SplitPairButton(
                 if (longA) a else b, if (longA) b else a, Modifier.fillMaxWidth(), enabled = problem == null && !busy && !locked && orphan == null,
-                label = if (busy) "Sending…" else if (locked) "Locked until ${repo.prefs.lockEnd}:00 Oslo" else if (gross > 0) "${fmtUsd(usdA)} + ${fmtUsd(usdB)} = ${fmtUsd(gross)}" else null,
+                label = if (busy) "Sending…" else if (locked) "Locked until ${repo.prefs.lockUntil()} Oslo" else if (gross > 0) "${fmtUsd(usdA)} + ${fmtUsd(usdB)} = ${fmtUsd(gross)}" else null,
             ) { if (repo.prefs.confirmOrders) confirm = true else submit() }
             problem?.let { Text(it, color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp)) }
         }
@@ -610,7 +610,7 @@ fun PairTicket(repo: Repo, request: PairRequest, onDismiss: () -> Unit) {
             ConfirmRow("Hedge", if (beta && stat != null) String.format(Locale.US, "β %.2f", hedge) else "Dollar neutral"),
             stat?.let { ConfirmRow("Spread z", fmtZ(it.z)) },
             ConfirmRow("Leverage", "${lev}x ${if (isolated) "isolated" else "cross"}"),
-            ConfirmRow("Account", acc?.account?.name ?: ""),
+            ConfirmRow("Account", acc?.let(::accountName) ?: ""),
         ),
         confirm = "Send both", onDismiss = { confirm = false },
     ) { confirm = false; submit() }

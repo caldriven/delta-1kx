@@ -58,7 +58,6 @@ import com.alex.mfppro.ui.BottomBar
 import com.alex.mfppro.ui.NavItem
 import com.alex.mfppro.ui.MfpTheme
 import com.alex.mfppro.ui.PositionsScreen
-import com.alex.mfppro.ui.AccountsScreen
 import com.alex.mfppro.ui.OverviewScreen
 import com.alex.mfppro.ui.SettingsScreen
 import com.alex.mfppro.ui.TradeScreen
@@ -183,7 +182,7 @@ class MainActivity : ComponentActivity() {
                         // (no swiping on the screens themselves); Settings opens over them.
                         androidx.compose.animation.AnimatedContent(tab == 3, label = "settings",
                             transitionSpec = { androidx.compose.animation.fadeIn().togetherWith(androidx.compose.animation.fadeOut()) }) { inSettings ->
-                            if (inSettings) SettingsScreen(repo)
+                            if (inSettings) SettingsScreen(repo, onBack = { tab = if (history.isNotEmpty()) history.removeAt(history.lastIndex) else 0 })
                             else androidx.compose.foundation.pager.HorizontalPager(pager, userScrollEnabled = false, key = { pageTabs[it] }) { i ->
                                 when (pageTabs[i]) {
                                     0 -> PositionsScreen(repo, onOpenMarket = openMarket, onOpenSettings = { go(3) })

@@ -122,22 +122,6 @@ fun AppInput(
     }
 }
 
-/** Underlined text tabs. */
-@Composable
-fun AppTabs(labels: List<String>, selected: Int, modifier: Modifier = Modifier, onSelect: (Int) -> Unit) {
-    Row(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        labels.forEachIndexed { i, t ->
-            val on = i == selected
-            Column(Modifier.weight(1f).clickable { onSelect(i) }, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(t, color = if (on) C.text else C.muted, fontSize = 13.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center, modifier = Modifier.padding(vertical = 9.dp))
-                Box(Modifier.width(28.dp).height(2.dp).clip(CircleShape).background(if (on) C.accent else Color.Transparent))
-            }
-        }
-    }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(C.line))
-}
-
 /**
  * [mode] (0/1) marks a button that flips between two views: while it's the open tab its label
  * reads as a switch ([modes], e.g. Chart / Trade) with the active side lit in that view's colour.
@@ -244,51 +228,6 @@ fun BottomBar(
     }
 }
 
-/** Share-of-position glyph: a ring with the closed slice filled, so 25% / 50% / 100% read at a glance. */
-@Composable
-fun PieGlyph(fraction: Float, color: Color, modifier: Modifier = Modifier.size(16.dp)) {
-    androidx.compose.foundation.Canvas(modifier) {
-        val stroke = 1.5.dp.toPx()
-        val r = size.minDimension / 2 - stroke / 2
-        val tl = androidx.compose.ui.geometry.Offset(center.x - r, center.y - r)
-        val sz = androidx.compose.ui.geometry.Size(r * 2, r * 2)
-        drawCircle(color, r, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
-        drawArc(color, -90f, 360f * fraction, true, tl, sz)
-    }
-}
-
-/**
- * Icon-over-label action tile. [glyph] draws the icon so callers can pass
- * a Material icon or a custom drawing (see [PieGlyph]).
- */
-@Composable
-fun IconAct(
-    label: String,
-    modifier: Modifier = Modifier,
-    color: Color = C.text,
-    enabled: Boolean = true,
-    fill: Color? = null,
-    glyph: @Composable (Color) -> Unit,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(9.dp)
-    val tint = if (enabled) color else C.muted.copy(alpha = 0.6f)
-    Column(
-        modifier.height(46.dp).clip(shape)
-            .then(if (fill != null) Modifier.background(if (enabled) fill else fill.copy(alpha = 0.3f)) else Modifier.background(C.panel2).border(1.dp, C.line, shape))
-            .clickable(enabled = enabled, onClick = onClick).padding(top = 6.dp, bottom = 5.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
-    ) {
-        glyph(tint)
-        Text(label, color = tint, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-    }
-}
-
-/** Material icon sized for [IconAct]. */
-@Composable
-fun ActIcon(icon: ImageVector, tint: Color) = Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
-
 /** The venue's own logo, small; falls back to a muted dot when there's no logo. */
 @Composable
 fun VenueTag(provider: String, size: androidx.compose.ui.unit.Dp = 13.dp) {
@@ -319,6 +258,7 @@ fun ConfirmDialog(
     extra: (@Composable () -> Unit)? = null,
     onConfirm: () -> Unit,
 ) {
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     androidx.compose.ui.window.Dialog(onDismiss) {
         val shape = RoundedCornerShape(16.dp)
         Column(Modifier.fillMaxWidth().clip(shape).background(C.panel).border(1.dp, color.copy(alpha = 0.55f), shape).padding(18.dp)) {
@@ -340,7 +280,7 @@ fun ConfirmDialog(
                     contentAlignment = Alignment.Center,
                 ) { Text("Cancel", color = C.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
                 Box(
-                    Modifier.weight(1.4f).height(48.dp).clip(RoundedCornerShape(10.dp)).background(color).clickable(onClick = onConfirm),
+                    Modifier.weight(1.4f).height(48.dp).clip(RoundedCornerShape(10.dp)).background(color).clickable { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); onConfirm() },
                     contentAlignment = Alignment.Center,
                 ) { Text(confirm, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold) }
             }
@@ -426,13 +366,19 @@ fun triggerSource(provider: String): String = when (provider) {
 fun ExitExecPicker(tp: Boolean, exec: String, provider: String, onChange: (String) -> Unit) {
     val col = if (tp) C.up else C.down
     Column {
-        Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
-            Seg(if (tp) "TP market" else "Stop market", exec == "market", col) { onChange("market") }
-            Seg(if (tp) "TP limit · reduce only" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
+        // A TP either waits for a trigger or rests on the book as a plain reduce-only limit.
+        if (tp) Row(Modifier.padding(bottom = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg("Trigger", exec != "rest", col) { if (exec == "rest") onChange("limit") }
+            Seg("Resting limit · reduce only", exec == "rest", col) { onChange("rest") }
+        }
+        if (!tp || exec != "rest") Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+            Seg(if (tp) "Then market" else "Stop market", exec == "market", col) { onChange("market") }
+            Seg(if (tp) "Then limit" else "Stop limit · reduce only", exec == "limit", col) { onChange("limit") }
         }
         val src = triggerSource(provider)
         Text(
             when {
+                tp && exec == "rest" -> "Post only, reduce only: a limit sits on the book at your price now, no trigger, and fills as maker when price trades there. MFP refuses it if price is already past."
                 tp && exec == "market" -> "Triggers when $src reaches it, then closes at market."
                 tp -> "Triggers on $src, then a reduce-only limit at your price: never a worse fill, but a quick touch may not fill."
                 exec == "market" -> "Triggers when $src reaches it, then closes at market: fills in a fast move, with slippage."

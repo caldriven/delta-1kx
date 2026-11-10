@@ -128,6 +128,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
     var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginModeFor(accountId)) == "isolated") }
     var reduceOnly by remember { mutableStateOf(false) }
+    var postOnly by remember { mutableStateOf(repo.prefs.postOnly) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }
     var tpsl by remember { mutableStateOf(false) }
     var tpText by remember { mutableStateOf("") }
@@ -174,10 +175,12 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         // The smallest rung: 1 of n(n+1)/2 weights when weighted, 1/n when flat.
         scaled && usd * (if (dist == "flat") 1.0 / rungs else 2.0 / (rungs * (rungs + 1))) < market.minNotional -> "Smallest rung is below the ${fmtUsd(market.minNotional)} minimum"
         size <= 0 -> "Enter a size"
+        marketable && postOnly -> "Post only: this price crosses the book. Move it past the ${if (buy) "ask" else "bid"} or turn post only off"
+        ladderCrosses && postOnly -> "Post only: some rungs cross the book. Move the range or turn post only off"
         size < market.minSize -> "Below minimum size ${fmtSize(market.minSize)} ${market.symbol}"
         usd < market.minNotional -> "Below minimum ${fmtUsd(market.minNotional)}"
-        tp != null && refPx != null && (if (buy) tp <= refPx else tp >= refPx) -> "Take profit is on the wrong side"
-        sl != null && refPx != null && (if (buy) sl >= refPx else sl <= refPx) -> "Stop loss is on the wrong side"
+        tp != null && refPx != null && (if (buy) tp <= refPx else tp >= refPx) -> "Take profit must be ${if (buy) "above" else "below"} the price"
+        sl != null && refPx != null && (if (buy) sl >= refPx else sl <= refPx) -> "Stop loss must be ${if (buy) "below" else "above"} the price"
         else -> null
     }
     val sideCol = if (buy) C.up else C.down
@@ -215,7 +218,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 put("rung_count", rungs); put("distribution", dist)
                 put("leverage", lev); put("margin_mode", if (isolated) "isolated" else "cross")
                 if (reduceOnly) put("reduce_only", true)
-                if (ladderCrosses) put("marketable_limit_acknowledged", true)
+                if (ladderCrosses && !postOnly) put("marketable_limit_acknowledged", true)
             }
             scope.launch {
                 val r = repo.placeScaled("Scaled $sideWord ${market.symbol}", ladder)
@@ -239,7 +242,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 capPx?.let { put("chase_cap_price", snapPx(it)) }
             } else if (limit) {
                 put("type", "limit"); put("limit_price", snapPx(limitPx!!))
-                if (marketable) put("marketable_limit_acknowledged", true)
+                if (marketable && !postOnly) put("marketable_limit_acknowledged", true)
             } else {
                 put("type", "market")
                 put("expected_price", quote?.estimatedFillPrice ?: refPx ?: 0.0)
@@ -288,7 +291,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 AccountSwitcher(repo, Modifier.weight(1f))
                 risk?.let {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("Drawdown left", color = C.muted, fontSize = 10.sp)
+                        Text("Room left", color = C.muted, fontSize = 10.sp)
                         Text(fmtUsd(it.room), style = num.copy(fontWeight = FontWeight.Bold, color = roomColor(it.roomFraction)))
                     }
                 }
@@ -307,8 +310,8 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         Text("−", color = if (held == null && lev > 1) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("${lev}×", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold))
-                        Text(if (held != null) "position's" else "max ${maxLev}×", color = C.muted, fontSize = 9.sp)
+                        Text("${lev}x", style = num.copy(fontSize = 15.sp, fontWeight = FontWeight.Bold))
+                        Text(if (held != null) "position's" else "max ${maxLev}x", color = C.muted, fontSize = 9.sp)
                     }
                     Box(Modifier.width(48.dp).fillMaxHeight().clickable(enabled = held == null && lev < maxLev) { lev = (lev + 1).coerceAtMost(maxLev) }, contentAlignment = Alignment.Center) {
                         Text("+", color = if (held == null && lev < maxLev) C.text else C.muted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -317,7 +320,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             }
             if (held == null) Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(1, 2, 3, 5, 10, 20, 25, 40, 50).filter { it < maxLev }.plus(maxLev).distinct().forEach { l ->
-                    Seg("${l}×", l == lev, C.accent) { lev = l }
+                    Seg("${l}x", l == lev, C.accent) { lev = l }
                 }
             }
 
@@ -391,6 +394,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         }
                     }
                 }
+                Check("Post only", postOnly) { postOnly = it; repo.prefs.postOnly = it }
             } else if (limit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NumField("Limit price", priceText, { priceText = it }, Modifier.weight(1f))
@@ -400,7 +404,16 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                         priceText = (best ?: mark)?.let(::px) ?: ""
                     }) { Text("Best", color = C.accent) }
                 }
-                if (marketable) Text("Crosses the book: fills immediately as a market order", color = C.accent, fontSize = 11.sp)
+                Check("Post only", postOnly) { postOnly = it; repo.prefs.postOnly = it }
+                Text(
+                    when {
+                        marketable && postOnly -> "Crosses the book: post only blocks it"
+                        marketable -> "Crosses the book: fills immediately as a market order"
+                        postOnly -> "Rests on the book as maker; refused if it would fill at once"
+                        else -> "Rests on the book, or fills at market if the price is already past"
+                    },
+                    color = if (marketable) C.accent else C.muted, fontSize = 11.sp,
+                )
             }
             NumField("Size (USD)", usdText, { usdText = it }, Modifier.fillMaxWidth())
             // Size as a share of buying power (available × leverage).
@@ -423,7 +436,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                     for (f in listOf(0.25, 0.5, 1.0)) {
                         QuickBtn("${(f * 100).toInt()}%", C.text, Modifier.weight(1f)) {
                             if (busy) return@QuickBtn
-                            if (repo.prefs.confirmOrders || (f == 1.0 && repo.prefs.confirmCloseAll)) closeAsk = f
+                            if (repo.prefs.needsConfirm(if (f == 1.0) com.alex.mfppro.data.Confirm.Full else com.alex.mfppro.data.Confirm.Order)) closeAsk = f
                             else { busy = true; scope.launch { val r = repo.closePosition(h, f); busy = false; if (r is TradeResult.Ok && f == 1.0) onDismiss() } }
                         }
                     }
@@ -466,7 +479,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
             // Hard rule: no new exposure in the night window. Reduce-only orders still go through.
             val lockedNow = repo.prefs.locked() && !reduceOnly
             if (lockedNow) Text(
-                String.format(Locale.US, "No new trades before %02d:00 Oslo (now %s).", repo.prefs.lockEnd, java.time.LocalTime.now(OSLO).withNano(0).withSecond(0)),
+                repo.prefs.lockMessage(),
                 color = C.down, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 8.dp),
             )
 
@@ -485,7 +498,7 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
         val lockedSend = repo.prefs.locked() && !reduceOnly
         Column(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 14.dp, vertical = 8.dp)) {
             SolidBtn(
-                if (busy) "Sending…" else if (lockedSend) "Locked until ${repo.prefs.lockEnd}:00 Oslo" else "$sideWord ${market.symbol}" + if (usd > 0) "  ${fmtUsd(usd)}" else "",
+                if (busy) "Sending…" else if (lockedSend) "Locked until ${repo.prefs.lockUntil()} Oslo" else "$sideWord ${market.symbol}" + if (usd > 0) "  ${fmtUsd(usd)}" else "",
                 sideCol, Modifier.fillMaxWidth(), enabled = problem == null && !busy && !lockedSend,
             ) { if (repo.prefs.confirmOrders) confirm = true else submit() }
             problem?.let { Text(it, color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp)) }
@@ -499,14 +512,14 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
                 stop -> (if (stopLimit) "Stop limit ${fmtPrice(limitPx?.let(::snapPx), market)}" else "Stop market") + " · trigger ${fmtPrice(triggerPx?.let(::snapPx), market)}"
                 chase -> "Chase" + (if (chasePct > 0) String.format(Locale.US, " %s%.2f%%", if (buy) "−" else "+", chasePct) else " at touch") + (capPx?.let { " · cap ${fmtPrice(snapPx(it), market)}" } ?: "")
                 scaled -> "Scaled ${fmtPrice(startPx?.let(::snapPx), market)} → ${fmtPrice(endPx?.let(::snapPx), market)} · $rungs rungs"
-                limit -> "Limit @ ${fmtPrice(limitPx?.let(::snapPx), market)}"
+                limit -> "Limit @ ${fmtPrice(limitPx?.let(::snapPx), market)}" + if (postOnly) " · post only" else ""
                 else -> "Market"
             }),
             if (!limit && !stop && !chase && !scaled) ConfirmRow("Size", "${fmtSize(size)} ${market.symbol}") else null,
             if (!limit && !stop && !chase && !scaled) quote?.estimatedFillPrice?.let { ConfirmRow("Est. fill", fmtPrice(it, market)) } else null,
             if (!limit && !stop && !chase && !scaled) ConfirmRow("Max slippage", String.format(Locale.US, "%.2f%%", repo.prefs.slippageBps / 100.0)) else null,
             ConfirmRow("Leverage", "${lev}x ${if (isolated) "isolated" else "cross"}"),
-            ConfirmRow("Account", acc?.account?.name ?: ""),
+            ConfirmRow("Account", acc?.let(::accountName) ?: ""),
             if (reduceOnly) ConfirmRow("Reduce only", "yes") else null,
             tp?.let { ConfirmRow("Take profit", fmtPrice(snapPx(it), market), C.up) },
             sl?.let { ConfirmRow("Stop loss", fmtPrice(snapPx(it), market), C.down) },

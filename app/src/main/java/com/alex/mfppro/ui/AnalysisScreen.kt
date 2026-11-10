@@ -399,7 +399,7 @@ private fun PairDetail(mx: Matrix, i: Int, j: Int, window: Window) {
                     cc.corr >= 0.7 -> Triple("Same bet", C.down, "Long both = double risk · long one, short the other = hedged pair")
                     cc.corr >= 0.4 -> Triple("Linked", C.accent, "Partly the same bet: size them as one")
                     cc.corr > -0.4 -> Triple("Independent", C.up, "Holding both spreads risk")
-                    else -> Triple("Opposite", POS_C, "Same-side positions offset each other")
+                    else -> Triple("Opposite", NEG_C, "Same-side positions offset each other")
                 }
                 Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(C.bg).padding(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

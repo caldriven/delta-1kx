@@ -14,6 +14,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,7 +48,8 @@ fun FillsTab(repo: Repo, acc: AccountState?, market: Market, onPickMarket: (Stri
     val id = acc?.account?.id
     // Reload when a position opens or closes on this account.
     val posKey = acc?.positions?.keys?.sorted()?.joinToString()
-    LaunchedEffect(id, reload, posKey) {
+    val tick by repo.refreshTick.collectAsStateWithLifecycle()
+    LaunchedEffect(id, reload, posKey, tick) {
         if (id == null) return@LaunchedEffect
         error = null
         if (fills?.firstOrNull()?.accountId != id) { fills = null; shown = 30 }
@@ -127,10 +129,10 @@ private fun FillRow(f: Fill, onClick: () -> Unit) {
             .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        VenueTag(f.provider, 13.dp)
-        Spacer(Modifier.width(6.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                CoinLogo(f.symbol, f.provider, 16.dp)
+                Spacer(Modifier.width(6.dp))
                 Text(f.symbol, color = C.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(6.dp))
                 Tag(kind, if (buy) C.up else C.down)
@@ -142,6 +144,8 @@ private fun FillRow(f: Fill, onClick: () -> Unit) {
                 style = num.copy(fontSize = 10.sp, color = C.muted), maxLines = 1,
             )
         }
+        VenueTag(f.provider, 14.dp)
+        Spacer(Modifier.width(10.dp))
         Column(horizontalAlignment = Alignment.End) {
             if (closing) Text(fmtUsd(f.realizedPnl - f.fee, true), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = pnlColor(f.realizedPnl - f.fee)))
             Text("fee " + fmtUsd(f.fee), style = num.copy(fontSize = 10.sp, color = C.muted))
