@@ -64,6 +64,12 @@ class TradeApi(private val http: OkHttpClient) {
     suspend fun closePosition(key: String, positionId: String, body: JsonObject) =
         write(key, "POST", "/v1/positions/${enc(positionId)}/close", body, idempotent = true)
 
+    /** Reprice a working order (and optionally resize it) in place. */
+    suspend fun modifyOrder(key: String, orderId: String, price: Double, size: Double? = null) =
+        write(key, "PATCH", "/v1/orders/${enc(orderId)}", buildJsonObject {
+            put("price", price); size?.let { put("size", it) }
+        }, idempotent = false)
+
     suspend fun cancelOrder(key: String, orderId: String) =
         write(key, "DELETE", "/v1/orders/${enc(orderId)}", null, idempotent = false)
 

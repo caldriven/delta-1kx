@@ -108,7 +108,15 @@ data class Order(
     val status: String = "",
     val bracketRole: String? = null,
     val leverage: Double? = null,
+    /** Set by Repo.exitsOf when this resting limit covers the whole position: it is the position's TP. */
+    @kotlinx.serialization.Transient val restingTp: Boolean = false,
 ) {
+    /**
+     * A plain reduce-only limit resting on the book (no trigger, not a chase). Repo.exitsOf treats a
+     * full-size one as the position's take profit; it lives outside MFP's TP/SL batch.
+     */
+    val isRestingExit get() = reduceOnly && bracketRole == null && type == "limit" && (mode == null || mode == "limit") && chaseOffset == null
+
     /** Protective exit group for TP/SL batches, or null for an ordinary order. */
     val exitGroup: String?
         get() = when {
@@ -117,9 +125,11 @@ data class Order(
             !reduceOnly -> null
             type.startsWith("take") -> "tp"
             type.startsWith("stop") -> "sl"
+            restingTp -> "tp"
             else -> null
         }
-    val exitExecution get() = if (type.endsWith("_limit")) "limit" else "market"
+    /** "market" (trigger, then market), "limit" (trigger, then limit) or "rest" (resting limit, no trigger). */
+    val exitExecution get() = if (isRestingExit) "rest" else if (type.endsWith("_limit")) "limit" else "market"
     /**
      * The exit's own price. A limit TP/SL rests at its limit; MFP arms it with a trigger a little
      * before that, which is not the price you set.

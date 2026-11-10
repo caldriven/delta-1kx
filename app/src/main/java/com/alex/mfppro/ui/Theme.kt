@@ -184,6 +184,9 @@ fun fmtUsdWhole(v: Double?): String {
     return (if (r < 0) "-" else "") + "$" + String.format(Locale.US, "%,.0f", abs(r))
 }
 
+/** Funding rate per interval, as a signed percent with four decimals ("—" when unknown). */
+fun fmtFunding(rate: Double?): String = rate?.let { String.format(java.util.Locale.US, "%+.4f%%", it * 100) } ?: "—"
+
 fun fmtPct(v: Double?, signed: Boolean = true): String {
     if (v == null) return "—"
     return String.format(Locale.US, if (signed) "%+.2f%%" else "%.2f%%", v)

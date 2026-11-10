@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import android.net.ConnectivityManager
@@ -37,6 +38,7 @@ fun roundSize(size: Double, m: Market?): Double =
     BigDecimal.valueOf(size).setScale(m?.sizeDecimals ?: 6, RoundingMode.DOWN).toDouble()
 private const val BACKGROUND_GRACE_MS = 20_000L
 private const val RISK_REFRESH_MS = 15_000L
+private const val STALE_AFTER_MS = 60_000L
 
 class Repo(ctx: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -162,10 +164,15 @@ class Repo(ctx: Context) {
                     "venue_conflict" -> "You already hold this on another venue: close that first or switch venue"
                     "network" -> "No answer from MFP. Check open orders before retrying. (${r.message})"
                     "stale_snapshot" -> "The TP/SL changed on MFP since the app last saw it. Wait a moment and try again."
+                    "account_trader_lockout_active" -> "Trader lockout is on: MFP refuses new orders, edits and cancels until it ends. Existing TP/SL still work."
+                    "competition_finalization_pending" -> "Competition is closing: retry in a few minutes."
+                    "rate_limited" -> "Too many requests from this network: wait a minute and retry."
                     else -> r.message
                 } + if (r.code !in setOf("exposure_cap", "venue_conflict", "network")) "  [${r.code}]" else "")
             }
         )
+        // MFP: refresh the trading policy after a rejection, not on a timer alone.
+        if (r is TradeResult.Rejected) policyAt.clear()
         refreshRiskSoon()
         return r
     }
@@ -244,7 +251,16 @@ class Repo(ctx: Context) {
 
     fun exitsOf(p: Position): List<Order> =
         account.accounts.value[p.accountId]?.orders?.values.orEmpty()
-            .filter { it.marketId == p.marketId && it.exitGroup != null }
+            .filter { it.marketId == p.marketId }
+            .mapNotNull { o ->
+                when {
+                    o.exitGroup != null -> o
+                    // A resting reduce-only limit on the closing side for the full size is the TP; a partial
+                    // one is a scale-out the user placed and stays an ordinary order.
+                    o.isRestingExit && o.side == (if (p.isLong) "sell" else "buy") && o.size >= p.size * 0.999 -> o.copy(restingTp = true)
+                    else -> null
+                }
+            }
 
     /**
      * Set (or with null remove) the position's TP and SL in one atomic batch.
@@ -256,22 +272,42 @@ class Repo(ctx: Context) {
         tpExec: String? = null, slExec: String? = null,
     ): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
-        val current = exitsOf(p)
+        val all = exitsOf(p)
+        // Resting limits aren't MFP exit orders: they are cancelled and placed one by one.
+        val current = all.filter { !it.isRestingExit }
+        val restingCancels = mutableListOf<Order>()
+        var restingPlace: Double? = null
+        var restingModify: Pair<Order, Double>? = null
         val ops = mutableListOf<JsonObject>()
         val placed = mutableMapOf<String, Int>()
         // Every exit price lands on the market's tick (breakeven at an average entry, guard stops, drags).
         val m = market(p.marketId)
         fun snap(v: Double?) = v?.let { x -> m?.let { com.alex.mfppro.ui.snapTick(x, it) } ?: x }
         for ((group, price) in listOf("tp" to snap(tp), "sl" to snap(sl))) {
-            val existing = current.filter { it.exitGroup == group }
             val asked = if (group == "tp") tpExec else slExec
-            val exec = asked ?: existing.firstOrNull()?.exitExecution ?: if (group == "tp") prefs.tpExecution else prefs.slExecution
+            val resting = all.filter { it.exitGroup == group && it.isRestingExit }
+            var exec = asked ?: all.firstOrNull { it.exitGroup == group }?.exitExecution ?: if (group == "tp") prefs.tpExecution else prefs.slExecution
+            if (group == "sl" && exec == "rest") exec = "limit" // a stop can not rest on the book
+            val existing = current.filter { it.exitGroup == group }
+            if (exec == "rest") {
+                // Cancel any trigger TP; keep a resting one already at this price and size.
+                existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
+                val keepRest = if (price == null) null else resting.firstOrNull()
+                restingCancels += resting.filter { it !== keepRest }
+                if (keepRest != null && price != null) {
+                    if (keepRest.limitPrice != price || keepRest.size != p.size) restingModify = keepRest to price
+                } else if (price != null) restingPlace = price
+                continue
+            }
+            restingCancels += resting
             // Modify can't change how an exit executes; switching means cancel and place again.
             val keep = existing.firstOrNull()?.takeIf { it.exitExecution == exec }
             if (price == null) {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else if (keep != null) {
-                ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
+                // Unchanged (e.g. the other leg is being removed): leave it out of the batch.
+                if (keep.exitPrice != price || keep.size != p.size)
+                    ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
                 existing.filter { it !== keep }.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
@@ -285,11 +321,38 @@ class Repo(ctx: Context) {
             ops[t] = JsonObject(ops[t] + ("oco_pair_with_operation_index" to JsonPrimitive(s)))
             ops[s] = JsonObject(ops[s] + ("oco_pair_with_operation_index" to JsonPrimitive(t)))
         }
-        if (ops.isEmpty()) return TradeResult.Ok(null)
-        var r = trade.replaceExits(key, p, current, ops)
-        // Older limit exits may be known to MFP by their trigger rather than their limit: try that once.
-        if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
-            r = trade.replaceExits(key, p, current, ops, armPrice = true)
+        if (ops.isEmpty() && restingCancels.isEmpty() && restingPlace == null && restingModify == null) return TradeResult.Ok(null)
+        var r: TradeResult = TradeResult.Ok(null)
+        if (ops.isNotEmpty()) {
+            r = trade.replaceExits(key, p, current, ops)
+            // Older limit exits may be known to MFP by their trigger rather than their limit: try that once.
+            if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
+                r = trade.replaceExits(key, p, current, ops, armPrice = true)
+            if (r is TradeResult.Rejected) return report(label, r)
+        }
+        // Old resting TPs go before the new one is placed, so reduce-only size never overlaps.
+        for (o in restingCancels) {
+            val c = trade.cancelOrder(key, o.id)
+            if (c is TradeResult.Rejected) return report(label, c)
+        }
+        restingModify?.let { (o, px) ->
+            r = trade.modifyOrder(key, o.id, px, p.size.takeIf { it != o.size })
+            // Not modifiable (or gone): fall back to a fresh resting limit.
+            if (r is TradeResult.Rejected && (r as TradeResult.Rejected).code != "network") {
+                val c = trade.cancelOrder(key, o.id)
+                if (c !is TradeResult.Rejected) restingPlace = px
+            }
+        }
+        restingPlace?.let { px ->
+            // No marketable acknowledgement: MFP refuses it rather than filling at market if it would cross.
+            r = trade.placeOrder(key, buildJsonObject {
+                put("type", "limit"); put("account_id", p.accountId); put("market_id", p.marketId)
+                put("side", if (p.isLong) "sell" else "buy")
+                put("size", p.size); put("limit_price", px)
+                put("leverage", p.leverage); put("margin_mode", p.marginMode)
+                put("reduce_only", true)
+            })
+        }
         return report(label, r)
     }
 
@@ -317,7 +380,13 @@ class Repo(ctx: Context) {
     private fun refreshRiskSoon() = scope.launch {
         delay(1_500)
         val key = _apiKey.value ?: return@launch
-        for (id in account.accounts.value.keys) refreshAccount(key, id)
+        // Only accounts in play (holding something, or the one being traded): with dozens of accounts a
+        // refresh of every one after each order would be a burst of 100+ requests.
+        for (st in account.accounts.value.values) {
+            val busy = st.positions.isNotEmpty() || st.orders.isNotEmpty()
+            if (st.account.status == "active" && (busy || st.account.id == _tradeAccount.value))
+                refreshAccount(key, st.account.id, crossCheck = true)
+        }
     }
 
     fun setApiKey(key: String?) {
@@ -337,8 +406,49 @@ class Repo(ctx: Context) {
         _selected.value = ids
     }
 
+    /** Bumped on every refresh; screens that load REST data once key their loads on it. */
+    private val _refreshTick = MutableStateFlow(0)
+    val refreshTick = _refreshTick.asStateFlow()
+    @Volatile private var backgroundAt = 0L
+
+    /**
+     * Pull everything fresh without restarting the app: a new account snapshot (no resume),
+     * a new market socket with chart history, markets, risk floors, policies and the
+     * overview stats, and a tick for screens that loaded REST data.
+     */
+    @Volatile private var lastRefreshAt = 0L
+
+    fun refreshAll() {
+        // Repeated pulls or badge taps would reopen the account socket each time (MFP caps sockets per key).
+        val now = System.currentTimeMillis()
+        if (now - lastRefreshAt < 3_000) return
+        lastRefreshAt = now
+        pauseJob?.cancel()
+        account.resync()
+        market.refresh()
+        loadMarkets(force = true)
+        extrasLoadedAt = 0; chg1hAtById.clear(); chg4hAt = 0
+        policyAt.clear()
+        startRiskRefresh()
+        _refreshTick.update { it + 1 }
+    }
+
+    /** [refreshAll], then wait (up to 8 s) until the account stream is live again. */
+    suspend fun refreshAndWait() {
+        refreshAll()
+        // conn still reads Live until the serial reconnect runs: first see it leave Live, then come back.
+        kotlinx.coroutines.withTimeoutOrNull(1_500) { account.conn.first { it != Conn.Live } }
+        kotlinx.coroutines.withTimeoutOrNull(8_000) {
+            account.conn.first { it == Conn.Live || it == Conn.AuthFailed || it == Conn.Off }
+        }
+    }
+
     private fun onForeground() {
         pauseJob?.cancel()
+        val away = if (backgroundAt > 0) System.currentTimeMillis() - backgroundAt else 0
+        backgroundAt = 0
+        // After a minute or more away the resume cursor and REST data are likely stale: start clean.
+        if (away > STALE_AFTER_MS) { refreshAll(); return }
         account.resume()
         market.resume()
         startRiskRefresh()
@@ -350,6 +460,7 @@ class Repo(ctx: Context) {
     fun setBackgroundMonitoring(on: Boolean) { monitoring = on; if (on) onForeground() }
 
     private fun onBackground() {
+        backgroundAt = System.currentTimeMillis()
         if (monitoring) return
         riskJob?.cancel()
         pauseJob = scope.launch {
@@ -388,13 +499,15 @@ class Repo(ctx: Context) {
     /** Rolling 1-hour change per market, from twelve 5-minute candles; refreshed every 2 min at most. */
     private val _chg1h = MutableStateFlow<Map<String, Double>>(emptyMap())
     val chg1h = _chg1h.asStateFlow()
-    private var chg1hAt = 0L
-    private var chg1hJob: Job? = null
+    // Per market, so the scanner's short list doesn't hold back the full market list.
+    private val chg1hAtById = java.util.concurrent.ConcurrentHashMap<String, Long>()
     fun load1h(only: List<Market> = _markets.value) {
-        if (chg1hJob?.isActive == true || System.currentTimeMillis() - chg1hAt < 2 * 60_000) return
-        chg1hJob = scope.launch {
-            chg1hAt = System.currentTimeMillis()
-            for (m in only) launch {
+        val now = System.currentTimeMillis()
+        val due = only.filter { now - (chg1hAtById[it.marketId] ?: 0L) >= 2 * 60_000 }
+        if (due.isEmpty()) return
+        due.forEach { chg1hAtById[it.marketId] = now }
+        scope.launch {
+            for (m in due) launch {
                 val c = runCatching { market.candleHistory(m.provider, m.coin, "5m", 13) }.getOrNull().orEmpty()
                 if (c.size >= 12) {
                     val open = c[c.size - 12].o
@@ -404,8 +517,9 @@ class Repo(ctx: Context) {
         }
     }
 
-    private fun loadMarkets() = scope.launch {
+    private fun loadMarkets(force: Boolean = false) = scope.launch {
         loadVenues()
+        if (force) runCatching { rest.markets() }.onSuccess { list -> _markets.value = list.filter { it.tradingEnabled }.sortedBy { it.symbol } }
         var wait = 1_000L
         while (isActive && _markets.value.isEmpty()) {
             runCatching { rest.markets() }
@@ -420,16 +534,34 @@ class Repo(ctx: Context) {
         val key = _apiKey.value ?: return
         riskJob = scope.launch {
             var tries = 0
+            var pass = 0
             while (isActive) {
-                // Active accounts carry live rules; failed/passed ones never change, so skip them.
+                // With many accounts (one key can reach dozens), only the ones that can move right now are polled
+                // fast: those holding positions or orders, and the account being traded. Their drawdown floor can
+                // trail equity. Other active accounts only change through fills, which the stream reports and
+                // which trigger a refresh anyway, so every 2 min is enough. Breached or finished accounts: never,
+                // they can't trade and the app doesn't show them.
                 val known = account.accounts.value.values
-                // Give the stream a moment to list the accounts so the active ones go first.
+                // Give the stream a moment to list the accounts.
                 if (known.isEmpty() && tries++ < 10) { delay(1_000); continue }
-                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).map { it.id } }.getOrDefault(emptyList())
-                    else known.filter { it.account.status == "active" || it.account.risk == null }
-                        .sortedBy { if (it.account.status == "active") 0 else 1 }.map { it.account.id }
-                for (id in ids) refreshAccount(key, id)
-                delay(RISK_REFRESH_MS)
+                val vis = _visible.value
+                val ids = if (known.isEmpty()) runCatching { rest.accounts(key).filter { it.status == "active" }.map { it.id } }.getOrDefault(emptyList())
+                    else known.filter { s ->
+                        val id = s.account.id
+                        when {
+                            s.account.status != "active" -> false
+                            s.positions.isNotEmpty() || s.orders.isNotEmpty() || id == _tradeAccount.value -> true
+                            else -> pass % 8 == 0
+                        }
+                    }.map { it.account.id }
+                // Position/order cross-check: once a minute, only where there is something to check, never in the background.
+                for (id in ids) {
+                    val st = account.accounts.value[id]
+                    val busy = st == null || st.positions.isNotEmpty() || st.orders.isNotEmpty()
+                    refreshAccount(key, id, crossCheck = vis && pass % 4 == 0 && busy)
+                }
+                pass++
+                delay(if (vis) RISK_REFRESH_MS else 60_000L)
             }
         }
     }
@@ -467,7 +599,7 @@ class Repo(ctx: Context) {
     val policies = _policies.asStateFlow()
     private val policyAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    private suspend fun refreshAccount(key: String, id: String) {
+    private suspend fun refreshAccount(key: String, id: String, crossCheck: Boolean = true) {
         val acc = runCatching { rest.account(key, id) }.onFailure { Log.w(TAG, "account $id: ${it.message}") }.getOrNull() ?: return
         account.mergeRisk(acc)
         if (acc.status == "active" && System.currentTimeMillis() - (policyAt[id] ?: 0) > 600_000) {
@@ -476,7 +608,13 @@ class Repo(ctx: Context) {
                 Competitions.ids = if (pol.competition != null) Competitions.ids + id else Competitions.ids - id
             }
         }
-        if (acc.status == "active") runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it) }
+        if (acc.status == "active" && crossCheck) {
+            val asked = System.currentTimeMillis()
+            runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it, asked) }
+            // A full page may be cut off (MFP pages at 100): never drop orders on the strength of it.
+            runCatching { rest.workingOrders(key, id) }.onSuccess { if (it.size < 100) account.reconcileOrders(id, it, asked) }
+                .onFailure { Log.w(TAG, "orders $id: ${it.message}") }
+        }
     }
 
     // ---- market overview ----------------------------------------------
@@ -490,7 +628,7 @@ class Repo(ctx: Context) {
 
     /** Asset classes (cached), then 7-day change and 24h OI change for every market, every 15 min at most. */
     fun loadOverviewExtras() {
-        if (extrasJob?.isActive == true || System.currentTimeMillis() - extrasLoadedAt < 15 * 60_000 &&
+        if (extrasJob?.isActive == true || ServerClock.now() - extrasLoadedAt < 15 * 60_000 &&
             extrasLoadedAt >= Opens.dayStart()) return
         extrasJob = scope.launch {
             runCatching { AssetClasses.load(http) }.onSuccess {
@@ -512,7 +650,7 @@ class Repo(ctx: Context) {
                     } finally { gate.release() }
                 }
             }
-            extrasLoadedAt = System.currentTimeMillis()
+            extrasLoadedAt = ServerClock.now()
         }
     }
 }

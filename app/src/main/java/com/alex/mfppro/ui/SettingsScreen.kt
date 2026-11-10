@@ -78,7 +78,7 @@ private val ABOUT = Color(0xFF94A3B8)
  * pnl:<id|default>, chart, display.
  */
 @Composable
-fun SettingsScreen(repo: Repo) {
+fun SettingsScreen(repo: Repo, onBack: () -> Unit = {}) {
     var page by rememberSaveable { mutableStateOf("home") }
     var resetAsk by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -105,7 +105,7 @@ fun SettingsScreen(repo: Repo) {
             .padding(horizontal = 10.dp).padding(bottom = 24.dp),
     ) {
         when {
-            page == "home" -> Home(repo) { page = it }
+            page == "home" -> Home(repo, onBack) { page = it }
             page == "api" -> Page("Account & API key", ::up) { ApiPage(repo) { page = it } }
             page == "about" -> Page("About Delta 1kx", ::up) { AboutPage(repo) { page = it } }
             page == "accounts" -> Page("Accounts", ::up) { AccountsPage(repo) { page = it } }
@@ -147,10 +147,11 @@ private fun targetName(repo: Repo, t: String) =
     if (t == "default") "All accounts" else repo.account.accounts.value[t]?.let(::accountName) ?: "Account"
 
 @Composable
-private fun Home(repo: Repo, open: (String) -> Unit) {
+private fun Home(repo: Repo, onBack: () -> Unit, open: (String) -> Unit) {
     val key by repo.apiKey.collectAsStateWithLifecycle()
     val p = repo.prefs
-    Text("Settings", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text, modifier = Modifier.padding(4.dp, 8.dp, 4.dp, 4.dp))
+    // Same back arrow as every sub-page, so Settings has a visible way out.
+    Page("Settings", onBack) {}
     Column(Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
         NavRow("Account & API key", key?.let { (if (it.startsWith("fp_test_")) "Sandbox" else "Live") + " key …" + it.takeLast(4) } ?: "No key yet", API, Icons.Filled.Key) { open("api") }
         NavRow("About Delta 1kx", "Alpha ${appVersion(androidx.compose.ui.platform.LocalContext.current)} · by $CREATOR · terms and licenses", ABOUT, Icons.Filled.Info) { open("about") }
@@ -519,7 +520,7 @@ private fun DisplayPage(repo: Repo) {
     }
     Section("Accounts", DISPLAY, Icons.Filled.Palette) {
         var hideComp by remember { mutableStateOf(repo.prefs.hideComp) }
-        Toggle("Hide competition accounts", "Out of Positions, Accounts and totals", hideComp, DISPLAY) {
+        Toggle("Hide competition accounts", "Out of positions, account pickers and totals", hideComp, DISPLAY) {
             hideComp = it; repo.prefs.hideComp = it; Comp.hide = it
         }
         ChipPick("Profit split (your share of positive PnL)", listOf(100, 90, 80), Split.pct, PNL, { "$it%" }) { Split.pct = it; repo.prefs.profitSplit = it }
@@ -609,6 +610,12 @@ private fun AboutPage(repo: Repo, open: (String) -> Unit) {
     Section("Alpha testing", ALERTS, Icons.Filled.Info) {
         Text(ALPHA_ABOUT, color = C.text, fontSize = 13.sp, lineHeight = 18.sp)
         Note("Report bugs and wrong numbers to $CREATOR on X.")
+        Text("Build " + com.alex.mfppro.BuildConfig.GIT_SHA + " · " + com.alex.mfppro.BuildConfig.BUILD_TIME + (if (com.alex.mfppro.BuildConfig.DEBUG) " · DEBUG (slow)" else ""),
+            color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+    }
+    Section("Alpha features", ALERTS, Icons.Filled.Info) {
+        var flow by remember { mutableStateOf(repo.prefs.showFlowChart) }
+        Toggle("Flow chart", "Order-flow bubbles tab on the Trade screen; rough", flow, ALERTS) { flow = it; repo.prefs.showFlowChart = it }
     }
     Section("Made by", ABOUT, Icons.Filled.AlternateEmail) {
         Row(

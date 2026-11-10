@@ -174,6 +174,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         val word = (if (limitPx != null) "Limit " else "") + if (buy) "Long" else "Short"
         // A limit at or through the touch fills straight away; the server wants that acknowledged.
         val crosses = limitPx != null && (if (buy) limitPx >= (book?.asks?.firstOrNull()?.px ?: Double.MAX_VALUE) else limitPx <= (book?.bids?.firstOrNull()?.px ?: 0.0))
+        // Post only (set in the order panel): a crossing limit is refused here rather than filled at market.
+        if (crosses && repo.prefs.postOnly) {
+            repo.postMessage("Post only: the limit crosses the book. Move it past the ${if (buy) "ask" else "bid"}, or turn post only off in the order panel")
+            return
+        }
         val run: suspend () -> Unit = {
             if (held == null) repo.prefs.setLeverage(market.marketId, lev)
             repo.placeOrder("$word ${market.symbol}", buildJsonObject {
@@ -193,11 +198,13 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         }
         // How far price can move against this position before the account hits its floor.
         val breachMove = riskOf(acc, marks).room?.takeIf { usd > 0 }?.let { it / usd * 100 }
-        val detail = (if (limitPx != null) "Limit ${if (buy) "buy" else "sell"} at ${fmtPrice(limitPx)}" + (if (crosses) " (crosses the book: fills now)" else "") else "Market ${if (buy) "buy" else "sell"}") +
+        val detail = (if (limitPx != null) "Limit ${if (buy) "buy" else "sell"} at ${fmtPrice(limitPx)}" + (if (crosses) " (crosses the book: fills now)" else if (repo.prefs.postOnly) " · post only" else "") else "Market ${if (buy) "buy" else "sell"}") +
             " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
             (if (reduceOnly) ", reduce only" else "") + " on ${accountName(acc)}." +
             (if (!reduceOnly && breachMove != null) String.format(Locale.US, "\nA %.2f%% move against it reaches your drawdown floor.", breachMove) else "")
-        if (repo.prefs.confirmOrders) ask = Triple("$word ${market.symbol} ≈ ${fmtUsd(usd)}", detail, run)
+        // Reducing by the whole position is a full close and follows that setting.
+        val full = reduceOnly && held != null && size >= held.size * 0.999
+        if (repo.prefs.needsConfirm(if (full) com.alex.mfppro.data.Confirm.Full else com.alex.mfppro.data.Confirm.Order)) ask = Triple("$word ${market.symbol} ≈ ${fmtUsd(usd)}", detail, run)
         else scope.launch { busy = true; run(); busy = false }
     }
 
@@ -282,7 +289,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
               }
             }
         }
-        if (locked) Text("Night lock until ${repo.prefs.lockEnd}:00", color = C.down, fontSize = 11.sp)
+        if (locked) Text(repo.prefs.lockMessage(), color = C.down, fontSize = 11.sp)
     }
 
     ask?.let { (headline, detail, run) ->

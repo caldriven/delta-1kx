@@ -27,6 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,7 +70,8 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
     var reload by remember { mutableIntStateOf(0) }
     var picker by remember { mutableStateOf(false) }
     val accountId = acc?.account?.id
-    LaunchedEffect(accountId, reload) {
+    val tick by repo.refreshTick.collectAsStateWithLifecycle()
+    LaunchedEffect(accountId, reload, tick) {
         if (accountId == null) return@LaunchedEffect
         trades = null; error = null
         runCatching { repo.closedPositions(accountId) }.onSuccess { trades = it }.onFailure { error = it.message ?: "Couldn't load trades" }
@@ -80,14 +82,10 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
     var day by remember { mutableStateOf<LocalDate?>(null) }
     val byDay = closed.groupBy { it.day }.mapValues { (_, v) -> v.sumOf { it.net } }
 
+    RefreshBox(repo) {
     LazyColumn(Modifier.fillMaxSize().background(C.bg), state = listState, contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)) {
-        item {
-            Row(Modifier.fillMaxWidth().padding(14.dp, 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Journal", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = C.text)
-                Spacer(Modifier.weight(1f))
-                Icon(Icons.Filled.Refresh, "Reload", tint = C.muted, modifier = Modifier.clip(RoundedCornerShape(50)).clickable { reload++ }.padding(6.dp).size(20.dp))
-            }
-        }
+        // Same header as the Dashboard: the Live badge refreshes everything, the journal included.
+        item { ScreenHeader(repo, "Journal", onOpenSettings) }
         if (acc == null) { item { Text("No active account", color = C.muted, modifier = Modifier.padding(16.dp)) }; return@LazyColumn }
         item {
             Row(
@@ -118,6 +116,7 @@ fun JournalScreen(repo: Repo, onOpenSettings: () -> Unit) {
                 items(scope, key = { it.p.id }) { TradeRow(it) }
             }
         }
+    }
     }
     if (picker) AccountPickerSheet(repo) { picker = false }
 }

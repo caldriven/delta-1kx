@@ -154,7 +154,7 @@ internal fun SetupScanner(
         for (s in list) {
             s.tags.clear()
             val oi = extras[s.m.marketId]?.oi24h
-            if (s.volRatio < 0.7 && s.volumeRatio > 1.2 && (oi ?: 0.0) > 2) s.tags += "Coiled" to Color(0xFF22D3EE)
+            if (s.volRatio < 0.7 && s.volumeRatio > 1.2 && (oi ?: 0.0) > 2) s.tags += "Coiled" to C.target
             if (s.beta >= 1.2 && s.rs24 > 0) s.tags += "Leader" to C.up
             if (s.rs24 < -2) s.tags += "Weak vs BTC" to C.accent
             if (s.volRatio > 2) s.tags += "Overheated" to C.down
@@ -199,7 +199,7 @@ private fun SetupRow(s: Setup, chg1h: Double?, oi: Double?, onClick: () -> Unit)
             fun part(label: String, value: String, col: Color) { withStyle(st) { append(label) }; withStyle(SpanStyle(color = col)) { append(value) }; withStyle(st) { append("   ") } }
             part("β ", String.format(Locale.US, "%.2f", s.beta), if (s.beta >= 1.2) C.up else C.text)
             part("vs BTC ", fmtPct(s.rs24), pnlColor(s.rs24))
-            part("Vol ", String.format(Locale.US, "%.1f×", s.volRatio), when { s.volRatio > 2 -> C.down; s.volRatio < 0.7 -> Color(0xFF22D3EE); else -> C.text })
+            part("Vol ", String.format(Locale.US, "%.1f×", s.volRatio), when { s.volRatio > 2 -> C.down; s.volRatio < 0.7 -> C.target; else -> C.text })
             part("Volume ", String.format(Locale.US, "%.1f×", s.volumeRatio), if (s.volumeRatio > 1.2) C.up else if (s.volumeRatio < 0.8) C.muted else C.text)
             part("OI ", fmtPct(oi), pnlColor(oi))
         }, style = num.copy(fontSize = 11.sp), maxLines = 1, modifier = Modifier.padding(top = 2.dp))

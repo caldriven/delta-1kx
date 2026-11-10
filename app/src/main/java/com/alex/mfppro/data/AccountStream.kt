@@ -75,6 +75,15 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
     private val _rtt = MutableStateFlow<Long?>(null)
     val rtt = _rtt.asStateFlow()
 
+    /** False while MFP's heartbeat says it lost its own data source: events may be delayed. */
+    private val _upstream = MutableStateFlow(true)
+    val upstream = _upstream.asStateFlow()
+
+    // Fill ids already passed on: a reconnect replays recent fills, which must not alert twice.
+    private val seenFills = object : LinkedHashMap<String, Unit>(256, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?) = size > 500
+    }
+
     // Ping every 3s; no frame for 8s (or 2.5s after a probe) means the socket is dead.
     init {
         scope.launch(serial) {
@@ -106,6 +115,18 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
     /** Drop the socket and reconnect with the resume cursor (network switched). */
     fun reconnect() = scope.launch(serial) { if (key != null && _conn.value != Conn.AuthFailed) { attempt = 0; reconnectNow() } }
 
+    /**
+     * Drop the resume cursor and take a fresh snapshot of every account (manual refresh,
+     * or back from a long stay in the background). Also retries after an auth failure.
+     */
+    fun resync() = scope.launch(serial) {
+        if (key == null) return@launch
+        streamId = null; lastSeq = 0; lastTime = 0
+        building = null
+        attempt = 0
+        reconnectNow()
+    }
+
     fun start(apiKey: String) = scope.launch(serial) {
         if (key != apiKey) {
             key = apiKey
@@ -120,6 +141,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         reconnectJob?.cancel()
         gen++
         ws?.close(1000, null); ws = null
+        _upstream.value = true
         _conn.value = Conn.Off
         _accounts.value = emptyMap()
     }
@@ -199,11 +221,13 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
                 streamId = f.str("stream_id") ?: streamId
                 attempt = 0
                 if (!resumed) building = mutableMapOf()
+                _upstream.value = true
                 _conn.value = Conn.Live
             }
             "snapshot" -> applySnapshot(f)
             "snapshot_end" -> building?.let { _accounts.value = it.toMap(); building = null }
             "pong" -> _rtt.value = System.currentTimeMillis() - pingSentAt
+            "heartbeat" -> _upstream.value = f["upstream_connected"]?.jsonPrimitive?.booleanOrNull ?: true
             "reconnect" -> reconnectNow()
             "error" -> Log.w(TAG, "error frame: $text")
             "order" -> mutate(f) { s ->
@@ -230,7 +254,10 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
                     )
                 }
             }
-            "fill" -> f.obj("fill")?.let { _fills.tryEmit(it) }
+            "fill" -> f.obj("fill")?.let { fill ->
+                val id = fill.str("id")
+                if (id == null || seenFills.put(id, Unit) == null) _fills.tryEmit(fill)
+            }
         }
     }
 
@@ -242,6 +269,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         fun list(vararg keys: String) = keys.firstNotNullOfOrNull { k -> (f[k] ?: frame[k]) as? JsonArray } ?: emptyList()
         val positions = list("positions", "open_positions").mapNotNull { decode<Position>(it.jsonObject) }.associateBy { it.id }
         val orders = list("orders", "working_orders").mapNotNull { decode<Order>(it.jsonObject) }.associateBy { it.id }
+        changedAt[acc.id] = System.currentTimeMillis()
         target()[acc.id] = AccountState(
             // Snapshots don't carry the REST floors; keep the last ones we had.
             account = acc.copy(risk = keepFloors(acc.risk, _accounts.value[acc.id]?.account?.risk)),
@@ -251,6 +279,9 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         )
         publish()
     }
+
+    /** When the stream last changed each account, so an older REST cross-check doesn't undo it. */
+    private val changedAt = HashMap<String, Long>()
 
     /** Snapshots after a non-resumed hello build a fresh map that replaces the old one at snapshot_end. */
     private fun target(): MutableMap<String, AccountState> = building ?: _accounts.value.toMutableMap().also { pending = it }
@@ -264,6 +295,7 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         val id = f.str("account_id") ?: return
         val map = target()
         val cur = map[id] ?: return
+        changedAt[id] = System.currentTimeMillis()
         map[id] = block(cur)
         publish()
     }
@@ -272,14 +304,33 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
      * REST cross-check: if the open positions REST reports differ from what the
      * stream gave us, trust REST. Guards against a missed or unparsed event.
      */
-    fun reconcilePositions(accountId: String, rest: List<Position>) = scope.launch(serial) {
-        if (building != null) return@launch
+    fun reconcilePositions(accountId: String, rest: List<Position>, askedAt: Long) = scope.launch(serial) {
+        // The stream changed this account after the REST call went out: REST may be the older picture.
+        if (building != null || (changedAt[accountId] ?: 0) >= askedAt) return@launch
         val map = target()
         val cur = map[accountId] ?: return@launch
         val fresh = rest.associateBy { it.id }
         if (fresh.keys != cur.positions.keys) {
             Log.w(TAG, "positions out of sync for $accountId, using REST")
             map[accountId] = cur.copy(positions = fresh)
+        }
+        publish()
+    }
+
+    /**
+     * REST cross-check for working orders: if MFP's set, prices or sizes differ from what the
+     * stream gave us (an edit that was accepted but not applied, a missed event), trust REST.
+     */
+    fun reconcileOrders(accountId: String, rest: List<Order>, askedAt: Long) = scope.launch(serial) {
+        if (building != null || (changedAt[accountId] ?: 0) >= askedAt) return@launch
+        val map = target()
+        val cur = map[accountId] ?: return@launch
+        val fresh = rest.associateBy { it.id }
+        fun sig(o: Order) = Triple(o.limitPrice, o.triggerPrice, o.size)
+        val differs = fresh.keys != cur.orders.keys || fresh.any { (id, o) -> cur.orders[id]?.let(::sig) != sig(o) }
+        if (differs) {
+            Log.w(TAG, "orders out of sync for $accountId, using REST")
+            map[accountId] = cur.copy(orders = fresh)
         }
         publish()
     }
