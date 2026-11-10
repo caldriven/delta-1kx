@@ -6,6 +6,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,6 +51,7 @@ import com.alex.mfppro.ui.fmtPrice
 import com.alex.mfppro.ui.fmtSize
 import com.alex.mfppro.ui.fmtUsd
 import com.alex.mfppro.ui.ticker
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
@@ -65,51 +68,127 @@ fun Subscribe(repo: Repo, sub: Sub) {
 
 // ---- watchlist ------------------------------------------------------------
 
+/** Columns of the market list; each header sorts by it (again: flips the direction). */
+private enum class Col(val head: String, val w: Float) { SYMBOL("Symbol", 1.25f), PRICE("Price", 1f), H1("1h", 0.62f), H4("4h", 0.62f), D1("24h", 0.68f), VOL("Vol 24h", 0.7f) }
+
 @Composable
-fun Watchlist(repo: Repo, selectedId: String?, onSelect: (String) -> Unit, modifier: Modifier) {
+fun Watchlist(repo: Repo, selectedId: String?, onSelect: (String) -> Unit, modifier: Modifier, store: JsonFileStore? = null) {
     val markets by repo.markets.collectAsState()
     val marks by repo.market.marks.collectAsState()
-    val chg by repo.chg4h.collectAsState()
+    val stats by repo.market.stats.collectAsState()
+    val chg1 by repo.chg1h.collectAsState()
+    val chg4 by repo.chg4h.collectAsState()
     val accounts by repo.account.accounts.collectAsState()
     val classMap by repo.classes.collectAsState()
     var query by remember { mutableStateOf("") }
-    var cls by remember { mutableStateOf("All") }
-    LaunchedEffect(markets.size) { if (markets.isNotEmpty()) { repo.load4h(); repo.loadOverviewExtras() } }
+    var cls by remember { mutableStateOf(store?.getString("wlClass", "All") ?: "All") }
+    var sort by remember { mutableStateOf(runCatching { Col.valueOf(store?.getString("wlSort", "VOL") ?: "VOL") }.getOrDefault(Col.VOL)) }
+    var desc by remember { mutableStateOf(store?.getBoolean("wlDesc", true) ?: true) }
+    var heldFirst by remember { mutableStateOf(store?.getBoolean("wlHeld", true) ?: true) }
+    fun save() = store?.edit()?.putString("wlClass", cls)?.putString("wlSort", sort.name)?.putBoolean("wlDesc", desc)?.putBoolean("wlHeld", heldFirst)?.apply()
+
+    // 24h change and volume for every market (not only the rows on screen), so sorting sees them all.
+    DisposableEffect(markets) {
+        val subs = markets.map { Sub("marketStats", it.provider, it.coin) }
+        subs.forEach { repo.market.acquire(it) }
+        onDispose { subs.forEach { repo.market.release(it) } }
+    }
+    // 1h and 4h change come from candles; Repo throttles these to every 2 and 5 minutes.
+    LaunchedEffect(markets.size) {
+        if (markets.isEmpty()) return@LaunchedEffect
+        repo.loadOverviewExtras()
+        while (true) { repo.load1h(); repo.load4h(); delay(60_000) }
+    }
+    // Re-sort every few seconds, not on every tick, so rows don't jump about under the mouse.
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) { while (true) { delay(3_000); tick++ } }
 
     val held = accounts.values.flatMap { it.positions.values }.map { it.marketId }.toSet()
     fun classOf(m: Market) = AssetClasses.classOf(m, classMap)
-    val classes = listOf("All") + markets.map(::classOf).distinct().sortedBy { if (it == "Crypto") "" else it }
-    val list = markets.filter { m ->
-        (cls == "All" || classOf(m) == cls) &&
-            (query.isBlank() || m.symbol.contains(query, true) || m.coin.contains(query, true))
-    }.sortedWith(compareBy({ it.marketId !in held }, { it.symbol }))
+    val classes = listOf("All") + markets.map(::classOf).distinct().sortedBy {
+        listOf("Crypto", "Stocks", "Indices", "Commodities", "FX", "Forex").indexOf(it).let { i -> if (i < 0) 99 else i }
+    }
+    fun value(m: Market, c: Col): Double? = when (c) {
+        Col.H1 -> chg1[m.marketId]
+        Col.H4 -> chg4[m.marketId]
+        Col.D1 -> stats[m.feedKey]?.change24hPct
+        Col.VOL -> stats[m.feedKey]?.dayNtlVlm
+        Col.PRICE -> marks[m.feedKey] ?: stats[m.feedKey]?.markPx
+        Col.SYMBOL -> null
+    }
+    val filtered = markets.filter { m ->
+        (cls == "All" || classOf(m) == cls) && (query.isBlank() || m.symbol.contains(query.trim(), true) || m.coin.contains(query.trim(), true))
+    }
+    val order = remember(filtered, sort, desc, heldFirst, held, tick) {
+        val byValue: Comparator<Market> = if (sort == Col.SYMBOL) compareBy<Market> { it.symbol }.let { if (desc) it.reversed() else it }
+            else Comparator { a, b ->
+                // Markets without the number yet go last whichever way the list runs.
+                val x = value(a, sort); val y = value(b, sort)
+                when {
+                    x == null && y == null -> a.symbol.compareTo(b.symbol)
+                    x == null -> 1
+                    y == null -> -1
+                    else -> if (desc) y.compareTo(x) else x.compareTo(y)
+                }
+            }
+        filtered.sortedWith(if (heldFirst) compareBy<Market> { it.marketId !in held }.then(byValue) else byValue).map { it.marketId }
+    }
+    val byId = filtered.associateBy { it.marketId }
 
-    Panel("Markets · ${list.size}", modifier) {
+    Panel("Markets · ${filtered.size}", modifier, actions = {
+        if (held.isNotEmpty()) Pill("● first", heldFirst) { heldFirst = !heldFirst; save() }
+    }) {
         Field(query, { query = it }, Modifier.fillMaxWidth().padding(8.dp), placeholder = "Search")
         Row(Modifier.padding(horizontal = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            classes.forEach { c -> Pill(c, c == cls) { cls = c } }
+            classes.forEach { c -> Pill(c, c == cls) { cls = c; save() } }
         }
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 5.dp)) {
-            HeadCell("Symbol", 1.2f, TextAlign.Start); HeadCell("Price", 1f); HeadCell("4h", 0.6f)
-        }
-        LazyColumn(Modifier.fillMaxSize()) {
-            items(list, key = { it.marketId }) { m ->
-                // Only rows on screen hold a price feed; scrolling moves the subscriptions along.
-                Subscribe(repo, Sub("ticks", m.provider, m.coin))
-                val on = m.marketId == selectedId
-                val c = chg[m.marketId]
-                Row(
-                    Modifier.fillMaxWidth().background(if (on) D.panel2 else D.panel)
-                        .clickable { onSelect(m.marketId) }.pointerHoverIcon(PointerIcon.Hand)
-                        .padding(horizontal = 12.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(Modifier.weight(1.2f), verticalAlignment = Alignment.CenterVertically) {
-                        Text(ticker(m.symbol, m.provider), fontSize = 12.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
-                        if (m.marketId in held) Text("  ●", color = D.accent, fontSize = 9.sp)
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            // Narrow list: the less used columns give way first.
+            val cols = Col.entries.filter {
+                when (it) { Col.VOL -> maxWidth > 360.dp; Col.H4 -> maxWidth > 300.dp; Col.H1 -> maxWidth > 250.dp; else -> true }
+            }
+            Column {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 5.dp)) {
+                    for (c in cols) {
+                        val on = c == sort
+                        Text(
+                            c.head + if (on) (if (desc) " ▼" else " ▲") else "",
+                            Modifier.weight(c.w).clickable {
+                                if (on) desc = !desc else { sort = c; desc = c != Col.SYMBOL }
+                                save()
+                            }.pointerHoverIcon(PointerIcon.Hand),
+                            style = label.copy(fontSize = 10.sp, color = if (on) D.accent else D.muted),
+                            textAlign = if (c == Col.SYMBOL) TextAlign.Start else TextAlign.End, maxLines = 1,
+                        )
                     }
-                    Cell(fmtPrice(marks[feedKey(m.provider, m.coin)], m), 1f)
-                    Cell(c?.let { fmtPct(it) } ?: "", 0.6f, pnlColor(c), style = num.copy(fontSize = 11.sp))
+                }
+                // Rows by position, not by key: keyed rows made the list follow the old top row as it re-sorted,
+                // scrolling the leaders out of sight above. A new sort, filter or search starts at the top.
+                val listState = rememberLazyListState()
+                LaunchedEffect(sort, desc, cls, query, heldFirst) { listState.scrollToItem(0) }
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    items(order) { id ->
+                        val m = byId[id] ?: return@items
+                        // Only rows on screen hold a tick feed; scrolling moves the subscriptions along.
+                        Subscribe(repo, Sub("ticks", m.provider, m.coin))
+                        val on = m.marketId == selectedId
+                        Row(
+                            Modifier.fillMaxWidth().background(if (on) D.panel2 else D.panel)
+                                .clickable { onSelect(m.marketId) }.pointerHoverIcon(PointerIcon.Hand)
+                                .padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            for (c in cols) when (c) {
+                                Col.SYMBOL -> Row(Modifier.weight(c.w), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(ticker(m.symbol, m.provider), fontSize = 12.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+                                    if (m.marketId in held) Text("  ●", color = D.accent, fontSize = 9.sp)
+                                }
+                                Col.PRICE -> Cell(fmtPrice(value(m, c), m), c.w)
+                                Col.VOL -> Cell(value(m, c)?.let { "$" + fmtCompact(it) } ?: "", c.w, D.muted, style = num.copy(fontSize = 11.sp))
+                                else -> { val v = value(m, c); Cell(v?.let { fmtPct(it) } ?: "", c.w, pnlColor(v), style = num.copy(fontSize = 11.sp)) }
+                            }
+                        }
+                    }
                 }
             }
         }

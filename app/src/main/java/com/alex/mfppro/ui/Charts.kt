@@ -82,6 +82,18 @@ class PosBox(val pnl: String, val tp: LineDrag, val sl: LineDrag, val onReverse:
 /** One of your past fills, marked on its candle: ▲ under it for a buy, ▼ over it for a sell. */
 data class FillMark(val time: Long, val buy: Boolean, val price: Double)
 
+/**
+ * Liquidation overlay, worked out off the main thread from the chart's bars: untouched pools (heat at
+ * the right edge), the sweep target on each side, optional leverage bands (index-aligned with the
+ * bars), and how compressed the range is.
+ */
+class LiqOverlay(
+    val pools: List<com.alex.mfppro.data.Liquidity.Pool>,
+    val magnets: List<com.alex.mfppro.data.Liquidity.Magnet>,
+    val bands: List<com.alex.mfppro.data.Liquidity.Band>,
+    val compression: Double?,
+)
+
 /** A touch target drawn on the chart: either dragged to a price or tapped. */
 private class Hit(val rect: Rect, val drag: LineDrag? = null, val tap: (() -> Unit)? = null)
 
@@ -96,7 +108,6 @@ class LineDrag(val preview: (Double) -> Pair<String, Color>, val onDrop: (Double
 
 // TradingView-style labels: the system sans (Roboto) with tabular figures, not monospace.
 private val axisStyle get() = TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif, fontSize = 11.sp, color = C.muted, fontFeatureSettings = "tnum", letterSpacing = 0.sp)
-private val vpColor = Color(0xFF6B7A90)
 
 /**
  * Candlestick chart.
@@ -120,6 +131,9 @@ fun CandleChart(
     fills: List<FillMark> = emptyList(),
     // Narrow price axis with short labels, for small charts (multi-chart grid).
     compactAxis: Boolean = false,
+    liq: LiqOverlay? = null,
+    /** Earlier days' untested POCs: (session start, price). */
+    npocs: List<Pair<Long, Double>> = emptyList(),
     overlay: @Composable BoxScope.() -> Unit = {},
 ) {
     val axisDp = if (compactAxis) 40.dp else 56.dp
@@ -306,6 +320,35 @@ fun CandleChart(
             clipRect(0f, 0f, chartW, chartH) {
                 sessions?.let { sessions(slice, { i -> chartW - (slice.size - i + gap) * barW + barW / 2 }, barW, chartH, it, tm, future = gap + 2) }
                 if (showVp) volumeProfile(candles, slice, vpSince, chartW, y)
+                liq?.let { lq ->
+                    // Untouched liquidity as heat along the right edge: long liquidations red below, short green above.
+                    if (lq.pools.isNotEmpty()) {
+                        val rows = (chartH / 3.dp.toPx()).toInt().coerceAtLeast(10)
+                        com.alex.mfppro.data.Liquidity.heat(lq.pools, lo, hi, rows)?.takeIf { it.max > 0 }?.let { h ->
+                            val maxW = chartW * 0.14f
+                            val rowH = chartH / rows
+                            for (i in 0 until rows) for ((w, col) in listOf(h.longs[i] to C.down, h.shorts[i] to C.up)) {
+                                if (w <= 0) continue
+                                val f = kotlin.math.sqrt(w / h.max).toFloat()
+                                drawRect(col.copy(alpha = 0.15f + 0.5f * f), Offset(chartW - f * maxW, y(h.price(i)) - rowH / 2), Size(f * maxW, max(1f, rowH - 0.5f)))
+                            }
+                        }
+                    }
+                    for (b in lq.bands) {
+                        val col = liqTierColor(b.lev).copy(alpha = 0.55f)
+                        for (arr in listOf(b.longs, b.shorts)) {
+                            val path = Path()
+                            var started = false
+                            for (i in slice.indices) {
+                                val v = arr.getOrNull(start + i)
+                                if (v == null || v.isNaN()) { started = false; continue }
+                                val x = chartW - (slice.size - i + gap) * barW + barW / 2
+                                if (!started) { path.moveTo(x, y(v)); started = true } else path.lineTo(x, y(v))
+                            }
+                            drawPath(path, col, style = Stroke(1.dp.toPx()))
+                        }
+                    }
+                }
                 slice.forEachIndexed { i, c ->
                     val x = chartW - (slice.size - i + gap) * barW + barW / 2
                     val col = if (c.c >= c.o) C.up else C.down
@@ -444,7 +487,7 @@ fun CandleChart(
                 }
             }
 
-            if (showPoc) profileOf(if (vpSince != null) candles.filter { it.openTime >= vpSince } else slice)?.let { pr ->
+            if (showPoc) com.alex.mfppro.data.VolumeProfile.of(if (vpSince != null) candles.filter { it.openTime >= vpSince } else slice, 48)?.let { pr ->
                 val pp = pr.price(pr.poc)
                 if (pp in lo..hi) {
                     val py = y(pp)
@@ -452,6 +495,32 @@ fun CandleChart(
                     axisTags += AxisTag(py, POC_C, fmtPrice(pp), Color.Black)
                     sideLabels += py to tm.measure("sPOC", axisStyle.copy(color = POC_C, fontSize = 9.sp, fontWeight = FontWeight.Bold))
                 }
+                // Value area edges: where the session's accepted prices end.
+                for ((v, name) in listOf(pr.vah to "VAH", pr.vaLow to "VAL")) {
+                    if (v !in lo..hi) continue
+                    drawLine(VA_C.copy(alpha = 0.7f), Offset(0f, y(v)), Offset(chartW, y(v)), 1f, pathEffect = dash)
+                    sideLabels += y(v) to tm.measure(name, axisStyle.copy(color = VA_C, fontSize = 9.sp))
+                }
+            }
+            // Naked POCs: earlier days' busiest prices that nothing has traded through since.
+            if (showPoc) for ((t0, pp) in npocs) {
+                if (pp !in lo..hi || slice.isEmpty() || slice.last().openTime < t0) continue
+                val i0 = slice.indexOfFirst { it.openTime >= t0 }
+                val x0 = if (i0 <= 0) 0f else chartW - (slice.size - i0 + gap) * barW
+                drawLine(POC_C.copy(alpha = 0.6f), Offset(x0, y(pp)), Offset(chartW, y(pp)), 1f, pathEffect = dot)
+                sideLabels += y(pp) to tm.measure("nPOC", axisStyle.copy(color = POC_C.copy(alpha = 0.85f), fontSize = 9.sp))
+            }
+            // Sweep targets: the pocket of liquidations price is most likely to run to on each side.
+            val edgeNotes = ArrayList<Pair<Boolean, androidx.compose.ui.text.TextLayoutResult>>()
+            liq?.magnets?.forEach { mg ->
+                val col = if (mg.longs) C.down else C.up
+                val txt = (if (mg.longs) "▼ long liqs " else "▲ short liqs ") + fmtPct(mg.distPct)
+                val layout = tm.measure(txt, axisStyle.copy(color = col, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                if (mg.price in lo..hi) {
+                    val my = y(mg.price)
+                    drawLine(col.copy(alpha = 0.85f), Offset(chartW * 0.55f, my), Offset(chartW, my), 1.2f, pathEffect = dash)
+                    sideLabels += my to layout
+                } else edgeNotes += (mg.price > hi) to layout
             }
 
             // Ghost line under the finger while dragging a line, plus a Cancel target.
@@ -504,6 +573,22 @@ fun CandleChart(
                 val top = maxOf(yy - t.size.height - 1.dp.toPx(), nextTop)
                 drawText(t, topLeft = Offset(chartW - t.size.width - 4.dp.toPx(), top))
                 nextTop = top + t.size.height
+            }
+            var noteTop = 4.dp.toPx()
+            var noteBottom = chartH - 4.dp.toPx()
+            for ((above, t) in edgeNotes) {
+                val ty = if (above) noteTop else noteBottom - t.size.height
+                val tx = chartW - t.size.width - 6.dp.toPx()
+                drawRoundRect(C.bg.copy(alpha = 0.85f), Offset(tx - 3.dp.toPx(), ty - 1f), Size(t.size.width + 6.dp.toPx(), t.size.height + 2f), androidx.compose.ui.geometry.CornerRadius(4f, 4f))
+                drawText(t, topLeft = Offset(tx, ty))
+                if (above) noteTop += t.size.height + 3.dp.toPx() else noteBottom -= t.size.height + 3.dp.toPx()
+            }
+            // A coiled range with pools close on both sides: when a stop run tends to come.
+            liq?.compression?.takeIf { it < 0.65 }?.let { comp ->
+                val t = tm.measure(String.format(java.util.Locale.US, "Compressed · ATR %.2f× · sweep risk", comp), axisStyle.copy(color = C.accent, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                val cx = chartW / 2 - t.size.width / 2
+                drawRoundRect(C.accent.copy(alpha = 0.14f), Offset(cx - 5.dp.toPx(), 3.dp.toPx()), Size(t.size.width + 10.dp.toPx(), t.size.height + 4.dp.toPx()), androidx.compose.ui.geometry.CornerRadius(6f, 6f))
+                drawText(t, topLeft = Offset(cx, 5.dp.toPx()))
             }
             queued.forEach { it() }
             for ((bx, col, by) in boxes) posBox(tm, bx, col, chartW, by, pillStyle, hits)
@@ -565,57 +650,34 @@ fun CandleChart(
 
 private const val RIGHT_GAP = -4f
 
-/** Volume by price: each candle's volume spread evenly over its high-low range in 48 bins. */
-private class Profile(val lo: Double, val step: Double, val bins: DoubleArray) {
-    val poc = bins.indices.maxBy { bins[it] }
-    fun price(i: Int) = lo + step * (i + 0.5)
-    /** Value area: grown outward from the POC until 70% of volume is covered. */
-    val valueArea: IntRange by lazy {
-        var a = poc; var b = poc
-        var covered = bins[poc]
-        val total = bins.sum()
-        while (covered < total * 0.7 && (a > 0 || b < bins.size - 1)) {
-            val up = if (b < bins.size - 1) bins[b + 1] else -1.0
-            val dn = if (a > 0) bins[a - 1] else -1.0
-            if (up >= dn) { b++; covered += up } else { a--; covered += dn }
-        }
-        a..b
-    }
+/** Colours per leverage tier: the higher the leverage, the hotter. */
+fun liqTierColor(lev: Int): Color = when {
+    lev >= 100 -> Color(0xFFFFE082)
+    lev >= 50 -> Color(0xFFFFB74D)
+    lev >= 25 -> Color(0xFFFF7043)
+    lev >= 10 -> Color(0xFFE57373)
+    else -> Color(0xFFBA68C8)
 }
 
-private fun profileOf(src: List<Candle>): Profile? {
-    if (src.isEmpty()) return null
-    val pHi = src.maxOf { it.h }
-    val pLo = src.minOf { it.l }
-    if (pHi <= pLo) return null
-    val n = 48
-    val step = (pHi - pLo) / n
-    val bins = DoubleArray(n)
-    for (c in src) {
-        val a = ((c.l - pLo) / step).toInt().coerceIn(0, n - 1)
-        val b = ((c.h - pLo) / step).toInt().coerceIn(0, n - 1)
-        val share = c.v / (b - a + 1)
-        for (i in a..b) bins[i] += share
-    }
-    return if (bins.max() > 0) Profile(pLo, step, bins) else null
-}
+private val VA_C = Color(0xFF9AA8BC)
 
-/** Volume profile bars from the right edge; POC bin highlighted, value area brighter. */
+/**
+ * Volume profile from the left edge: buying (green) and selling (red) share of each price, the POC
+ * brightest and the value area brighter than the tails.
+ */
 private fun DrawScope.volumeProfile(all: List<Candle>, slice: List<Candle>, since: Long?, chartW: Float, y: (Double) -> Float) {
-    val pr = profileOf(if (since != null) all.filter { it.openTime >= since } else slice) ?: return
-    val maxV = pr.bins.max()
+    val pr = com.alex.mfppro.data.VolumeProfile.of(if (since != null) all.filter { it.openTime >= since } else slice, 48) ?: return
     val va = pr.valueArea
-    val maxW = chartW * 0.3f
-    for (i in pr.bins.indices) {
+    val maxW = chartW * 0.24f
+    for (i in 0 until pr.bins) {
         val top = y(pr.lo + pr.step * (i + 1))
         val bot = y(pr.lo + pr.step * i)
-        val w = (pr.bins[i] / maxV * maxW).toFloat()
-        val col = when (i) {
-            pr.poc -> C.accent.copy(alpha = 0.75f)
-            in va -> vpColor.copy(alpha = 0.45f)
-            else -> vpColor.copy(alpha = 0.2f)
-        }
-        drawRect(col, Offset(chartW - w, top + 0.5f), Size(w, max(1f, bot - top - 1f)))
+        val h = max(1f, bot - top - 1f)
+        val a = when (i) { pr.poc -> 0.6f; in va -> 0.32f; else -> 0.13f }
+        val wB = (pr.buy[i] / pr.max * maxW).toFloat()
+        val wS = (pr.sell[i] / pr.max * maxW).toFloat()
+        drawRect(C.up.copy(alpha = a), Offset(0f, top + 0.5f), Size(wB, h))
+        drawRect(C.down.copy(alpha = a), Offset(wB, top + 0.5f), Size(wS, h))
     }
 }
 

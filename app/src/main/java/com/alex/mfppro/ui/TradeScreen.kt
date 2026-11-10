@@ -240,6 +240,28 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     var showVp by remember { mutableStateOf(repo.prefs.showVp) }
     var showPoc by remember { mutableStateOf(repo.prefs.showPoc) }
     var showSess by remember { mutableStateOf(repo.prefs.showSessions) }
+    var showLiq by remember { mutableStateOf(repo.prefs.showLiq) }
+    // Liquidation pools, sweep targets and naked POCs, worked out off the main thread as the bars change.
+    var liqOv by remember(market.marketId, interval) { mutableStateOf<LiqOverlay?>(null) }
+    var npocs by remember(market.marketId, interval) { mutableStateOf<List<Pair<Long, Double>>>(emptyList()) }
+    LaunchedEffect(chartCandles, showLiq, showPoc, interval) {
+        val bars = chartCandles.orEmpty()
+        val settings = repo.prefs.liqSettings()
+        val bands = repo.prefs.liqBands
+        val (ov, np) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val ov = if (showLiq && bars.size > 20) {
+                val pools = com.alex.mfppro.data.Liquidity.pools(bars, settings)
+                LiqOverlay(
+                    pools,
+                    com.alex.mfppro.data.Liquidity.magnets(pools, bars.last().c, com.alex.mfppro.data.Liquidity.atrPct(bars)),
+                    if (bands) com.alex.mfppro.data.Liquidity.bands(com.alex.mfppro.data.Liquidity.base(bars, settings), settings) else emptyList(),
+                    com.alex.mfppro.data.Liquidity.compression(bars),
+                )
+            } else null
+            ov to if (showPoc && interval in listOf("1m", "5m", "15m", "1h")) com.alex.mfppro.data.VolumeProfile.nakedPocs(bars) else emptyList()
+        }
+        liqOv = ov; npocs = np
+    }
     var landscape by rememberSaveable { mutableStateOf(false) }
     val sessOpts = if (showSess) SessionOpts(repo.prefs.sessionEu, repo.prefs.killzones) else null
 
@@ -419,6 +441,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     if (repo.prefs.chipVp) OverlayChip("VP", showVp, Icons.AutoMirrored.Filled.Notes) { showVp = !showVp; repo.prefs.showVp = showVp }
                     if (repo.prefs.chipPoc) OverlayChip("POC", showPoc, Icons.Filled.Adjust) { showPoc = !showPoc; repo.prefs.showPoc = showPoc }
                     if (repo.prefs.chipSess) OverlayChip("Sess", showSess, Icons.Filled.Schedule) { showSess = !showSess; repo.prefs.showSessions = showSess }
+                    if (repo.prefs.chipLiq) OverlayChip("Liq", showLiq, Icons.Filled.Adjust) { showLiq = !showLiq; repo.prefs.showLiq = showLiq }
                 }
             }
             Spacer(Modifier.weight(1f))
@@ -462,6 +485,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     sessions = sessOpts,
                     crossKey = crossKey,
                     fills = fillMarks,
+                    liq = liqOv,
+                    npocs = npocs,
                 ) }
             }
             if ((view == 2 || view == 3) && !compact) TopOfBook(book)
@@ -868,13 +893,6 @@ private fun OpenPositionsStrip(repo: Repo, scoped: List<com.alex.mfppro.data.Acc
             dismissButton = { TextButton(onClick = { ask = null }) { Text("Cancel", color = C.muted) } },
         )
     }
-}
-
-/** Fold the live book price into the forming candle so the chart never trails the market. */
-fun List<com.alex.mfppro.data.Candle>.withLive(p: Double?): List<com.alex.mfppro.data.Candle> {
-    if (p == null || isEmpty()) return this
-    val l = last()
-    return dropLast(1) + l.copy(c = p, h = maxOf(l.h, p), l = minOf(l.l, p))
 }
 
 /** Best bid/ask with sizes, spread, and how the top 20 levels split between bids and asks. */

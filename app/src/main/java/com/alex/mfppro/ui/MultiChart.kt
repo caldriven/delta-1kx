@@ -114,7 +114,8 @@ fun MultiChart(repo: Repo, onOpenMarket: (String) -> Unit) {
                             Text(fmtPct(chg) + " 24h", style = num.copy(fontSize = 10.sp, color = pnlColor(chg)), maxLines = 1)
                         }
                         CandleChart(candles[candleKey(m.provider, m.coin, interval)].orEmpty().withLive(mark), emptyList(),
-                            Modifier.weight(1f).fillMaxWidth().padding(top = 2.dp), compactAxis = true)
+                            Modifier.weight(1f).fillMaxWidth().padding(top = 2.dp), compactAxis = true,
+                            sessions = if (repo.prefs.showSessions) SessionOpts(false, repo.prefs.killzones) else null)
                     }
                 }
             }

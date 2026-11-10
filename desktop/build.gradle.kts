@@ -68,5 +68,9 @@ tasks.register<JavaExec>("snapshot") {
     description = "Renders the workspace to a PNG without opening a window."
     classpath = sourceSets.main.get().runtimeClasspath
     mainClass.set("com.alex.mfppro.desktop.smoke.SnapshotKt")
-    args(providers.gradleProperty("out").getOrElse(layout.buildDirectory.file("snapshot.png").get().asFile.path))
+    args(
+        providers.gradleProperty("out").getOrElse(layout.buildDirectory.file("snapshot.png").get().asFile.path),
+        providers.gradleProperty("grid").getOrElse(""),
+        providers.gradleProperty("bands").getOrElse("false"),
+    )
 }

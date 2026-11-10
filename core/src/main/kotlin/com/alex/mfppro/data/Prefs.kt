@@ -155,6 +155,30 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var sessionEu: Boolean
         get() = plain.getBoolean("session_eu", false)
         set(v) = plain.edit().putBoolean("session_eu", v).apply()
+
+    /** Liquidation overlay: untouched liquidity pools at the right edge plus the sweep target each side. */
+    var showLiq: Boolean
+        get() = plain.getBoolean("show_liq", true)
+        set(v) = plain.edit().putBoolean("show_liq", v).apply()
+    var chipLiq: Boolean
+        get() = plain.getBoolean("chip_liq", true)
+        set(v) = plain.edit().putBoolean("chip_liq", v).apply()
+    /** Leverage bands (long/short liquidation lines around the average price) with the pools. */
+    var liqBands: Boolean
+        get() = plain.getBoolean("liq_bands", false)
+        set(v) = plain.edit().putBoolean("liq_bands", v).apply()
+    /** Leverage tiers for the liquidation overlay, e.g. "25,50,100". */
+    var liqTiers: List<Int>
+        get() = (plain.getString("liq_tiers", null) ?: "25,50,100").split(',').mapNotNull { it.trim().toIntOrNull() }.filter { it in 2..500 }.distinct().sorted()
+        set(v) = plain.edit().putString("liq_tiers", v.distinct().sorted().joinToString(",")).apply()
+    var liqBase: String
+        get() = plain.getString("liq_base", null) ?: Liquidity.Base.VWMA.name
+        set(v) = plain.edit().putString("liq_base", v).apply()
+
+    fun liqSettings() = Liquidity.Settings(
+        tiers = liqTiers.ifEmpty { listOf(25, 50, 100) },
+        base = runCatching { Liquidity.Base.valueOf(liqBase) }.getOrDefault(Liquidity.Base.VWMA),
+    )
     var killzones: Boolean
         get() = plain.getBoolean("killzones", true)
         set(v) = plain.edit().putBoolean("killzones", v).apply()

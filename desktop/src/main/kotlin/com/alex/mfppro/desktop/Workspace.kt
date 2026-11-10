@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +25,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,6 +39,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -55,53 +60,93 @@ import java.time.format.DateTimeFormatter
 
 fun accountName(s: AccountState) = Nicknames.map[s.account.id] ?: s.account.name.ifBlank { "#" + s.account.accountNumber }
 
+/** Interface zoom (Ctrl + / Ctrl − / Ctrl 0), from 70% to 160%; saved. */
+class Zoom(private val store: JsonFileStore) {
+    var value by mutableFloatStateOf(store.getFloat("zoom", 1f).coerceIn(0.7f, 1.6f))
+        private set
+    fun set(v: Float) { value = (Math.round(v * 20) / 20f).coerceIn(0.7f, 1.6f); store.edit().putFloat("zoom", value).apply() }
+    fun inc() = set(value + 0.1f)
+    fun dec() = set(value - 0.1f)
+    fun reset() = set(1f)
+}
+
 /**
- * The terminal: watchlist | accounts, chart and blotter | ticket, book and tape.
- * Every divider can be dragged; widths are remembered in layout.json.
+ * The terminal: watchlist | accounts, chart grid and blotter | ticket, book and trades or sessions.
+ * Every divider can be dragged, each side can be hidden, and the whole interface zooms; all of it is
+ * remembered in layout.json.
  */
 @Composable
-fun Workspace(repo: Repo, layout: JsonFileStore, keyPrompt: Boolean = true) {
+fun Workspace(repo: Repo, layout: JsonFileStore, keyPrompt: Boolean = true, zoom: Zoom = remember { Zoom(layout) }) {
+    val base = LocalDensity.current
+    CompositionLocalProvider(LocalDensity provides Density(base.density * zoom.value, base.fontScale)) {
+        WorkspaceBody(repo, layout, keyPrompt, zoom)
+    }
+}
+
+@Composable
+private fun WorkspaceBody(repo: Repo, layout: JsonFileStore, keyPrompt: Boolean, zoom: Zoom) {
     val key by repo.apiKey.collectAsState()
     val markets by repo.markets.collectAsState()
-    var marketId by remember { mutableStateOf(repo.prefs.lastMarketId) }
-    val market = markets.firstOrNull { it.marketId == marketId }
-        ?: markets.firstOrNull { it.symbol == "BTC" } ?: markets.firstOrNull()
+    val venues by repo.venues.collectAsState()
+    val grid = remember { GridState(layout) }
+    var ind by remember { mutableStateOf(loadInd(layout)) }
+    val all = markets + venues.filter { v -> markets.none { it.marketId == v.marketId } }
+    // The ticket, book and sessions follow the active chart.
+    val market = grid.market(grid.active, all)
     var editKey by remember { mutableStateOf(false) }
     var skipped by remember { mutableStateOf(false) }
     var termsOk by remember { mutableStateOf(repo.prefs.termsAccepted >= TERMS_VERSION) }
 
-    var leftW by remember { mutableStateOf(layout.getInt("left", 290).dp) }
-    var rightW by remember { mutableStateOf(layout.getInt("right", 360).dp) }
-    var bottomH by remember { mutableStateOf(layout.getInt("bottom", 300).dp) }
+    var leftW by remember { mutableStateOf(layout.getInt("left", 380).dp) }
+    var rightW by remember { mutableStateOf(layout.getInt("right", 340).dp) }
+    var bottomH by remember { mutableStateOf(layout.getInt("bottom", 260).dp) }
+    var showLeft by remember { mutableStateOf(layout.getBoolean("showLeft", true)) }
+    var showRight by remember { mutableStateOf(layout.getBoolean("showRight", true)) }
+    var showBottom by remember { mutableStateOf(layout.getBoolean("showBottom", true)) }
+    var rightTab by remember { mutableStateOf(layout.getString("rightTab", "Trades") ?: "Trades") }
     fun save() = layout.edit().putInt("left", leftW.value.toInt()).putInt("right", rightW.value.toInt())
-        .putInt("bottom", bottomH.value.toInt()).apply()
+        .putInt("bottom", bottomH.value.toInt()).putBoolean("showLeft", showLeft).putBoolean("showRight", showRight)
+        .putBoolean("showBottom", showBottom).putString("rightTab", rightTab).apply()
 
-    fun select(id: String) { marketId = id; repo.prefs.lastMarketId = id }
+    fun select(id: String) { grid.set(grid.active, marketId = id); repo.prefs.lastMarketId = id }
 
-    Box(Modifier.fillMaxSize().background(D.bg)) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(D.bg)) {
+        // Narrow windows: side columns give way to the charts before the charts get cramped.
+        val roomy = maxWidth > 1250.dp
         Column(Modifier.fillMaxSize()) {
-            TopBar(repo, onKey = { editKey = true })
+            TopBar(repo, zoom, onKey = { editKey = true }) {
+                Pill("Markets", showLeft) { showLeft = !showLeft; save() }
+                Pill("Blotter", showBottom) { showBottom = !showBottom; save() }
+                Pill("Trade panel", showRight) { showRight = !showRight; save() }
+            }
             Row(Modifier.weight(1f).fillMaxWidth()) {
-                Watchlist(repo, market?.marketId, ::select, Modifier.width(leftW).fillMaxHeight())
-                VSplit(::save) { leftW = (leftW + it).coerceIn(200.dp, 520.dp) }
+                if (showLeft && (roomy || !showRight)) {
+                    Watchlist(repo, market?.marketId, ::select, Modifier.width(leftW).fillMaxHeight(), layout)
+                    VSplit(::save) { leftW = (leftW + it).coerceIn(180.dp, 520.dp) }
+                }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     AccountsStrip(repo)
                     Spacer(Modifier.height(5.dp))
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        if (market != null) ChartPanel(repo, market, Modifier.fillMaxSize())
-                        else Panel("Chart", Modifier.fillMaxSize()) { Empty("Loading markets…") }
+                    ChartGrid(repo, grid, ind, { ind = it; saveInd(layout, it) }, Modifier.weight(1f).fillMaxWidth())
+                    if (showBottom) {
+                        HSplit(::save) { bottomH = (bottomH - it).coerceIn(100.dp, 800.dp) }
+                        Blotter(repo, ::select, Modifier.height(bottomH).fillMaxWidth())
                     }
-                    HSplit(::save) { bottomH = (bottomH - it).coerceIn(120.dp, 800.dp) }
-                    Blotter(repo, ::select, Modifier.height(bottomH).fillMaxWidth())
                 }
-                VSplit(::save) { rightW = (rightW - it).coerceIn(280.dp, 600.dp) }
-                Column(Modifier.width(rightW).fillMaxHeight()) {
-                    if (market != null) {
-                        Ticket(repo, market, Modifier.fillMaxWidth())
-                        Spacer(Modifier.height(5.dp))
-                        BookPanel(repo, market, Modifier.weight(1.2f).fillMaxWidth())
-                        Spacer(Modifier.height(5.dp))
-                        TapePanel(repo, market, Modifier.weight(1f).fillMaxWidth())
+                if (showRight) {
+                    VSplit(::save) { rightW = (rightW - it).coerceIn(260.dp, 600.dp) }
+                    Column(Modifier.width(rightW).fillMaxHeight()) {
+                        if (market != null) {
+                            Ticket(repo, market, Modifier.fillMaxWidth())
+                            Spacer(Modifier.height(5.dp))
+                            BookPanel(repo, market, Modifier.weight(1.1f).fillMaxWidth())
+                            Spacer(Modifier.height(5.dp))
+                            Row(Modifier.fillMaxWidth().background(D.panel).padding(horizontal = 6.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                listOf("Trades", "Sessions").forEach { t -> Pill(t, rightTab == t) { rightTab = t; save() } }
+                            }
+                            if (rightTab == "Sessions") SessionsPanel(repo, market, grid.slots[grid.active].interval, Modifier.weight(1f).fillMaxWidth())
+                            else TapePanel(repo, market, Modifier.weight(1f).fillMaxWidth())
+                        }
                     }
                 }
             }
@@ -115,7 +160,7 @@ fun Workspace(repo: Repo, layout: JsonFileStore, keyPrompt: Boolean = true) {
 }
 
 @Composable
-private fun TopBar(repo: Repo, onKey: () -> Unit) {
+private fun TopBar(repo: Repo, zoom: Zoom, onKey: () -> Unit, toggles: @Composable () -> Unit) {
     val conn by repo.account.conn.collectAsState()
     val live by repo.market.live.collectAsState()
     val rtt by repo.account.rtt.collectAsState()
@@ -139,6 +184,13 @@ private fun TopBar(repo: Repo, onKey: () -> Unit) {
             Conn.Live -> D.up; Conn.Connecting, Conn.Reconnecting -> D.accent; Conn.AuthFailed -> D.down; Conn.Off -> D.muted
         }, conn.name + (rtt?.let { " · ${it} ms" } ?: ""))
         Status("Market", if (live) D.up else D.muted, if (live) "Live" else "Idle")
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) { toggles() }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Pill("−", false) { zoom.dec() }
+            Text("${Math.round(zoom.value * 100)}%", style = num.copy(fontSize = 11.sp, color = D.muted),
+                modifier = Modifier.clickable { zoom.reset() }.padding(horizontal = 2.dp))
+            Pill("+", false) { zoom.inc() }
+        }
         Box(Modifier.weight(1f))
         Stat("Equity", fmtUsd(risks.sumOf { it.equity }.takeIf { shown.isNotEmpty() }))
         val upnl = risks.sumOf { it.upnl }

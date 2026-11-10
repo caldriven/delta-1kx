@@ -3,7 +3,6 @@ package com.alex.mfppro.ui
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -13,157 +12,77 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.alex.mfppro.data.Candle
+import com.alex.mfppro.data.Killzones
+import java.time.DayOfWeek
 import java.time.Instant
-import java.time.ZoneId
 
-/** Which session overlays to draw on intraday charts. */
-data class SessionOpts(val eu: Boolean, val killzones: Boolean)
+/** Which session overlays to draw on intraday charts. [markets]: the market-hours strip along the top. */
+data class SessionOpts(val markets: Boolean, val killzones: Boolean)
 
-private val NY = ZoneId.of("America/New_York")
-private val TOKYO = ZoneId.of("Asia/Tokyo")
-private val LONDON = ZoneId.of("Europe/London")
+private val WINDOWS = Killzones.KILLZONES + Killzones.MARKETS
+private val KZ_COUNT = Killzones.KILLZONES.size
 
-private const val ASIA = 1
-private const val EU = 2
-private const val US = 4
-private const val PRE = 8
-private const val AFTER = 16
-private const val KZ_ASIA = 32
-private const val KZ_LDN = 64
-private const val KZ_NYAM = 128
-private const val KZ_NYPM = 256
-private const val US_OPEN = 512
-private const val US_CLOSE = 1024
-private const val ASIA_OPEN = 2048
-private const val WEEKEND = 4096
-private const val WK_CLOSE = 8192
-private const val WK_OPEN = 16384
+// Progress through each window per (bar start, bar length); recomputed rarely, drawn every frame.
+private val cache = HashMap<Long, FloatArray>()
 
-private val ASIA_C = Color(0xFF8B5CF6)
-private val EU_C = Color(0xFF3B82F6)
-private val US_C = Color(0xFFF59E0B)
-private val KZ_C = Color(0xFFEF4444)
-
-private class Band(val bit: Int, val color: Color, val alpha: Float, val label: String)
-
-private val BANDS = listOf(
-    Band(ASIA, ASIA_C, 0.045f, "Asia"),
-    Band(EU, EU_C, 0.06f, "EU"),
-    Band(PRE, US_C, 0.02f, "Pre-market"),
-    Band(US, US_C, 0.045f, "US hours"),
-    Band(AFTER, US_C, 0.02f, "After hours"),
-)
-private val ZONES = listOf(
-    Band(KZ_ASIA, ASIA_C, 0.9f, "Asia KZ"),
-    Band(KZ_LDN, EU_C, 0.9f, "London KZ"),
-    Band(KZ_NYAM, KZ_C, 0.9f, "NY AM KZ"),
-    Band(KZ_NYPM, US_C, 0.9f, "NY PM KZ"),
-)
-
-// Session flags per (candle start, bar length); cheap to recompute but drawn every frame.
-private val cache = HashMap<Long, Int>()
-
-private fun minuteOf(t: Long, zone: ZoneId): Int = Instant.ofEpochMilli(t).atZone(zone).let { it.hour * 60 + it.minute }
-
-/** Bit flags for the bar starting at [t] lasting [stepMin] minutes. Session times follow each city's DST. */
-private fun flags(t: Long, stepMin: Int): Int {
-    val k = t * 31 + stepMin
+private fun progress(t: Long, step: Long): FloatArray {
+    val k = t * 31 + step
     cache[k]?.let { return it }
     if (cache.size > 20_000) cache.clear()
-    val ny = minuteOf(t, NY)
-    val dow = Instant.ofEpochMilli(t).atZone(NY).dayOfWeek
-    // Weekend runs from the Friday 17:00 New York close to the Sunday 18:00 open (weekly / Asia open).
-    val weekend = (dow == java.time.DayOfWeek.FRIDAY && ny >= 17 * 60) || dow == java.time.DayOfWeek.SATURDAY ||
-        (dow == java.time.DayOfWeek.SUNDAY && ny < 18 * 60)
-    fun hitsAt(m: Int, at: Int) = at >= m && at < m + stepMin
-    if (weekend) {
-        var w = WEEKEND
-        if (dow == java.time.DayOfWeek.FRIDAY && hitsAt(ny, 17 * 60)) w = w or WK_CLOSE
-        cache[k] = w
-        return w
-    }
-    val tk = minuteOf(t, TOKYO)
-    val ld = minuteOf(t, LONDON)
-    fun inR(m: Int, a: Int, b: Int) = if (a <= b) m in a until b else m >= a || m < b
-    fun hits(m: Int, at: Int) = at >= m && at < m + stepMin
-    var f = 0
-    if (inR(tk, 9 * 60, 18 * 60)) f = f or ASIA
-    if (inR(ld, 8 * 60, 16 * 60 + 30)) f = f or EU
-    when {
-        inR(ny, 9 * 60 + 30, 16 * 60) -> f = f or US
-        inR(ny, 4 * 60, 9 * 60 + 30) -> f = f or PRE
-        inR(ny, 16 * 60, 20 * 60) -> f = f or AFTER
-    }
-    if (inR(ny, 20 * 60, 24 * 60)) f = f or KZ_ASIA
-    if (inR(ny, 2 * 60, 5 * 60)) f = f or KZ_LDN
-    if (inR(ny, 8 * 60 + 30, 11 * 60)) f = f or KZ_NYAM
-    if (inR(ny, 13 * 60 + 30, 16 * 60)) f = f or KZ_NYPM
-    if (hits(ny, 9 * 60 + 30)) f = f or US_OPEN
-    if (hits(ny, 16 * 60)) f = f or US_CLOSE
-    if (hits(tk, 9 * 60)) f = f or ASIA_OPEN
-    if (Instant.ofEpochMilli(t).atZone(NY).dayOfWeek == java.time.DayOfWeek.SUNDAY && hits(ny, 18 * 60)) f = f or WK_OPEN
-    cache[k] = f
-    return f
+    // The middle of the bar, so a bar half inside a window counts.
+    val p = FloatArray(WINDOWS.size) { Killzones.progress(WINDOWS[it], t + step / 2)?.toFloat() ?: -1f }
+    cache[k] = p
+    return p
 }
 
-private val sessLabel = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+/** Friday 17:00 to Sunday 18:00 New York, when the traditional markets are shut. */
+private fun weekend(t: Long): Boolean {
+    val z = Instant.ofEpochMilli(t).atZone(Killzones.NY)
+    val m = z.hour * 60 + z.minute
+    return (z.dayOfWeek == DayOfWeek.FRIDAY && m >= 17 * 60) || z.dayOfWeek == DayOfWeek.SATURDAY || (z.dayOfWeek == DayOfWeek.SUNDAY && m < 18 * 60)
+}
+
+private val sessLabel = TextStyle(fontFamily = FontFamily.SansSerif, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
 
 /**
- * Shaded session columns (Asia, optional EU, US pre/regular/after hours),
- * killzones as a coloured strip along the top, and dashed lines at the US
- * open/close and Tokyo open. Only meaningful for bars of an hour or less.
+ * Sessions kept out of the way of the candles: killzones as a thin strip along the bottom that fills
+ * in from light to full colour as the window runs, market hours (Tokyo, London, New York) as the same
+ * strip along the top, and the weekend as a faint grey band. Each window is named once, where it
+ * starts, when there is room. Only for bars of an hour or less.
  */
 internal fun DrawScope.sessions(slice: List<Candle>, xOf: (Int) -> Float, barW: Float, chartH: Float, opts: SessionOpts, tm: TextMeasurer, future: Int = 0) {
     if (slice.size < 2) return
     val step = slice[1].openTime - slice[0].openTime
-    val stepMin = (step / 60_000).toInt()
-    if (stepMin <= 0 || stepMin > 60) return
-    // Bars to the right of the last candle get their times too, so sessions run on into the future.
+    if (step <= 0 || step > 3_600_000L) return
+    // Bars to the right of the last candle get their times too, so the strips run on into the future.
     val times = slice.map { it.openTime } + (1..future).map { slice.last().openTime + it * step }
-    val fl = IntArray(times.size) { flags(times[it], stepMin) }
     val stripH = 4.dp.toPx()
-    val dash = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))
-    for (b in BANDS) {
-        if (b.bit == EU && !opts.eu) continue
-        for (i in times.indices) {
-            if (fl[i] and b.bit == 0) continue
-            val x = xOf(i)
-            drawRect(b.color.copy(alpha = b.alpha), Offset(x - barW / 2, 0f), Size(barW, chartH))
-            if (i == 0 || fl[i - 1] and b.bit == 0) {
-                val t = tm.measure(b.label, sessLabel.copy(color = b.color.copy(alpha = 0.8f)))
-                drawText(t, topLeft = Offset(x + 3.dp.toPx(), stripH + 3.dp.toPx() + if (b.bit == EU) t.size.height else 0))
-            }
-        }
-    }
-    // Weekend: a muted grey band and no sessions or killzones.
-    for (i in times.indices) {
-        if (fl[i] and WEEKEND == 0) continue
-        val x = xOf(i)
-        drawRect(Color(0xFF808080).copy(alpha = 0.07f), Offset(x - barW / 2, 0f), Size(barW, chartH))
-        if (i == 0 || fl[i - 1] and WEEKEND == 0) {
-            val t = tm.measure("Weekend", sessLabel.copy(color = Color(0xFF9CA3AF)))
-            drawText(t, topLeft = Offset(x + 3.dp.toPx(), stripH + 3.dp.toPx()))
-        }
-    }
-    if (opts.killzones) for (z in ZONES) {
-        for (i in times.indices) {
-            if (fl[i] and z.bit == 0) continue
-            val x = xOf(i)
-            drawRect(z.color.copy(alpha = 0.75f), Offset(x - barW / 2, 0f), Size(barW, stripH))
-        }
-    }
+    var prevWeekend = false
     for (i in times.indices) {
         val x = xOf(i) - barW / 2
-        val (label, col) = when {
-            fl[i] and US_OPEN != 0 -> "US open" to US_C
-            fl[i] and US_CLOSE != 0 -> "US close" to US_C
-            fl[i] and WK_CLOSE != 0 -> "Weekend close" to Color(0xFF9CA3AF)
-            fl[i] and WK_OPEN != 0 -> "Weekly open" to ASIA_C
-            fl[i] and ASIA_OPEN != 0 -> "Tokyo open" to ASIA_C
-            else -> continue
+        val wk = weekend(times[i])
+        if (wk) {
+            drawRect(Color(0xFF808080).copy(alpha = 0.06f), Offset(x, 0f), Size(barW, chartH))
+            if (!prevWeekend) {
+                val t = tm.measure("Weekend", sessLabel.copy(color = Color(0xFF9CA3AF)))
+                drawText(t, topLeft = Offset(x + 3.dp.toPx(), stripH + 3.dp.toPx()))
+            }
         }
-        drawLine(col.copy(alpha = 0.7f), Offset(x, 0f), Offset(x, chartH), 1f, pathEffect = dash)
-        val t = tm.measure(label, sessLabel.copy(color = col))
-        drawText(t, topLeft = Offset(x + 3.dp.toPx(), chartH - t.size.height - 3.dp.toPx()))
+        prevWeekend = wk
+        val p = progress(times[i], step)
+        val prev = if (i > 0) progress(times[i - 1], step) else null
+        for (k in WINDOWS.indices) {
+            val isKz = k < KZ_COUNT
+            if (p[k] < 0 || (isKz && !opts.killzones) || (!isKz && !opts.markets)) continue
+            val col = Color(WINDOWS[k].rgb)
+            val top = if (isKz) chartH - stripH else 0f
+            drawRect(col.copy(alpha = 0.25f + 0.7f * p[k]), Offset(x, top), Size(barW + 0.5f, stripH))
+            if (prev == null || prev[k] < 0) {
+                val t = tm.measure(WINDOWS[k].short, sessLabel.copy(color = col.copy(alpha = 0.85f)))
+                val room = WINDOWS[k].lengthMin * 60_000f / step * barW
+                if (room > t.size.width + 6.dp.toPx())
+                    drawText(t, topLeft = Offset(x + 2.dp.toPx(), if (isKz) top - t.size.height - 1.dp.toPx() else stripH + 1.dp.toPx()))
+            }
+        }
     }
 }
