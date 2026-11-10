@@ -322,9 +322,13 @@ fun ChartView(
                             val pp = pr.price(pr.poc)
                             drawLine(POC_C.copy(alpha = 0.9f), Offset(0f, y(pp)), Offset(plotW, y(pp)), px(1f))
                             sideTags += SideTag(y(pp), "POC", POC_C)
+                            // Value area edges: short ticks on the profile itself, not more lines across the chart.
+                            val vaW = maxW * 1.2f
                             for ((v, name) in listOf(pr.vah to "VAH", pr.vaLow to "VAL")) {
-                                drawLine(VP_C.copy(alpha = 0.8f), Offset(0f, y(v)), Offset(plotW, y(v)), 1f, pathEffect = dash)
-                                sideTags += SideTag(y(v), name, Color(0xFF9AA8BC))
+                                if (v !in lo..hi) continue
+                                drawLine(POC_C.copy(alpha = 0.7f), Offset(0f, y(v)), Offset(vaW, y(v)), 1f)
+                                val t = tm.measure(name, TextStyle(fontFamily = Inter, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = POC_C.copy(alpha = 0.85f)))
+                                drawText(t, topLeft = Offset(vaW + px(3f), y(v) - t.size.height / 2f))
                             }
                         }
                     }
@@ -424,6 +428,14 @@ fun ChartView(
                 fun ago(t: Long): String { val mins = (now - t) / 60_000; return when { mins < 60 -> "${mins}m"; mins < 1440 -> "${mins / 60}h"; else -> "${mins / 1440}d" } }
                 val tagSmall = TextStyle(fontFamily = Inter, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 val offscreen = ArrayList<Pair<Liquidity.PivotLevel, Liquidity.Pivots>>()
+                // At most the 3 nearest holding levels on each side of the price; broken stretches only near it.
+                val pxNow = bars.last().c
+                val atrNow = Liquidity.atrPct(bars)
+                val keep = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Liquidity.PivotLevel, Boolean>()).apply {
+                    val act = finished.flatMap { pv -> pv.levels.filter { !it.hidden && it.active } }
+                    addAll(act.filter { it.price > pxNow }.sortedBy { it.price - pxNow }.take(3))
+                    addAll(act.filter { it.price < pxNow }.sortedBy { pxNow - it.price }.take(3))
+                }
                 val cap = px(4f)
                 for (pv in c.pivots) {
                     val rank = finished.size - 1 - finished.indexOf(pv)
@@ -452,12 +464,10 @@ fun ChartView(
                         }
                     }
                     if (pv.forming) continue
-                    if (pv == newest && pv.anchor in lo..hi) {
-                        drawLine(D.text.copy(alpha = 0.45f), Offset(bx0, y(pv.anchor)), Offset(plotW, y(pv.anchor)), 1f, pathEffect = dash)
-                        sideTags += SideTag(y(pv.anchor), pv.origin.short + " avg", D.text.copy(alpha = 0.8f))
-                    }
                     for (l in pv.levels) {
                         if (l.hidden) continue
+                        if (l.active && l !in keep) continue
+                        if (!l.active && abs(l.price / pxNow - 1) * 100 > 3 * atrNow) continue
                         if (l.price !in lo..hi) { if (l.active) offscreen += l to pv; continue }
                         val col = tierColor(l.lev)
                         val ly = y(l.price)

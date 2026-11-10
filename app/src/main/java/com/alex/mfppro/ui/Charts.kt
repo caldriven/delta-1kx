@@ -507,10 +507,13 @@ fun CandleChart(
                     sideLabels += py to tm.measure("sPOC", axisStyle.copy(color = POC_C, fontSize = 9.sp, fontWeight = FontWeight.Bold))
                 }
                 // Value area edges: where the session's accepted prices end.
+                // Short ticks on the profile itself, not more lines across the chart.
+                val vaW = chartW * 0.2f
                 for ((v, name) in listOf(pr.vah to "VAH", pr.vaLow to "VAL")) {
                     if (v !in lo..hi) continue
-                    drawLine(VA_C.copy(alpha = 0.7f), Offset(0f, y(v)), Offset(chartW, y(v)), 1f, pathEffect = dash)
-                    sideLabels += y(v) to tm.measure(name, axisStyle.copy(color = VA_C, fontSize = 9.sp))
+                    drawLine(POC_C.copy(alpha = 0.7f), Offset(0f, y(v)), Offset(vaW, y(v)), 1f)
+                    val t = tm.measure(name, axisStyle.copy(color = POC_C.copy(alpha = 0.85f), fontSize = 9.sp))
+                    drawText(t, topLeft = Offset(vaW + 3.dp.toPx(), y(v) - t.size.height / 2f))
                 }
             }
             // Naked POCs: earlier days' busiest prices that nothing has traded through since.
@@ -538,6 +541,12 @@ fun CandleChart(
             val finished = pivots.filter { !it.forming }.sortedBy { it.end }
             val newest = finished.lastOrNull()
             val offscreen = ArrayList<Pair<com.alex.mfppro.data.Liquidity.PivotLevel, com.alex.mfppro.data.Liquidity.Pivots>>()
+            // At most the 3 nearest holding levels on each side of the price; broken stretches only near it.
+            val keep = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<com.alex.mfppro.data.Liquidity.PivotLevel, Boolean>()).apply {
+                val act = finished.flatMap { pv -> pv.levels.filter { !it.hidden && it.active } }
+                addAll(act.filter { it.price > px0 }.sortedBy { it.price - px0 }.take(3))
+                addAll(act.filter { it.price < px0 }.sortedBy { px0 - it.price }.take(3))
+            }
             val cap = 4.dp.toPx()
             for (pv in pivots) {
                 val rank = finished.size - 1 - finished.indexOf(pv)
@@ -559,12 +568,10 @@ fun CandleChart(
                     }
                 }
                 if (pv.forming) continue
-                if (pv == newest && pv.anchor in lo..hi) {
-                    drawLine(C.text.copy(alpha = 0.45f), Offset(bx0, y(pv.anchor)), Offset(chartW, y(pv.anchor)), 1f, pathEffect = dash)
-                    sideLabels += y(pv.anchor) to tm.measure(pv.origin.short + " avg", axisStyle.copy(color = C.text.copy(alpha = 0.75f), fontSize = 9.sp))
-                }
                 for (l in pv.levels) {
                     if (l.hidden) continue
+                    if (l.active && l !in keep) continue
+                    if (!l.active && abs(l.price / px0 - 1) * 100 > 3 * atrP) continue
                     if (l.price !in lo..hi) { if (l.active) offscreen += l to pv; continue }
                     val col = liqTierColor(l.lev)
                     val ly = y(l.price)
