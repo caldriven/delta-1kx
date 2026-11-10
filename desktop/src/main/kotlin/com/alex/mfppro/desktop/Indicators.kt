@@ -126,11 +126,11 @@ fun IndicatorMenu(ind: Ind, onChange: (Ind) -> Unit) {
                 }
                 Check("Liquidity pools heat (right edge)", ind.liqPools) { onChange(ind.copy(liqPools = it)) }
                 var legend by remember { mutableStateOf(false) }
-                Pill(if (legend) "Hide the legend" else "How to read it · click a level's ⓘ label for its card", legend) { legend = !legend }
+                Pill(if (legend) "Hide legend" else "Legend", legend) { legend = !legend }
                 if (legend) Column(Modifier.padding(start = 4.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Column {
-                        Text(mark, color = D.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        Text(meaning, style = label.copy(fontSize = 11.sp, lineHeight = 14.sp, color = D.text), modifier = Modifier.widthIn(max = 380.dp))
+                    for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Row {
+                        Text(mark, color = D.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(110.dp))
+                        Text(meaning, style = label.copy(fontSize = 11.sp, color = D.text))
                     }
                 }
                 Check("Leverage bands around the average", ind.liqBands) { onChange(ind.copy(liqBands = it)) }
@@ -166,12 +166,7 @@ fun IndicatorMenu(ind: Ind, onChange: (Ind) -> Unit) {
                         listOf(0.004, 0.005, 0.01).forEach { m -> Pill(String.format(java.util.Locale.US, "%.1f%%", m * 100), ind.liqMmr == m) { onChange(ind.copy(liqMmr = m)) } }
                     }
                     Text(
-                        "Pivots: a coiled range (14-bar ATR well under the 100-bar ATR for 12+ bars) or a forced move " +
-                            "(volume 3× normal on a bar 2× the ATR: a flush or a pump) is where positions were opened. Each tier's " +
-                            "long and short liquidation price from its volume-weighted average is a level. Solid while it holds, " +
-                            "dots are hits (a wick in, a close back), |---| caps where a close went through and where a retest " +
-                            "brought it back. Thicker with a band: hit twice or more, or levels from several sources stacked within 0.1%. " +
-                            "Older sources fade and show only what still holds.",
+                        "Ranges and volume-spike moves → fixed liq levels per leverage. Click a label ⓘ for details.",
                         style = label.copy(fontSize = 10.sp, lineHeight = 13.sp), modifier = Modifier.padding(top = 2.dp, bottom = 4.dp),
                     )
                 }

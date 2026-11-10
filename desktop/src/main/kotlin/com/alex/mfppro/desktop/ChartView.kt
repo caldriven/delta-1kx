@@ -629,7 +629,7 @@ private data class EdgeTag(val above: Boolean, val text: String, val color: Colo
 @Composable
 private fun LevelCard(lines: List<LiqGuide.Line>, onClose: () -> Unit, modifier: Modifier) {
     androidx.compose.foundation.layout.Column(
-        modifier.width(360.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)).background(D.bg.copy(alpha = 0.96f))
+        modifier.width(260.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)).background(D.bg.copy(alpha = 0.96f))
             .border(1.dp, D.line, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
             .clickable(onClick = onClose).padding(12.dp),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
@@ -647,7 +647,6 @@ private fun LevelCard(lines: List<LiqGuide.Line>, onClose: () -> Unit, modifier:
             fontWeight = if (ln.tone == LiqGuide.Tone.TITLE) FontWeight.Bold else FontWeight.Normal,
             lineHeight = 16.sp,
         )
-        androidx.compose.material3.Text("Click to close", color = D.muted, fontSize = 10.sp)
     }
 }
 private class AxisTag(val y: Float, val bg: Color, val text: String, val fg: Color)

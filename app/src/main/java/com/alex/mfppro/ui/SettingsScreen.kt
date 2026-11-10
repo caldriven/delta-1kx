@@ -486,9 +486,7 @@ private fun ChartPage(repo: Repo) {
         Toggle("Market hours", "Tokyo, London and New York along the top, weekend band", sess, DATA) { sess = it; p.showSessions = it }
     }
     Section("Liquidation levels", DATA, Icons.Filled.Bolt) {
-        Note("Pivots: when the market coils (short ATR under 0.7\u00D7 its normal for 12+ bars), the range's volume-weighted " +
-            "average is where its positions were opened. Each tier's long and short liquidation price from it is a fixed level " +
-            "until the next range forms, and dims once price trades through it.")
+        Note("Ranges and volume-spike moves → fixed liq levels per leverage. Tap a label ⓘ on the chart for details.")
         var tiers by remember { mutableStateOf(p.liqTiers) }
         androidx.compose.foundation.layout.Row(Modifier.padding(top = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)) {
             for (lev in listOf(5, 10, 20, 25, 50, 75, 100)) Seg("${lev}x", lev in tiers, liqTierColor(lev)) {

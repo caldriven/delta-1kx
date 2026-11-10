@@ -723,7 +723,7 @@ fun CandleChart(
         // A tapped level's card; tap it (or the chart) to close.
         info?.let { lines ->
             androidx.compose.foundation.layout.Column(
-                Modifier.align(Alignment.TopStart).padding(6.dp).widthIn(max = 300.dp)
+                Modifier.align(Alignment.TopStart).padding(6.dp).widthIn(max = 250.dp)
                     .clip(RoundedCornerShape(10.dp)).background(C.bg.copy(alpha = 0.96f))
                     .border(1.dp, C.line, RoundedCornerShape(10.dp)).clickable { info = null }.padding(10.dp),
                 verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(5.dp),
@@ -741,7 +741,6 @@ fun CandleChart(
                     fontWeight = if (ln.tone == com.alex.mfppro.data.LiqGuide.Tone.TITLE) FontWeight.Bold else FontWeight.Normal,
                     lineHeight = 15.sp,
                 )
-                Text("Tap to close", color = C.muted, fontSize = 10.sp)
             }
         }
         // Fit to screen: drops the manual price range.

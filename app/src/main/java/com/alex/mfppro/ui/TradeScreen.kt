@@ -1050,7 +1050,7 @@ private fun LiqQuickMenu(repo: Repo, onChange: () -> Unit) {
                 AppCheck("Flushes and pumps too", ev) { ev = it; p.liqEvents = it; onChange() }
                 var heat by remember { mutableStateOf(p.liqHeat) }
                 AppCheck("Pools heat on the right edge", heat) { heat = it; p.liqHeat = it; onChange() }
-                Text("Tap a level's label for what it means and how to trade around it.", color = C.muted, fontSize = 11.sp, lineHeight = 14.sp)
+                Text("Tap a label ⓘ for details", color = C.muted, fontSize = 11.sp)
                 Text("How to read it \u2192", color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { open = false; guide = true }.padding(vertical = 4.dp))
             }
@@ -1064,14 +1064,13 @@ private fun LiqQuickMenu(repo: Repo, onChange: () -> Unit) {
 fun LiqGuideDialog(onDismiss: () -> Unit) {
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss, containerColor = C.panel,
-        title = { Text("Reading the liquidation levels", color = C.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+        title = { Text("Liquidation levels", color = C.text, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Where positions were opened (a quiet range, or a flush or pump on heavy volume), and where they get liquidated at each leverage. " +
-                    "Forced buying or selling there tends to pull price in and spike it.", color = C.muted, fontSize = 12.sp, lineHeight = 16.sp)
-                for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Column {
-                    Text(mark, color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Text(meaning, color = C.text, fontSize = 12.sp, lineHeight = 16.sp)
+                Text("Where positions opened · where each leverage gets liquidated", color = C.muted, fontSize = 12.sp, lineHeight = 16.sp)
+                for ((mark, meaning) in com.alex.mfppro.data.LiqGuide.LEGEND) Row {
+                    Text(mark, color = C.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(110.dp))
+                    Text(meaning, color = C.text, fontSize = 12.sp)
                 }
             }
         },
