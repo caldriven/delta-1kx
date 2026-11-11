@@ -13,6 +13,9 @@ import com.alex.mfppro.data.Candle
 fun List<Candle>.withLive(p: Double?, now: Long = System.currentTimeMillis()): List<Candle> {
     if (p == null || p <= 0 || isEmpty()) return this
     val l = last()
+    // A price far from the last bar means the bars are stale (or from another feed), not that the
+    // market gapped in one candle: drawing it would make one huge wick. Leave the bars to the reload.
+    if (l.c > 0 && kotlin.math.abs(p / l.c - 1) > 0.006) return this
     fun fold() = dropLast(1) + l.copy(c = p, h = maxOf(l.h, p), l = minOf(l.l, p))
     if (size < 2) return fold()
     val step = l.openTime - this[size - 2].openTime

@@ -378,10 +378,10 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
             if (historyJobs[key]?.isActive == true || now < (auditAt[key] ?: 0)) continue
             val last = candlesBuf[key]?.lastEntry()?.value
             val mark = venueBuf[sub.feed] ?: marksBuf[sub.feed]
-            val drift = last != null && mark != null && mark > 0 && last.openTime + ms > now && abs(last.c / mark - 1) > 0.015
+            val drift = last != null && mark != null && mark > 0 && last.openTime + ms > now && abs(last.c / mark - 1) > 0.005
             if (drift) mismatchSince.getOrPut(key) { now } else mismatchSince.remove(key)
             val stale = last == null || behind(last, ms, now)
-            if (stale || (drift && now - (mismatchSince[key] ?: now) >= 20_000)) {
+            if (stale || (drift && now - (mismatchSince[key] ?: now) >= 10_000)) {
                 Log.i(TAG, "reloading candles $key: " + if (stale) "behind" else "off the live price")
                 mismatchSince.remove(key)
                 auditAt[key] = now + 60_000
