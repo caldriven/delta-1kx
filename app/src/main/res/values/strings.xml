@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_positions_label">Delta 1kx positions</string>
+    <string name="widget_positions_desc">Open PnL and every position. Tap one to manage it.</string>
+    <string name="widget_chart_label">Delta 1kx chart</string>
+    <string name="widget_chart_desc">Chart of your largest position with entry and live PnL.</string>
+</resources>

@@ -12,6 +12,7 @@ class MfpApp : Application() {
         super.onCreate()
         repo = androidRepo(this)
         com.alex.mfppro.data.AlertMonitor(this, repo)
+        com.alex.mfppro.widget.Widgets.start(this, repo)
         if (repo.prefs.monitorBackground) com.alex.mfppro.data.MonitorService.setEnabled(this, true)
     }
 }

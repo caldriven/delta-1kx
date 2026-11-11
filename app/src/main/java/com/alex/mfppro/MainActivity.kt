@@ -63,8 +63,15 @@ import com.alex.mfppro.ui.SettingsScreen
 import com.alex.mfppro.ui.TradeScreen
 
 class MainActivity : ComponentActivity() {
+    // A widget tap while the app is already running.
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        com.alex.mfppro.ui.WidgetLink.handle(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) com.alex.mfppro.ui.WidgetLink.handle(intent)
         enableEdgeToEdge()
         val repo = (application as MfpApp).repo
         com.alex.mfppro.ui.Split.pct = repo.prefs.profitSplit
@@ -115,6 +122,11 @@ class MainActivity : ComponentActivity() {
                 val go = { t: Int -> if (t != tab) { history.remove(t); history.add(tab); tab = t } }
                 androidx.activity.compose.BackHandler(enabled = history.isNotEmpty()) { tab = history.removeAt(history.lastIndex) }
                 val openMarket = { id: String -> marketId = id; repo.prefs.lastMarketId = id; go(1) }
+                // Widget taps: a position opens its manage screen over the Dashboard, a market opens its chart.
+                val linkReq = com.alex.mfppro.ui.WidgetLink.request
+                LaunchedEffect(linkReq) { if (linkReq != null) { com.alex.mfppro.ui.OrderPanel.open = null; go(0) } }
+                val linkMarket = com.alex.mfppro.ui.WidgetLink.market
+                LaunchedEffect(linkMarket) { linkMarket?.let { com.alex.mfppro.ui.WidgetLink.market = null; com.alex.mfppro.ui.OrderPanel.open = null; openMarket(it) } }
                 val snack = remember { SnackbarHostState() }
                 LaunchedEffect(Unit) { repo.messages.collect { snack.showSnackbar(it, withDismissAction = true) } }
                 Box(Modifier.fillMaxSize()) {
@@ -206,6 +218,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 com.alex.mfppro.ui.Overlay.content?.invoke()
+                com.alex.mfppro.ui.WidgetManage(repo, onOpenMarket = openMarket)
                 // Order results above everything, panels and dialogs' backdrop included.
                 TradeResultBanner(repo)
                 }

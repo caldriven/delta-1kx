@@ -33,5 +33,27 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Live drawdown alerts for the user's trading accounts" />
         </service>
+        <receiver
+            android:name=".widget.PositionWidget"
+            android:exported="false"
+            android:label="@string/widget_positions_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_positions_info" />
+        </receiver>
+        <receiver
+            android:name=".widget.ChartWidget"
+            android:exported="false"
+            android:label="@string/widget_chart_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_chart_info" />
+        </receiver>
     </application>
 </manifest>
