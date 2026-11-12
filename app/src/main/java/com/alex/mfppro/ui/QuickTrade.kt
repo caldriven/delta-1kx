@@ -185,16 +185,14 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        // Row 1: Long | Short as one switch, both sides always visible.
-        SlideSwitch(listOf("Long", "Short"), if (buySide) 0 else 1, listOf(C.up, C.down), Modifier.fillMaxWidth(), height = 32.dp,
-            icons = listOf(Icons.AutoMirrored.Filled.TrendingUp, Icons.AutoMirrored.Filled.TrendingDown)) { buySide = it == 0 }
-        // Row 2: Market | Limit with reduce-only beside it.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SlideSwitch(listOf("Market", "Limit"), if (draft.on) 1 else 0, listOf(C.accent, C.accent), Modifier.weight(1f), height = 28.dp) { i ->
+        // One line: Long | Short filled in its colour, Market | Limit, and reduce-only.
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            SlideSwitch(listOf("Long", "Short"), if (buySide) 0 else 1, listOf(C.up, C.down), Modifier.weight(1.3f), height = 34.dp, solid = true,
+                icons = listOf(Icons.AutoMirrored.Filled.TrendingUp, Icons.AutoMirrored.Filled.TrendingDown)) { buySide = it == 0 }
+            SlideSwitch(listOf("Market", "Limit"), if (draft.on) 1 else 0, listOf(C.accent, C.accent), Modifier.weight(1f), height = 34.dp, fontSize = 12.sp) { i ->
                 if (i == 1 && draft.price == null) draft.price = ((if (buySide) book?.bids?.firstOrNull()?.px else book?.asks?.firstOrNull()?.px) ?: mark)?.let { draft.snap(it, market) }
                 draft.on = i == 1
             }
-            Spacer(Modifier.width(6.dp))
             ReduceChip(reduceOnly) { reduceOnly = !reduceOnly }
         }
         // Row 3, Limit only: price with − / + (or drag the line on the chart) and the decimals it snaps to.
@@ -329,7 +327,9 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
 @Composable
 fun SlideSwitch(
     options: List<String>, selected: Int, colors: List<Color>, modifier: Modifier = Modifier,
-    height: androidx.compose.ui.unit.Dp = 40.dp, icons: List<androidx.compose.ui.graphics.vector.ImageVector>? = null, onSelect: (Int) -> Unit,
+    height: androidx.compose.ui.unit.Dp = 40.dp, icons: List<androidx.compose.ui.graphics.vector.ImageVector>? = null,
+    /** The picked side as a filled pill with white text, for the choice that matters most on the panel. */
+    solid: Boolean = false, fontSize: androidx.compose.ui.unit.TextUnit? = null, onSelect: (Int) -> Unit,
 ) {
     val shape = RoundedCornerShape(10.dp)
     val pick by rememberUpdatedState(onSelect)
@@ -346,17 +346,19 @@ fun SlideSwitch(
         val w = maxWidth / options.size
         val x by androidx.compose.animation.core.animateDpAsState(w * selected, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 500f), label = "pill")
         val col by androidx.compose.animation.animateColorAsState(colors[selected], label = "pillCol")
-        Box(Modifier.offset(x = x).width(w).fillMaxHeight().clip(RoundedCornerShape(8.dp)).background(col.copy(alpha = 0.22f)).border(1.dp, col.copy(alpha = 0.8f), RoundedCornerShape(8.dp)))
+        Box(Modifier.offset(x = x).width(w).fillMaxHeight().clip(RoundedCornerShape(8.dp)).then(
+            if (solid) Modifier.background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(col.copy(alpha = 0.95f), col.copy(alpha = 0.72f))))
+            else Modifier.background(col.copy(alpha = 0.22f)).border(1.dp, col.copy(alpha = 0.8f), RoundedCornerShape(8.dp))))
         Row(Modifier.fillMaxSize()) {
             options.forEachIndexed { i, label ->
                 val on = i == selected
-                val tint by androidx.compose.animation.animateColorAsState(if (on) colors[i] else C.muted, label = "optTint")
+                val tint by androidx.compose.animation.animateColorAsState(if (!on) C.muted else if (solid) Color.White else colors[i], label = "optTint")
                 Row(
                     Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(8.dp)).clickable { pick(i) },
                     horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    icons?.getOrNull(i)?.let { Icon(it, null, tint = tint, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)) }
-                    Text(label, color = tint, fontSize = if (height >= 44.dp) 15.sp else 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+                    icons?.getOrNull(i)?.let { Icon(it, null, tint = tint, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)) }
+                    Text(label, color = tint, fontSize = fontSize ?: if (height >= 44.dp) 15.sp else 13.sp, fontWeight = if (on) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                 }
             }
         }
@@ -391,8 +393,8 @@ private fun Nudge(label: String, onClick: () -> Unit) {
 private fun ReduceChip(on: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     Row(
-        Modifier.height(28.dp).clip(shape).background(if (on) C.accent.copy(alpha = 0.18f) else C.panel2)
-            .border(1.dp, if (on) C.accent else C.line, shape).clickable(onClick = onClick).padding(horizontal = 12.dp),
+        Modifier.height(34.dp).clip(shape).background(if (on) C.accent.copy(alpha = 0.18f) else C.panel2)
+            .border(1.dp, if (on) C.accent else C.line, shape).clickable(onClick = onClick).padding(horizontal = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Filled.UnfoldLess, null, tint = if (on) C.accent else C.muted, modifier = Modifier.size(14.dp))

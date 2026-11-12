@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -127,9 +128,10 @@ private fun IntervalRow(interval: String, fontSize: androidx.compose.ui.unit.Tex
         }
         @Composable
         fun Hint(left: Boolean) = Box(
-            Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd).width(26.dp).height(30.dp)
-                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(
-                    if (left) listOf(C.bg, C.bg.copy(alpha = 0f)) else listOf(C.bg.copy(alpha = 0f), C.bg)))
+            Modifier.align(if (left) Alignment.CenterStart else Alignment.CenterEnd).width(34.dp).height(30.dp)
+                // Solid under the arrow, so the interval behind it never shows through.
+                .background(if (left) androidx.compose.ui.graphics.Brush.horizontalGradient(0f to C.bg, 0.4f to C.bg, 1f to C.bg.copy(alpha = 0f))
+                    else androidx.compose.ui.graphics.Brush.horizontalGradient(0f to C.bg.copy(alpha = 0f), 0.6f to C.bg, 1f to C.bg))
                 .clickable { scope.launch { scroll.animateScrollTo(if (left) 0 else scroll.maxValue) } },
             contentAlignment = if (left) Alignment.CenterStart else Alignment.CenterEnd,
         ) {
@@ -206,7 +208,8 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     val today = if (live != null && dOpen != null && dOpen > 0) (live / dOpen - 1) * 100 else s?.change24hPct
 
     // Only the trading account unless "All accounts" is on.
-    var showAll by remember { mutableStateOf(repo.prefs.tradeShowAll) }
+    val showAll = TradeScope.all
+    var acctPick by remember { mutableStateOf(false) }
     val tradeAcc = rememberTradeAccount(repo)
     val scoped = if (showAll) activeAccounts(accounts) else listOfNotNull(tradeAcc)
     val multi = showAll && scoped.size > 1
@@ -393,13 +396,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     // Where the section tabs sit in the page, so opening one can bring the list into view.
     var tabsY by remember { mutableStateOf(0) }
     val density = androidx.compose.ui.platform.LocalDensity.current
-    LaunchedEffect(tab) {
-        if (tab >= 0 && !compact) {
-            delay(60)
-            // Keep a strip of chart above the tabs; the rest of the screen is the list.
-            pageScroll.animateScrollTo((tabsY - with(density) { 160.dp.toPx() }.toInt()).coerceAtLeast(0))
-        }
-    }
+    // Opening a section never scrolls: the chart stays where it is and the list opens under it.
     Column(Modifier.weight(1f).then(if (scrolls) Modifier.verticalScroll(pageScroll) else Modifier)) {
         // Header: market + live price on one line, stats strip below.
         Row(Modifier.fillMaxWidth().padding(10.dp, 4.dp, 12.dp, 0.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -421,17 +418,25 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         }
         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
         LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
-        if (!compact && !focus && !mini) Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 3.dp),
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        androidx.compose.animation.AnimatedVisibility(!compact && !focus && !mini) { Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
+            // The account in play (or all of them): tap to switch, same sheet as on the Trade view.
+            Row(Modifier.clip(RoundedCornerShape(6.dp)).background(C.panel).clickable { acctPick = true }.padding(start = 7.dp, end = 3.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(if (showAll) "All accounts" else tradeAcc?.let(::accountName) ?: "Account", color = if (showAll) C.accent else C.text,
+                    fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Icon(Icons.Filled.ArrowDropDown, "Switch account", tint = C.muted, modifier = Modifier.size(16.dp))
+            }
             HeadStat("OI", "$" + fmtCompact(s?.openInterestUsd))
             HeadStat("OI 24h", fmtPct(oiChg), pnlColor(oiChg))
             HeadStat("Funding", fmtFunding(s?.fundingRate) +
                 (s?.nextFundingTime?.let { " · " + fmtCountdown(it - now) } ?: ""), pnlColor(s?.fundingRate))
             HeadStat("Vol 24h", "$" + fmtCompact(s?.dayNtlVlm))
             HeadStat("D open", fmtPrice(dOpen))
-        }
+        } }
+        if (acctPick) AccountPickerSheet(repo) { acctPick = false }
 
         // The account lives on the Trade view; Chart keeps just the asset and its stats on top.
         androidx.compose.animation.AnimatedVisibility(!focus && compact && !mini) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = true) }
@@ -460,9 +465,10 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            run {
+            val chipScroll = rememberScrollState()
+            Box(Modifier.weight(1f)) {
                 // Scrolls sideways when the chips don't fit, instead of squeezing the last ones.
-                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.horizontalScroll(chipScroll), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (repo.prefs.chipPos) OverlayChip("Position", showPos, Icons.Filled.Layers) { showPosPick = !showPos; repo.prefs.showPosLines = showPosPick }
                     if (repo.prefs.chipOpens) OverlayChip("D/W/M", showOpens, Icons.Filled.HorizontalRule) { showOpens = !showOpens; repo.prefs.showOpens = showOpens }
                     if (repo.prefs.chipPivots) OverlayChip("Pivots", showPivots, Icons.Filled.Reorder) { showPivots = !showPivots; repo.prefs.showPivots = showPivots }
@@ -473,8 +479,10 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     if (repo.prefs.chipLiq) OverlayChip("Liq", showLiq, Icons.Filled.Adjust) { showLiq = !showLiq; repo.prefs.showLiq = showLiq }
                     if (repo.prefs.chipLiq && showLiq) LiqQuickMenu(repo) { liqRev++ }
                 }
+                // More chips to the right fade out rather than stopping half-drawn at the tool icons.
+                if (chipScroll.canScrollForward) Box(Modifier.align(Alignment.CenterEnd).width(28.dp).height(26.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(0f to C.bg.copy(alpha = 0f), 0.6f to C.bg, 1f to C.bg)))
             }
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(2.dp))
             // Layers: what the chart draws for your trades.
             Box {
                 var layersOpen by remember { mutableStateOf(false) }
@@ -500,7 +508,15 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
         val chartH = (screenH * if (compact) 0.47f else 0.54f).dp
         // Nothing open below: the chart stretches down to the section tabs.
-        val sized = if (mini || (!compact && !scrolls)) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
+        // The chart glides between its sizes (Chart, Trade, a section open) instead of jumping. While it
+        // fills the screen its height is noted, so the glide back knows where to end before it lets go.
+        val wantFill = mini || (!compact && !scrolls)
+        var fillDp by remember { mutableStateOf<androidx.compose.ui.unit.Dp?>(null) }
+        val goal = if (wantFill) fillDp ?: chartH else chartH
+        val animH by androidx.compose.animation.core.animateDpAsState(goal, androidx.compose.animation.core.tween(260), label = "chartH")
+        val fillNow = wantFill && (fillDp == null || animH == goal)
+        val sized = if (fillNow) Modifier.fillMaxWidth().weight(1f).onSizeChanged { fillDp = with(density) { it.height.toDp() } }
+            else Modifier.fillMaxWidth().height(animH)
         run {
             when (view) {
                 1 -> TradingData(repo, market, s?.openInterestUsd, mark, oiHere.orEmpty())
@@ -557,13 +573,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = if (tab == it) -1 else it }
         }
         if (!compact && !mini && tab >= 0) when (tab) {
-            0 -> Column {
-                Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (showAll) "All active accounts" else tradeAcc?.let(::accountName) ?: "", color = C.muted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                    Text("All accounts", color = C.muted, fontSize = 11.sp)
-                    Spacer(Modifier.width(8.dp))
-                    AppSwitch(showAll, { showAll = it; repo.prefs.tradeShowAll = it })
-                }
+            0 -> Column(Modifier.padding(top = 4.dp)) {
                 if (allPositions.isEmpty()) Text("No open positions", color = C.muted, fontSize = 13.sp, modifier = Modifier.padding(16.dp, 10.dp))
                 allPositions.forEach { p -> androidx.compose.runtime.key(p.id) {
                     val pm = marks[p.feedKey]

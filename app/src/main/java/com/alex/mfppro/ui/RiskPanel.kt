@@ -54,6 +54,11 @@ fun rememberTradeAccount(repo: Repo): AccountState? {
     return active.firstOrNull { it.account.id == chosen } ?: active.firstOrNull()
 }
 
+/** Whose positions, orders and chart lines the Trade tab shows: the trading account, or every active one. */
+object TradeScope {
+    var all by mutableStateOf(false)
+}
+
 private val ROOM_FULL get() = C.roomFull
 private val TARGET_C get() = C.target
 
@@ -172,6 +177,8 @@ fun AccountSwitcher(repo: Repo, modifier: Modifier = Modifier) {
             Text(accountName(acc), color = C.text, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.UnfoldMore, null, tint = C.muted, modifier = Modifier.size(12.dp))
+            if (TradeScope.all) Text("+ all", color = C.accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                modifier = Modifier.padding(start = 4.dp).clip(RoundedCornerShape(4.dp)).background(C.accent.copy(alpha = 0.14f)).padding(horizontal = 4.dp))
         }
         Text(fmtUsd(riskOf(acc, marks).equity), style = num.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = C.text))
     }
@@ -187,6 +194,18 @@ fun AccountPickerSheet(repo: Repo, onDismiss: () -> Unit) {
     val current = rememberTradeAccount(repo)
     androidx.compose.material3.ModalBottomSheet(onDismissRequest = onDismiss, containerColor = C.panel) {
         Text("Switch account", color = C.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.padding(16.dp, 0.dp, 16.dp, 8.dp))
+        // What the Trade tab lists and draws; orders still go to the account picked below.
+        Row(
+            Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.panel2)
+                .clickable { TradeScope.all = !TradeScope.all; repo.prefs.tradeShowAll = TradeScope.all }.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Show all accounts", color = C.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text("Positions, orders and chart lines from every active account", color = C.muted, fontSize = 11.sp)
+            }
+            AppSwitch(TradeScope.all, { TradeScope.all = it; repo.prefs.tradeShowAll = it })
+        }
         com.alex.mfppro.ui.activeAccounts(accounts, includeComp = true).forEach { s ->
             val r = riskOf(s, marks)
             val on = s.account.id == current?.account?.id

@@ -455,12 +455,16 @@ fun CandleChart(
             val sideLabels = ArrayList<Pair<Float, androidx.compose.ui.text.TextLayoutResult>>()
             // Labels that open a card when tapped (liquidation levels), by identity of their layout.
             val sideTaps = java.util.IdentityHashMap<androidx.compose.ui.text.TextLayoutResult, () -> Unit>()
+            // Which label keeps its place when they crowd (zoomed out): 0 session profile, 1 opens and pivots,
+            // 2 the liquidation levels that matter now, 3 the older ones. Lower wins; the rest are left out.
+            val sidePrio = java.util.IdentityHashMap<androidx.compose.ui.text.TextLayoutResult, Int>()
+            fun side(yy: Float, t: androidx.compose.ui.text.TextLayoutResult, prio: Int) { sideLabels += yy to t; sidePrio[t] = prio }
             val axisTags = ArrayList<AxisTag>()
             for (l in lines.filter { it.ref }) {
                 if (l.price !in lo..hi) continue
                 val yy = y(l.price)
                 drawLine(l.color.copy(alpha = 0.7f), Offset(0f, yy), Offset(chartW, yy), 1f, pathEffect = dot)
-                sideLabels += yy to tm.measure(l.label, refStyle.copy(color = l.color))
+                side(yy, tm.measure(l.label, refStyle.copy(color = l.color)), 1)
             }
             hits.clear()
             // Position boxes are drawn last so nothing paints over them.
@@ -519,13 +523,13 @@ fun CandleChart(
                     val py = y(pp)
                     drawLine(POC_C, Offset(0f, py), Offset(chartW, py), 1.5f)
                     axisTags += AxisTag(py, POC_C, fmtPrice(pp), Color.Black)
-                    sideLabels += py to tm.measure("sPOC", axisStyle.copy(color = POC_C, fontSize = 9.sp, fontWeight = FontWeight.Bold))
+                    side(py, tm.measure("sPOC", axisStyle.copy(color = POC_C, fontSize = 9.sp, fontWeight = FontWeight.Bold)), 0)
                 }
                 // Value area edges: where the session's accepted prices end.
                 for ((v, name) in listOf(pr.vah to "VAH", pr.vaLow to "VAL")) {
                     if (v !in lo..hi) continue
                     drawLine(VA_C.copy(alpha = 0.7f), Offset(0f, y(v)), Offset(chartW, y(v)), 1f, pathEffect = dash)
-                    sideLabels += y(v) to tm.measure(name, axisStyle.copy(color = VA_C, fontSize = 9.sp))
+                    side(y(v), tm.measure(name, axisStyle.copy(color = VA_C, fontSize = 9.sp)), 0)
                 }
             }
             // Naked POCs: earlier days' busiest prices that nothing has traded through since.
@@ -534,7 +538,7 @@ fun CandleChart(
                 val i0 = slice.indexOfFirst { it.openTime >= t0 }
                 val x0 = if (i0 <= 0) 0f else chartW - (slice.size - i0 + gap) * barW
                 drawLine(POC_C.copy(alpha = 0.6f), Offset(x0, y(pp)), Offset(chartW, y(pp)), 1f, pathEffect = dot)
-                sideLabels += y(pp) to tm.measure("nPOC", axisStyle.copy(color = POC_C.copy(alpha = 0.85f), fontSize = 9.sp))
+                side(y(pp), tm.measure("nPOC", axisStyle.copy(color = POC_C.copy(alpha = 0.85f), fontSize = 9.sp)), 2)
             }
             // Liquidation pivots. Each source (compressed range, long flush, pump) leaves fixed levels, drawn as
             // the stretches in which they held: |----| ends where a candle closed through, a new |---- starts at a
@@ -576,7 +580,7 @@ fun CandleChart(
                 if (pv.forming) continue
                 if (pv == newest && pv.anchor in lo..hi) {
                     drawLine(C.text.copy(alpha = 0.45f), Offset(bx0, y(pv.anchor)), Offset(chartW, y(pv.anchor)), 1f, pathEffect = dash)
-                    sideLabels += y(pv.anchor) to tm.measure(pv.origin.short + " avg", axisStyle.copy(color = C.text.copy(alpha = 0.75f), fontSize = 9.sp))
+                    side(y(pv.anchor), tm.measure(pv.origin.short + " avg", axisStyle.copy(color = C.text.copy(alpha = 0.75f), fontSize = 9.sp)), 3)
                 }
                 for (l in pv.levels) {
                     if (l.hidden) continue
@@ -606,7 +610,7 @@ fun CandleChart(
                             (if (l.stacked > 1) " \u00B7 ${l.stacked} stacked" else "") + (if (pv == newest) "" else " \u00B7 ${pv.origin.short} ${ago(pv.end)}")
                         val lay = tm.measure("$txt \u24D8", axisStyle.copy(color = col.copy(alpha = 0.55f + 0.45f * fade), fontSize = 9.sp,
                             fontWeight = if (l.hits >= 2 || l.stacked > 1 || pv == newest) FontWeight.Bold else FontWeight.Normal))
-                        sideLabels += ly to lay
+                        side(ly, lay, if (l.hits >= 2 || l.stacked > 1 || pv == newest) 2 else 3)
                         sideTaps[lay] = { info = com.alex.mfppro.data.LiqGuide.explain(l, pv, px0, atrP, System.currentTimeMillis()) { fmtPrice(it) } }
                     }
                 }
@@ -666,14 +670,17 @@ fun CandleChart(
                 label(tm, txt, Offset(chartW + 4.dp.toPx(), ly + tagH / 2 + 0.5.dp.toPx()), axisStyle.copy(color = Color.Black, fontSize = 9.sp))
             }
             // Right-edge text labels, spread apart top to bottom.
-            var nextTop = -1f
+            // Each label sits just above its line, or just under it when that spot is taken. With no free
+            // spot it is left out: the most important first, then whatever is nearest the price.
             val sideRects = ArrayList<Rect>()
-            for ((yy, t) in sideLabels.sortedBy { it.first }) {
-                val top = maxOf(yy - t.size.height - 1.dp.toPx(), nextTop)
-                sideRects += Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + t.size.height)
+            for ((yy, t) in sideLabels.sortedWith(compareBy({ sidePrio[it.second] ?: 1 }, { abs(it.first - ly) }))) {
+                val th = t.size.height.toFloat()
+                val top = listOf(yy - th - 1.dp.toPx(), yy + 1.dp.toPx()).firstOrNull { c ->
+                    c >= 0f && c + th <= chartH && sideRects.none { c < it.bottom && c + th > it.top }
+                } ?: continue
+                sideRects += Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + th)
                 drawText(t, topLeft = Offset(chartW - t.size.width - 4.dp.toPx(), top))
-                sideTaps[t]?.let { tap -> hits += Hit(Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + t.size.height).inflate(4.dp.toPx()), tap = tap) }
-                nextTop = top + t.size.height
+                sideTaps[t]?.let { tap -> hits += Hit(Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + th).inflate(4.dp.toPx()), tap = tap) }
             }
             var noteTop = 4.dp.toPx()
             // Above the killzone strip and its labels along the bottom.
