@@ -19,15 +19,20 @@ if (-not $SkipAndroid) {
     .\gradlew.bat :app:assembleRelease
     if ($LASTEXITCODE -ne 0) { throw 'Android build failed' }
     $apk = 'app\build\outputs\apk\release\app-release.apk'
-    $dev = & $adb devices | Select-String "`tdevice$"
+    # adb writes its daemon start-up notes to stderr, which would trip ErrorActionPreference=Stop.
+    $ErrorActionPreference = 'Continue'
+    & $adb start-server *> $null
+    $dev = & $adb devices 2>$null | Select-String "`tdevice$"
     if ($dev) {
         & $adb install -r --user 0 $apk
+        if ($LASTEXITCODE -ne 0) { throw 'adb install failed' }
         Write-Host 'Phone updated.' -ForegroundColor Green
     } else {
         Write-Host "No phone connected (USB debugging on?). APK is at $apk" -ForegroundColor Yellow
     }
 }
 
+$ErrorActionPreference = 'Stop'
 if (-not $SkipWindows) {
     .\gradlew.bat :desktop:createReleaseDistributable
     if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }

@@ -154,6 +154,8 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun trade(id: Int, title: String, text: String, alarm: Boolean = false) {
+        // With the app on screen a system notification only gets in the way: a quiet line in the app instead.
+        if (repo.visible.value) { inApp.tryEmit(InApp(title, text, alarm)); return }
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -204,6 +206,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun notify(id: Int, title: String, text: String) {
+        if (repo.visible.value) { inApp.tryEmit(InApp(title, text, true)); return }
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -221,12 +224,31 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
 
     private fun fmt(v: Double?) = com.alex.mfppro.ui.fmtUsd(v)
 
+    /** An alert shown inside the app instead of as a system notification. */
+    class InApp(val title: String, val text: String, val alarm: Boolean)
+
     companion object {
-        fun monitorNotification(ctx: Context) = NotificationCompat.Builder(ctx, CH_MONITOR)
+        val inApp = kotlinx.coroutines.flow.MutableSharedFlow<InApp>(extraBufferCapacity = 8)
+
+        /**
+         * The ongoing monitor notification, carrying live numbers: open PnL in the title, one line per
+         * position when expanded, equity and drawdown room underneath. Silent on every update.
+         */
+        fun monitorNotification(ctx: Context, t: com.alex.mfppro.widget.LiveText) = NotificationCompat.Builder(ctx, CH_MONITOR)
             .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
-            .setContentTitle("Delta 1kx is watching your accounts")
-            .setContentText("Alerts stay live in the background")
-            .setOngoing(true)
+            .setContentTitle(t.title)
+            .setContentText(t.text)
+            .setSubText("Live")
+            .apply {
+                // Green or red with the PnL (the user's theme colours aside: the shade has its own look).
+                t.pnl?.let { setColor(if (it >= 0) 0xFF20B26C.toInt() else 0xFFEF454A.toInt()) }
+                if (t.lines.isNotEmpty()) setStyle(NotificationCompat.InboxStyle().also { st ->
+                    t.lines.forEach(st::addLine)
+                    if (t.summary.isNotEmpty()) st.setSummaryText(t.summary)
+                })
+            }
+            .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
             .build()
     }
@@ -236,16 +258,34 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
 class MonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private var liveJob: kotlinx.coroutines.Job? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val repo = (application as MfpApp).repo
+        var shown = com.alex.mfppro.widget.liveText(com.alex.mfppro.widget.liveSnap(repo))
         ServiceCompat.startForeground(
-            this, 42, AlertMonitor.monitorNotification(this),
+            this, 42, AlertMonitor.monitorNotification(this, shown),
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0,
         )
-        (application as MfpApp).repo.setBackgroundMonitoring(true)
+        repo.setBackgroundMonitoring(true)
+        // Live numbers in the notification: re-posted (silently) only when its words changed.
+        if (liveJob == null) liveJob = repo.scope.launch {
+            while (isActive) {
+                delay(3_000)
+                val now = runCatching { com.alex.mfppro.widget.liveText(com.alex.mfppro.widget.liveSnap(repo)) }.getOrNull() ?: continue
+                if (now == shown) continue
+                if (Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(this@MonitorService, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) continue
+                shown = now
+                runCatching { NotificationManagerCompat.from(this@MonitorService).notify(42, AlertMonitor.monitorNotification(this@MonitorService, now)) }
+            }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        liveJob?.cancel(); liveJob = null
         (application as MfpApp).repo.setBackgroundMonitoring(false)
         super.onDestroy()
     }

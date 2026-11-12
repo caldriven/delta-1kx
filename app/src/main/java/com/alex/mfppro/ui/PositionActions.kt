@@ -566,7 +566,7 @@ private fun roundTick(v: Double): Double = java.math.BigDecimal.valueOf(v).round
  * price ticks while it travels.
  */
 @Composable
-fun QuickClose(repo: Repo, p: Position, mark: Double?) {
+fun QuickClose(repo: Repo, p: Position, mark: Double?, mini: Boolean = false) {
     val scope = rememberCoroutineScope()
     val pm = remember(p.marketId) { repo.market(p.marketId) }
     var pending by remember { mutableStateOf<Pending?>(null) }
@@ -586,9 +586,10 @@ fun QuickClose(repo: Repo, p: Position, mark: Double?) {
         if (tick == null) raw else (if (p.isLong) kotlin.math.ceil(raw / tick) else kotlin.math.floor(raw / tick)) * tick
     }
     val bpsTxt = String.format(java.util.Locale.US, "%.0f bp", repo.prefs.closeMarginBps)
-    Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(top = 2.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        val w = Modifier.weight(1f)
-        PillBtn("Post-only close", w, color = C.accent, enabled = !busy && limitPx != null) {
+    // Mini: three short buttons that sit beside the position instead of under it.
+    Row(if (mini) Modifier else Modifier.fillMaxWidth().padding(horizontal = 10.dp).padding(top = 2.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(if (mini) 3.dp else 5.dp)) {
+        val w = if (mini) Modifier.size(46.dp, 28.dp) else Modifier.weight(1f)
+        PillBtn(if (mini) "Post" else "Post-only close", w, color = C.accent, enabled = !busy && limitPx != null) {
             val px = limitPx ?: return@PillBtn
             act("Post-only close ${ticker(p.symbol, p.provider)}",
                 "Reduce-only limit ${if (p.isLong) "sell" else "buy"} of ${fmtUsd(p.size * px)} at ${fmtPrice(px, pm)}: the best ${if (p.isLong) "ask" else "bid"} + $bpsTxt. " +
@@ -596,13 +597,13 @@ fun QuickClose(repo: Repo, p: Position, mark: Double?) {
                 repo.closePosition(p, 1.0, limitPrice = px, postOnly = true)
             }
         }
-        PillBtn("Chase close", w, enabled = !busy) {
+        PillBtn(if (mini) "Chase" else "Chase close", w, enabled = !busy) {
             act("Chase close ${ticker(p.symbol, p.provider)}",
                 "Reduce-only limit that MFP keeps on the best ${if (p.isLong) "ask" else "bid"} until the whole position is closed.", false) {
                 repo.chaseClose(p, 1.0, 0.0, null)
             }
         }
-        PillBtn("Market close", w, color = Color.White, fill = C.down, enabled = !busy) {
+        PillBtn(if (mini) "Close" else "Market close", w, color = Color.White, fill = C.down, enabled = !busy) {
             act("Close ${ticker(p.symbol, p.provider)}", "Market close all ${fmtUsd(p.size * (mark ?: p.entryPrice))} of ${ticker(p.symbol, p.provider)}" +
                 (mark?.let { " · PnL ${fmtUsd(net(p.pnlAt(it)), true)}" } ?: ""), true, kind = com.alex.mfppro.data.Confirm.Full) { repo.closePosition(p) }
         }
@@ -611,5 +612,26 @@ fun QuickClose(repo: Repo, p: Position, mark: Double?) {
         ConfirmDialog("Confirm", job.title, if (job.danger) C.down else C.accent, note = job.detail, confirm = "Confirm", onDismiss = { pending = null }) {
             pending = null; scope.launch { busy = true; job.run(); busy = false }
         }
+    }
+}
+
+/** One position on a single line for the mini window: market and side, net PnL, and the three closes. */
+@Composable
+fun MiniPosition(repo: Repo, p: Position, mark: Double?, onClick: () -> Unit) {
+    val pnl = net(mark?.let(p::pnlAt))
+    val roe = pnl?.let { it / p.marginAt() * 100 }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(C.panel).clickable(onClick = onClick).padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+            Text(p.symbol, color = C.text, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text("${if (p.isLong) "Long" else "Short"} ${p.leverage.toInt()}x", color = if (p.isLong) C.up else C.down, fontSize = 9.sp, maxLines = 1)
+        }
+        androidx.compose.foundation.layout.Column(Modifier.padding(horizontal = 6.dp), horizontalAlignment = Alignment.End) {
+            Text(fmtUsd(pnl, true), style = num.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = pnlColor(pnl)), maxLines = 1)
+            Text(roe?.let { String.format(java.util.Locale.US, "%+.2f%%", it) } ?: "—", style = num.copy(fontSize = 9.sp, color = pnlColor(pnl)), maxLines = 1)
+        }
+        QuickClose(repo, p, mark, mini = true)
     }
 }

@@ -54,6 +54,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.ui.unit.sp
 import com.alex.mfppro.ui.C
 import com.alex.mfppro.ui.TradeResultBanner
+import com.alex.mfppro.ui.AlertLine
 import com.alex.mfppro.ui.BottomBar
 import com.alex.mfppro.ui.NavItem
 import com.alex.mfppro.ui.MfpTheme
@@ -63,8 +64,15 @@ import com.alex.mfppro.ui.SettingsScreen
 import com.alex.mfppro.ui.TradeScreen
 
 class MainActivity : ComponentActivity() {
+    // A widget tap while the app is already running.
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        com.alex.mfppro.ui.WidgetLink.handle(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) com.alex.mfppro.ui.WidgetLink.handle(intent)
         enableEdgeToEdge()
         val repo = (application as MfpApp).repo
         com.alex.mfppro.ui.Split.pct = repo.prefs.profitSplit
@@ -115,6 +123,14 @@ class MainActivity : ComponentActivity() {
                 val go = { t: Int -> if (t != tab) { history.remove(t); history.add(tab); tab = t } }
                 androidx.activity.compose.BackHandler(enabled = history.isNotEmpty()) { tab = history.removeAt(history.lastIndex) }
                 val openMarket = { id: String -> marketId = id; repo.prefs.lastMarketId = id; go(1) }
+                // Widget taps: a position opens its manage screen over the Dashboard, a market opens its chart.
+                val linkReq = com.alex.mfppro.ui.WidgetLink.request
+                LaunchedEffect(linkReq) { if (linkReq != null) { com.alex.mfppro.ui.OrderPanel.open = null; go(0) } }
+                val linkMarket = com.alex.mfppro.ui.WidgetLink.market
+                LaunchedEffect(linkMarket) { linkMarket?.let { com.alex.mfppro.ui.WidgetLink.market = null; com.alex.mfppro.ui.OrderPanel.open = null; openMarket(it) } }
+                // A small window (Samsung pop-up view, split screen): just the chart and the positions, no bar.
+                val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+                val mini = cfg.screenHeightDp < 560 || cfg.screenWidthDp < 300
                 val snack = remember { SnackbarHostState() }
                 LaunchedEffect(Unit) { repo.messages.collect { snack.showSnackbar(it, withDismissAction = true) } }
                 Box(Modifier.fillMaxSize()) {
@@ -122,7 +138,7 @@ class MainActivity : ComponentActivity() {
                     containerColor = C.bg,
                     snackbarHost = { SnackbarHost(snack) },
                     bottomBar = {
-                        androidx.compose.animation.AnimatedContent(focusOn, label = "focus",
+                        if (!mini) androidx.compose.animation.AnimatedContent(focusOn, label = "focus",
                             transitionSpec = {
                                 (androidx.compose.animation.slideInVertically { it } + androidx.compose.animation.fadeIn())
                                     .togetherWith(androidx.compose.animation.slideOutVertically { it } + androidx.compose.animation.fadeOut())
@@ -180,7 +196,8 @@ class MainActivity : ComponentActivity() {
                     Box(Modifier.padding(pad)) {
                         // Main screens sit side by side in a pager that only the bottom bar moves
                         // (no swiping on the screens themselves); Settings opens over them.
-                        androidx.compose.animation.AnimatedContent(tab == 3, label = "settings",
+                        if (mini) TradeScreen(repo, marketId, false, onPickMarket = { marketId = it; repo.prefs.lastMarketId = it }, mini = true)
+                        else androidx.compose.animation.AnimatedContent(tab == 3, label = "settings",
                             transitionSpec = { androidx.compose.animation.fadeIn().togetherWith(androidx.compose.animation.fadeOut()) }) { inSettings ->
                             if (inSettings) SettingsScreen(repo, onBack = { tab = if (history.isNotEmpty()) history.removeAt(history.lastIndex) else 0 })
                             else androidx.compose.foundation.pager.HorizontalPager(pager, userScrollEnabled = false, key = { pageTabs[it] }) { i ->
@@ -206,7 +223,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 com.alex.mfppro.ui.Overlay.content?.invoke()
+                com.alex.mfppro.ui.WidgetManage(repo, onOpenMarket = openMarket)
                 // Order results above everything, panels and dialogs' backdrop included.
+                AlertLine()
                 TradeResultBanner(repo)
                 }
             }
