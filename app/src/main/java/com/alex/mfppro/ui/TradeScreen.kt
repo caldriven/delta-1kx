@@ -146,7 +146,7 @@ private fun IntervalRow(interval: String, fontSize: androidx.compose.ui.unit.Tex
  * [compact] = position-management layout: chart at about a third of the screen
  * with quick trade and positions under it. Otherwise the chart gets most of it.
  */
-fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit, focus: Boolean = false, onOpenMarkets: (() -> Unit)? = null) {
+fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (String) -> Unit, focus: Boolean = false, onOpenMarkets: (() -> Unit)? = null, mini: Boolean = false) {
     val markets by repo.markets.collectAsStateWithLifecycle()
     val venues by repo.venues.collectAsStateWithLifecycle()
     // Alternate venues aren't in the main list; look there too.
@@ -214,7 +214,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 
     // Section under the chart; -1 = none open, so the chart fills the screen and nothing scrolls.
     var tab by rememberSaveable { mutableStateOf(-1) }
-    var view by rememberSaveable { mutableStateOf(0) }
+    var viewPick by rememberSaveable { mutableStateOf(0) }
+    // The mini window is always the candle chart.
+    val view = if (mini) 0 else viewPick
     var exitAsk by remember { mutableStateOf<ExitAsk?>(null) }
     var confirmAsk by remember { mutableStateOf<ChartAsk?>(null) }
     val tradeScope = rememberCoroutineScope()
@@ -367,24 +369,24 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 onRemove = { confirmAsk = ChartAsk("Remove stop loss", "${ticker(p.symbol, p.provider)} SL ${fmtPrice(it, market)}", C.down,
                     listOf(ConfirmRow("Position", "stays open without a stop")), "Remove") { repo.setTpSl(p, tp, null, "Remove SL ${p.symbol}") } }) },
             // Where this position takes the account onto each floor, with % away from the last price.
-            mark?.takeIf { shows("floors") }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
-            mark?.takeIf { shows("floors") }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") && !mini }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") && !mini }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             // Where this position alone would bring equity to the pass target.
-            mark?.takeIf { shows("target") }?.let { m -> r.toTarget?.takeIf { it > 0 && p.size > 0 }?.let { need ->
+            mark?.takeIf { shows("target") && !mini }?.let { m -> r.toTarget?.takeIf { it > 0 && p.size > 0 }?.let { need ->
                 val px = if (p.isLong) m + need / p.size else m - need / p.size
                 px.takeIf { it > 0 }?.let { PriceLine(it, PASS, "Pass target", parts = listOfNotNull("Pass target", away(it), "+" + fmtUsd(need), tag.ifBlank { null })) }
             } },
         )
-    } + (if (showOpens) listOfNotNull(
+    } + (if (showOpens && !mini) listOfNotNull(
         mOpen?.let { PriceLine(it, OPEN_M, "M open", ref = true) },
         wOpen?.let { PriceLine(it, OPEN_W, "W open", ref = true) },
         dOpen?.let { PriceLine(it, OPEN_D, "D open", ref = true) },
-    ) else emptyList()) + pivotLines
+    ) else emptyList()) + (if (mini) emptyList() else pivotLines)
 
     Column(Modifier.fillMaxSize().background(C.bg)) {
     // Chart view scrolls only while a section is open (or on the data view, which is a long list).
     // Trade view is one long page: chart, quick panel and positions scroll together.
-    val scrolls = compact || tab >= 0 || view == 1
+    val scrolls = !mini && (compact || tab >= 0 || view == 1)
     val pageScroll = rememberScrollState()
     // Switching Chart/Trade starts at the top, positions below the fold.
     LaunchedEffect(compact) { pageScroll.scrollTo(0) }
@@ -419,7 +421,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         }
         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
         LaunchedEffect(Unit) { while (true) { delay(1000); now = System.currentTimeMillis() } }
-        if (!compact && !focus) Row(
+        if (!compact && !focus && !mini) Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -432,28 +434,29 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         }
 
         // The account lives on the Trade view; Chart keeps just the asset and its stats on top.
-        androidx.compose.animation.AnimatedVisibility(!focus && compact) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = true) }
+        androidx.compose.animation.AnimatedVisibility(!focus && compact && !mini) { RiskPanel(repo, Modifier.padding(top = 2.dp), showExposure = true) }
 
         var barOpen by remember { mutableStateOf(repo.prefs.indBarOpen) }
         var crossKey by remember { mutableStateOf(0) }
         // Toolbar: view switch and intervals. The bottom bar's Trade button switches the layout.
-        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 2.dp, bottom = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (mini) IntervalRow(interval, 11.sp, Modifier.fillMaxWidth().padding(horizontal = 6.dp)) { interval = it; repo.prefs.lastInterval = it }
+        else Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 2.dp, bottom = 1.dp), verticalAlignment = Alignment.CenterVertically) {
             // Tapping Chart again folds the indicator row up or down.
             ViewChip("Chart", Icons.Filled.CandlestickChart, view == 0, trailing = if (view == 0) (if (barOpen) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown) else null) {
-                if (view == 0) { barOpen = !barOpen; repo.prefs.indBarOpen = barOpen } else view = 0
+                if (view == 0) { barOpen = !barOpen; repo.prefs.indBarOpen = barOpen } else viewPick = 0
             }
-            ViewChip("Depth", Icons.Filled.StackedLineChart, view == 2) { view = 2 }
-            ViewChip("Data", Icons.Filled.Insights, view == 1) { view = 1 }
+            ViewChip("Depth", Icons.Filled.StackedLineChart, view == 2) { viewPick = 2 }
+            ViewChip("Data", Icons.Filled.Insights, view == 1) { viewPick = 1 }
             // Order-flow bubbles: still an alpha, only when switched on under Settings > About.
-            if (repo.prefs.showFlowChart) ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { view = 3 }
-            else if (view == 3) view = 0
+            if (repo.prefs.showFlowChart) ViewChip("Flow α", Icons.Filled.BubbleChart, view == 3) { viewPick = 3 }
+            else if (view == 3) viewPick = 0
             // The intervals take all the width left after the view chips (a spacer used to claim half of it).
             if (view == 0) IntervalRow(interval, 12.sp, Modifier.weight(1f).padding(start = 4.dp)) { interval = it; repo.prefs.lastInterval = it }
             else Spacer(Modifier.weight(1f))
         }
         // Indicator toggles sit above the chart so the plot stays clean. The tools button folds the bar away;
         // which toggles appear is set in Settings.
-        androidx.compose.animation.AnimatedVisibility(view == 0 && barOpen,
+        androidx.compose.animation.AnimatedVisibility(view == 0 && barOpen && !mini,
             enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -497,7 +500,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
         val chartH = (screenH * if (compact) 0.47f else 0.54f).dp
         // Nothing open below: the chart stretches down to the section tabs.
-        val sized = if (!compact && !scrolls) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
+        val sized = if (mini || (!compact && !scrolls)) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(chartH)
         run {
             when (view) {
                 1 -> TradingData(repo, market, s?.openInterestUsd, mark, oiHere.orEmpty())
@@ -506,21 +509,30 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 else -> androidx.compose.runtime.key(market.marketId, interval) { CandleChart(
                     chartCandles.orEmpty().withLive(live), chartLines,
                     sized.padding(start = 2.dp, top = 2.dp),
-                    showVp = showVp,
-                    showPoc = showPoc,
+                    // The mini window keeps to candles and your own lines.
+                    showVp = showVp && !mini,
+                    showPoc = showPoc && !mini,
                     vpSince = if (interval in listOf("1m", "5m", "15m", "1h")) Opens.dayStart() else null,
-                    sessions = sessOpts,
+                    sessions = sessOpts.takeIf { !mini },
                     crossKey = crossKey,
                     fills = fillMarks,
-                    liq = liqOv,
+                    compactAxis = mini,
+                    liq = liqOv.takeIf { !mini },
                     npocs = npocs,
                 ) }
             }
-            if ((view == 2 || view == 3) && !compact) TopOfBook(book)
+            if ((view == 2 || view == 3) && !compact && !mini) TopOfBook(book)
         }
         // Position management: one-tap open, reduce and close, then every open
         // position on the trading account whatever market the chart shows.
-        if (compact) {
+        // Mini window: each open position on one line with its three closes.
+        if (mini) {
+            val open = tradeAcc?.positions?.values?.byFocus(market.marketId, marks).orEmpty()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                for (p in open.take(3)) androidx.compose.runtime.key(p.id) { MiniPosition(repo, p, marks[p.feedKey]) { onPickMarket(p.marketId) } }
+                if (open.size > 3) Text("+${open.size - 3} more", color = C.muted, fontSize = 10.sp, modifier = Modifier.padding(start = 8.dp))
+            }
+        } else if (compact) {
             QuickTrade(repo, market, draft)
             val open = tradeAcc?.positions?.values?.byFocus(market.marketId, marks).orEmpty()
             Column(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
@@ -541,10 +553,10 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         var ordersAll by remember { mutableStateOf(repo.prefs.ordersAllMarkets) }
         val shownOrders = allOrders.filter { (_, o) -> ordersAll || o.marketId == market.marketId || o.symbol.equals(market.symbol, true) }
             .sortedWith(compareByDescending<Pair<com.alex.mfppro.data.AccountState, com.alex.mfppro.data.Order>> { it.second.marketId == market.marketId }.thenBy { it.second.symbol })
-        if (!compact) Box(Modifier.onGloballyPositioned { tabsY = it.positionInParent().y.toInt() }) {
+        if (!compact && !mini) Box(Modifier.onGloballyPositioned { tabsY = it.positionInParent().y.toInt() }) {
             PillTabs(listOf("Positions" to allPositions.size, "Orders" to shownOrders.size, "Fills" to 0, "Book" to 0, "Trades" to 0), tab) { tab = if (tab == it) -1 else it }
         }
-        if (!compact && tab >= 0) when (tab) {
+        if (!compact && !mini && tab >= 0) when (tab) {
             0 -> Column {
                 Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 12.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (showAll) "All active accounts" else tradeAcc?.let(::accountName) ?: "", color = C.muted, fontSize = 11.sp, modifier = Modifier.weight(1f))

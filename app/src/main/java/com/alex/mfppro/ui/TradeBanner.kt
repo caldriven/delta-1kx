@@ -95,3 +95,44 @@ fun BoxScope.TradeResultBanner(repo: Repo) {
         }
     }
 }
+
+/**
+ * Alerts while the app is open (fills, PnL steps, drawdown): one slim line under the status bar that
+ * fades by itself, in place of a system notification. Risk alerts are red and stay a little longer.
+ */
+@Composable
+fun BoxScope.AlertLine() {
+    var ev by remember { mutableStateOf<com.alex.mfppro.data.AlertMonitor.InApp?>(null) }
+    var last by remember { mutableStateOf<com.alex.mfppro.data.AlertMonitor.InApp?>(null) }
+    val haptic = LocalHapticFeedback.current
+    LaunchedEffect(Unit) {
+        com.alex.mfppro.data.AlertMonitor.inApp.collect {
+            ev = it; last = it
+            if (it.alarm) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+    }
+    LaunchedEffect(ev) {
+        val e = ev ?: return@LaunchedEffect
+        delay(if (e.alarm) 8_000 else 4_000)
+        if (ev === e) ev = null
+    }
+    AnimatedVisibility(
+        ev != null, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(horizontal = 10.dp, vertical = 2.dp),
+        enter = fadeIn() + slideInVertically { -it }, exit = fadeOut() + slideOutVertically { -it },
+    ) {
+        val e = last ?: return@AnimatedVisibility
+        val col = if (e.alarm) C.down else C.accent
+        val shape = RoundedCornerShape(50)
+        Row(
+            Modifier.clip(shape).background(C.panel2.copy(alpha = 0.96f)).border(1.dp, col.copy(alpha = 0.6f), shape)
+                .clickable { ev = null }.padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(col))
+            Spacer(Modifier.width(8.dp))
+            Text(e.title, color = C.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            if (e.text.isNotBlank()) Text("  " + e.text, color = C.muted, fontSize = 11.sp, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        }
+    }
+}

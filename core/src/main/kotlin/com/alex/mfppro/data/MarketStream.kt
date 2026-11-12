@@ -428,9 +428,10 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 realtime && System.currentTimeMillis() - (bookMidAt[key] ?: 0) < 3_000) {
                 // The book is fresher; ignore mark ticks while it keeps flowing.
             } else if (e.str("kind") == "mark") {
-                marksBuf[key] = e.dbl("price") ?: return; dirty += "marks"
+                // A zero is "no price yet" (closed or idle market), never a price to mark a position at.
+                marksBuf[key] = e.dbl("price")?.takeIf { it > 0 } ?: return; dirty += "marks"
             } else if (key !in marksBuf && e.str("kind") == "mid") {
-                marksBuf[key] = e.dbl("price") ?: return; dirty += "marks"
+                marksBuf[key] = e.dbl("price")?.takeIf { it > 0 } ?: return; dirty += "marks"
             }
             "book" -> {
                 val b = Book(levels(e, "bids"), levels(e, "asks"), e.long("time") ?: 0)
@@ -438,7 +439,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 dirty += "books"
                 val bid = b.bids.firstOrNull()?.px
                 val ask = b.asks.firstOrNull()?.px
-                if (realtime && bid != null && ask != null) {
+                if (realtime && bid != null && ask != null && bid > 0 && ask > 0) {
                     marksBuf[key] = (bid + ask) / 2; dirty += "marks"
                     bookMidAt[key] = System.currentTimeMillis()
                 }

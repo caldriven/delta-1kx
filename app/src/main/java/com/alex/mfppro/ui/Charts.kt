@@ -431,8 +431,15 @@ fun CandleChart(
             val refStyle = axisStyle.copy(fontSize = 9.sp)
             val padX = 5.dp.toPx()
             val pillH = 16.dp.toPx()
-            var topEdge = 2.dp.toPx()
-            var bottomEdge = chartH - pillH - 2.dp.toPx()
+            // Edge tags start clear of the session strips and their names along the top and bottom.
+            var topEdge = if (sessions?.markets == true) 18.dp.toPx() else 2.dp.toPx()
+            var bottomEdge = chartH - pillH - (if (sessions?.killzones == true) 18.dp.toPx() else 2.dp.toPx())
+            // A tag wider than the plot (small window, account name on it) loses its last values first.
+            fun fit(parts: List<String>, budget: Float, keepLast: Boolean): List<String> {
+                var ps = parts
+                while (ps.size > (if (keepLast) 2 else 1) && tagWidth(tm, ps, pillStyle) > budget) ps = if (keepLast) ps.dropLast(2) + ps.last() else ps.dropLast(1)
+                return ps
+            }
             // Labels that would collide on the left are pushed right instead of overlapping.
             val placed = ArrayList<Rect>()
             fun slot(w: Float, top: Float): Float {
@@ -457,7 +464,7 @@ fun CandleChart(
             }
             hits.clear()
             // Position boxes are drawn last so nothing paints over them.
-            val boxes = ArrayList<Triple<PosBox, Color, Float>>()
+            val boxes = ArrayList<BoxAt>()
             // Lines first; their labels are queued and drawn after the price line and sPOC so they sit on top.
             val queued = ArrayList<() -> Unit>()
             // Above the plot stack from the top edge down, below it from the bottom edge up: order each side
@@ -465,7 +472,8 @@ fun CandleChart(
             val ordered = lines.filterNot { it.ref }.let { ls -> ls.filter { it.price >= lo }.sortedByDescending { it.price } + ls.filter { it.price < lo }.sortedBy { it.price } }
             // On-screen lines first, so the edge tags for off-screen levels can step around their tags.
             val tagYs = mutableListOf<Float>()
-            for (l in ordered.sortedBy { if (it.price in lo..hi) 0 else 1 }) {
+            // Off-screen, the position box takes the edge before any other level: PnL comes before Max DD.
+            for (l in ordered.sortedBy { if (it.price in lo..hi) 0 else if (it.box != null) 1 else 2 }) {
                 val parts = l.parts.ifEmpty { listOf(l.label) }
                 if (l.price in lo..hi) {
                     val yy = y(l.price)
@@ -473,9 +481,10 @@ fun CandleChart(
                     drawLine(l.color, Offset(0f, yy), Offset(chartW, yy), if (l.solid) 1.6f else 1.3f, pathEffect = if (l.solid) null else dash)
                     axisTags += AxisTag(yy, l.color, fmtPrice(l.price), Color.White)
                     val bx = l.box
-                    if (bx != null) boxes += Triple(bx, l.color, yy)
+                    if (bx != null) boxes += BoxAt(bx, l.color, yy, "PnL")
                     else {
-                        val shown = (if (l.drag != null) parts + "⇕" else parts) + listOfNotNull(if (l.onRemove != null) "✕" else null)
+                        val ctl = listOfNotNull(if (l.drag != null) "⇕" else null, if (l.onRemove != null) "✕" else null)
+                        val shown = fit(parts, chartW - 12.dp.toPx() - tagWidth(tm, ctl, pillStyle), false) + ctl
                         val w = tagWidth(tm, shown, pillStyle)
                         val px0 = slot(w, yy - pillH / 2)
                         queued += { tagBox(tm, shown, l.color, Offset(px0, yy - pillH / 2), pillStyle, pillH) }
@@ -484,17 +493,23 @@ fun CandleChart(
                         l.onRemove?.let { hits += Hit(Rect(px0 + w - xw, yy - pillH / 2, px0 + w, yy + pillH / 2), tap = it) }
                         l.drag?.let { hits += Hit(Rect(px0, yy - pillH / 2, px0 + w - xw, yy + pillH / 2), drag = it) }
                     }
-                } else if (l.box == null) {
-                    // Off-screen level: stack a tag on the edge it lies beyond, with its price.
+                } else {
+                    // Off-screen level: stack a tag on the edge it lies beyond, with its price. An entry out of
+                    // view keeps its whole position box there, so the PnL and its buttons never leave the chart.
                     val above = l.price > hi
-                    val shown = listOf((if (above) "▲ " else "▼ ") + parts.first()) + parts.drop(1) + fmtPrice(l.price)
-                    val stepY = pillH + 3.dp.toPx()
-                    var at = if (above) topEdge else bottomEdge
-                    while (tagYs.any { kotlin.math.abs(it - (at + pillH / 2)) < stepY } && at in 0f..chartH) at += if (above) stepY else -stepY
+                    val bx = l.box
+                    val h = if (bx != null) 20.dp.toPx() else pillH
+                    val stepY = h + 3.dp.toPx()
+                    var at = if (above) topEdge else bottomEdge - (h - pillH)
+                    while (tagYs.any { kotlin.math.abs(it - (at + h / 2)) < stepY } && at in 0f..chartH) at += if (above) stepY else -stepY
                     val atY = at
-                    queued += { tagBox(tm, shown, l.color, Offset(6.dp.toPx(), atY), pillStyle, pillH) }
-                    tagYs += at + pillH / 2
-                    if (above) topEdge = at + stepY else bottomEdge = at - stepY
+                    if (bx != null) boxes += BoxAt(bx, l.color, atY + h / 2, if (above) "▲ PnL" else "▼ PnL")
+                    else {
+                        val shown = fit(listOf((if (above) "▲ " else "▼ ") + parts.first()) + parts.drop(1) + fmtPrice(l.price), chartW - 12.dp.toPx(), true)
+                        queued += { tagBox(tm, shown, l.color, Offset(6.dp.toPx(), atY), pillStyle, pillH) }
+                    }
+                    tagYs += at + h / 2
+                    if (above) topEdge = at + stepY else bottomEdge = at - pillH - 3.dp.toPx()
                 }
             }
 
@@ -652,8 +667,10 @@ fun CandleChart(
             }
             // Right-edge text labels, spread apart top to bottom.
             var nextTop = -1f
+            val sideRects = ArrayList<Rect>()
             for ((yy, t) in sideLabels.sortedBy { it.first }) {
                 val top = maxOf(yy - t.size.height - 1.dp.toPx(), nextTop)
+                sideRects += Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + t.size.height)
                 drawText(t, topLeft = Offset(chartW - t.size.width - 4.dp.toPx(), top))
                 sideTaps[t]?.let { tap -> hits += Hit(Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + t.size.height).inflate(4.dp.toPx()), tap = tap) }
                 nextTop = top + t.size.height
@@ -662,8 +679,15 @@ fun CandleChart(
             // Above the killzone strip and its labels along the bottom.
             var noteBottom = chartH - (if (sessions?.killzones == true) 18.dp.toPx() else 4.dp.toPx())
             for ((above, t) in edgeNotes) {
-                val ty = if (above) noteTop else noteBottom - t.size.height
+                var ty = if (above) noteTop else noteBottom - t.size.height
                 val tx = chartW - t.size.width - 6.dp.toPx()
+                // Step inward past the level labels already on the right edge instead of printing over them.
+                var tries = 0
+                while (tries++ < 12) {
+                    val hitR = sideRects.firstOrNull { ty < it.bottom + 2f && ty + t.size.height > it.top - 2f && tx < it.right } ?: break
+                    ty = if (above) hitR.bottom + 3.dp.toPx() else hitR.top - t.size.height - 3.dp.toPx()
+                }
+                if (above) noteTop = ty else noteBottom = ty + t.size.height
                 drawRoundRect(C.bg.copy(alpha = 0.85f), Offset(tx - 3.dp.toPx(), ty - 1f), Size(t.size.width + 6.dp.toPx(), t.size.height + 2f), androidx.compose.ui.geometry.CornerRadius(4f, 4f))
                 drawText(t, topLeft = Offset(tx, ty))
                 sideTaps[t]?.let { tap -> hits += Hit(Rect(tx - 3.dp.toPx(), ty - 2f, chartW, ty + t.size.height + 2f).inflate(3.dp.toPx()), tap = tap) }
@@ -677,7 +701,7 @@ fun CandleChart(
                 drawText(t, topLeft = Offset(cx, 5.dp.toPx()))
             }
             queued.forEach { it() }
-            for ((bx, col, by) in boxes) posBox(tm, bx, col, chartW, by, pillStyle, hits)
+            for (b in boxes) posBox(tm, b.box, b.col, b.label, b.y, pillStyle, hits)
 
             // Crosshair with the candle under it: O/H/L/C, change, range and mid.
             cross?.let { c ->
@@ -831,13 +855,15 @@ private fun DrawScope.drawAxisTag(tm: TextMeasurer, t: AxisTag, top: Float, char
 }
 
 /** Segmented position box right-aligned on the entry line; registers its buttons as hits. */
-private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, chartW: Float, yy: Float, style: TextStyle, hits: MutableList<Hit>) {
+private class BoxAt(val box: PosBox, val col: Color, val y: Float, val label: String)
+
+private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, label: String, yy: Float, style: TextStyle, hits: MutableList<Hit>) {
     val h = 20.dp.toPx()
     val padX = 6.dp.toPx()
     val top = yy - h / 2
     val bold = style.copy(fontWeight = FontWeight.Bold)
     val segs = listOf(
-        Triple("PnL", bold.copy(color = Color.White), 0),
+        Triple(label, bold.copy(color = Color.White), 0),
         Triple(b.pnl, bold.copy(color = col), 1),
         Triple("TP", bold.copy(color = C.up), 2),
         Triple("SL", bold.copy(color = C.down), 3),

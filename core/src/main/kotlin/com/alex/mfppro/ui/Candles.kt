@@ -15,7 +15,11 @@ fun List<Candle>.withLive(p: Double?, now: Long = System.currentTimeMillis()): L
     val l = last()
     // A price far from the last bar means the bars are stale (or from another feed), not that the
     // market gapped in one candle: drawing it would make one huge wick. Leave the bars to the reload.
-    if (l.c > 0 && kotlin.math.abs(p / l.c - 1) > 0.006) return this
+    // "Far" is measured against how much the recent bars move: a mark price that sits apart from the
+    // traded candles (stock indices at night) is only 0.2% off, yet many bars tall.
+    val recent = takeLast(20)
+    val reach = (4 * recent.sumOf { it.h - it.l } / recent.size / l.c).coerceIn(0.0005, 0.006)
+    if (l.c > 0 && kotlin.math.abs(p / l.c - 1) > reach) return this
     fun fold() = dropLast(1) + l.copy(c = p, h = maxOf(l.h, p), l = minOf(l.l, p))
     if (size < 2) return fold()
     val step = l.openTime - this[size - 2].openTime

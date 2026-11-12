@@ -46,7 +46,8 @@ fun liveSnap(repo: Repo): LiveSnap {
     val accounts = all.filter { it.account.status == "active" && !(prefs.hideComp && isComp(it)) }
     val positions = accounts.flatMap { s ->
         s.positions.values.map { p ->
-            val m = marks[p.feedKey]
+            // No price yet reads as zero on some feeds: show a dash rather than 0.0000000 and a made-up PnL.
+            val m = marks[p.feedKey]?.takeIf { it > 0 }
             val pnl = m?.let { net(p.pnlAt(it)) }
             LivePos(p, accountName(s), m, pnl, pnl?.let { v -> p.marginAt().takeIf { it > 0 }?.let { v / it * 100 } })
         }
@@ -82,7 +83,7 @@ fun liveText(s: LiveSnap): LiveText {
         else -> LiveText(
             title = "Open PnL ${fmtUsd(s.pnl, true)} · ${s.positions.size} position${if (s.positions.size > 1) "s" else ""}",
             text = s.positions.joinToString(" · ") { "${it.p.symbol} ${fmtUsd(it.pnl, true)}" },
-            lines = s.positions.take(6).map { "${it.name} ${it.side.lowercase()}  ${fmtUsd(it.pnl, true)} (${fmtRoe(it.roe)})  @ ${fmtPrice(it.mark)}" },
+            lines = s.positions.take(6).map { "${it.name} ${it.side.lowercase()}  ${fmtUsd(it.pnl, true)} (${fmtRoe(it.roe)})" + (it.mark?.let { m -> "  @ ${fmtPrice(m)}" } ?: "") },
             summary = account,
             pnl = s.pnl,
         )

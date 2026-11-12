@@ -154,6 +154,8 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun trade(id: Int, title: String, text: String, alarm: Boolean = false) {
+        // With the app on screen a system notification only gets in the way: a quiet line in the app instead.
+        if (repo.visible.value) { inApp.tryEmit(InApp(title, text, alarm)); return }
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -204,6 +206,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     }
 
     private fun notify(id: Int, title: String, text: String) {
+        if (repo.visible.value) { inApp.tryEmit(InApp(title, text, true)); return }
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -221,7 +224,12 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
 
     private fun fmt(v: Double?) = com.alex.mfppro.ui.fmtUsd(v)
 
+    /** An alert shown inside the app instead of as a system notification. */
+    class InApp(val title: String, val text: String, val alarm: Boolean)
+
     companion object {
+        val inApp = kotlinx.coroutines.flow.MutableSharedFlow<InApp>(extraBufferCapacity = 8)
+
         /**
          * The ongoing monitor notification, carrying live numbers: open PnL in the title, one line per
          * position when expanded, equity and drawdown room underneath. Silent on every update.
