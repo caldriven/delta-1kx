@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
         val repo = (application as MfpApp).repo
         com.alex.mfppro.ui.Split.pct = repo.prefs.profitSplit
         com.alex.mfppro.ui.Comp.hide = repo.prefs.hideComp
+        com.alex.mfppro.ui.TradeScope.all = repo.prefs.tradeShowAll
         // Retry the background monitor here too: starting it from Application.onCreate can be refused.
         if (repo.prefs.monitorBackground) com.alex.mfppro.data.MonitorService.setEnabled(this, true)
         com.alex.mfppro.ui.Palette.colorBlind = repo.prefs.colorBlind

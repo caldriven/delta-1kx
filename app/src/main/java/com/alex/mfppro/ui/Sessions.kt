@@ -83,7 +83,8 @@ internal fun DrawScope.sessions(slice: List<Candle>, xOf: (Int) -> Float, barW: 
             if (prev == null || prev[k] < 0) {
                 val t = tm.measure(WINDOWS[k].short, sessLabel.copy(color = col.copy(alpha = 0.85f)))
                 val room = WINDOWS[k].lengthMin * 60_000f / step * barW
-                if (room > t.size.width + 6.dp.toPx())
+                // Not when the name would run off the right edge of the plot.
+                if (room > t.size.width + 6.dp.toPx() && x + t.size.width + 2.dp.toPx() < xOf(times.size - 1) + barW / 2)
                     drawText(t, topLeft = Offset(x + 2.dp.toPx(), if (isKz) top - t.size.height - 1.dp.toPx() else stripH + 1.dp.toPx()))
             }
         }

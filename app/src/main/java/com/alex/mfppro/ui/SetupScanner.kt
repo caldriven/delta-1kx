@@ -62,7 +62,7 @@ private class Setup(
     val tags = mutableListOf<Pair<String, Color>>()
 }
 
-private enum class SetupFilter(val label: String) { SETUPS("Setups"), BETA("High beta"), COILED("Coiled"), AVOID("Avoid"), ALL("All") }
+private enum class SetupFilter(val label: String) { LONG("Long setups"), SHORT("Short setups"), BETA("High beta"), COILED("Coiled"), AVOID("Avoid"), ALL("All") }
 
 private fun rets(c: List<Candle>): Map<Long, Double> {
     val out = HashMap<Long, Double>()
@@ -112,7 +112,7 @@ internal fun SetupScanner(
     classes: Map<String, String>, onOpenMarket: (String) -> Unit,
 ) {
     val chg1h by repo.chg1h.collectAsStateWithLifecycle()
-    var filter by remember { mutableStateOf(SetupFilter.SETUPS) }
+    var filter by remember { mutableStateOf(SetupFilter.LONG) }
     var setups by remember { mutableStateOf<List<Setup>?>(null) }
     // Freeze the universe once volume ranks are in, so live re-ranking doesn't restart the scan.
     val crypto = markets.filter { AssetClasses.classOf(it, classes) == "Crypto" }
@@ -139,7 +139,7 @@ internal fun SetupScanner(
 
     Card {
         Text(
-            "Long the leaders, not the laggards: high beta to BTC and stronger than BTC. Coiled = calm price while volume and OI build, often before a move.",
+            "Long the leaders: high beta to BTC and stronger than BTC. Short the laggards: high beta but falling behind BTC, or run hot with longs paying funding. Coiled = calm price while volume and OI build, often before a move.",
             color = C.muted, fontSize = 11.sp, lineHeight = 15.sp,
         )
         Row(Modifier.padding(vertical = 8.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -159,10 +159,16 @@ internal fun SetupScanner(
             if (s.rs24 < -2) s.tags += "Weak vs BTC" to C.accent
             if (s.volRatio > 2) s.tags += "Overheated" to C.down
             if (s.volRatio < 0.5 && s.volumeRatio < 0.8) s.tags += "Dead" to C.muted
+            // The short side: a coin that moves more than BTC yet trails it, or one that has run hot
+            // while longs pay to hold it (funding positive), which tends to unwind.
+            val funding = stats[s.m.feedKey]?.fundingRate ?: 0.0
+            if (s.beta >= 1.0 && s.rs24 < -2) s.tags += "Laggard" to C.down
+            if (s.volRatio > 1.5 && s.chg24 > 0 && funding > 0 && (oi ?: 0.0) > 0) s.tags += "Crowded long" to C.down
         }
         fun has(s: Setup, t: String) = s.tags.any { it.first == t }
         val shown = when (filter) {
-            SetupFilter.SETUPS -> list.filter { has(it, "Coiled") || has(it, "Leader") }.sortedByDescending { it.rs24 }
+            SetupFilter.LONG -> list.filter { has(it, "Leader") || (has(it, "Coiled") && it.rs24 >= 0) }.sortedByDescending { it.rs24 }
+            SetupFilter.SHORT -> list.filter { has(it, "Laggard") || has(it, "Crowded long") }.sortedBy { it.rs24 }
             SetupFilter.BETA -> list.filter { it.beta >= 1.2 }.sortedByDescending { it.rs24 }
             SetupFilter.COILED -> list.filter { it.volRatio < 0.8 }.sortedBy { it.volRatio }
             SetupFilter.AVOID -> list.filter { has(it, "Overheated") || has(it, "Dead") || has(it, "Weak vs BTC") }.sortedBy { it.rs24 }
