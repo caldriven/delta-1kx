@@ -117,6 +117,27 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
         get() = plain.getBoolean("monitor_background", false)
         set(v) = plain.edit().putBoolean("monitor_background", v).apply()
 
+    /** While the background monitor runs: one ongoing notification per open position, under the live summary. */
+    var positionNotifs: Boolean
+        get() = plain.getBoolean("position_notifs", true)
+        set(v) = plain.edit().putBoolean("position_notifs", v).apply()
+    /** How many positions get their own notification, largest first (1 = only the largest; Android caps updates, so at most 8). */
+    var positionNotifCount: Int
+        get() = plain.getInt("position_notif_count", 8)
+        set(v) = plain.edit().putInt("position_notif_count", v).apply()
+    /**
+     * Distance to breach in each position notification: "position" = this position alone moving,
+     * "account" = every open position on the account moving together (net exposure), "usd" = dollars only.
+     */
+    var breachBasis: String
+        get() = plain.getString("breach_basis", "position")!!
+        set(v) = plain.edit().putString("breach_basis", v).apply()
+    /** What a position notification shows besides PnL: any of price, breach, entry, value, exits. */
+    var positionNotifFields: Set<String>
+        get() = plain.getString("position_notif_fields", null)?.split(',')?.filter { it.isNotBlank() }?.toSet()
+            ?: setOf("price", "breach", "entry", "value", "exits")
+        set(v) = plain.edit().putString("position_notif_fields", v.joinToString(",")).apply()
+
     var colorBlind: Boolean
         get() = plain.getBoolean("color_blind", false)
         set(v) = plain.edit().putBoolean("color_blind", v).apply()

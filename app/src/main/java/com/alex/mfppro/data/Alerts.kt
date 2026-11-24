@@ -25,6 +25,10 @@ import java.util.Locale
 private const val CH_ALERTS = "risk_alerts"
 private const val CH_MONITOR = "monitor"
 private const val CH_TRADES = "trade_events"
+private const val CH_POSITIONS = "positions"
+/** Live summary (the monitor's foreground notification) and one ongoing notification per position under it. */
+private const val GROUP_POSITIONS = "com.alex.mfppro.POSITIONS"
+private const val MONITOR_ID = 42
 
 /**
  * Drawdown alerts: notifies once when an account's room to the nearest floor
@@ -41,6 +45,11 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         })
         nm.createNotificationChannel(NotificationChannel(CH_MONITOR, "Background monitor", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_TRADES, "Fills and PnL", NotificationManager.IMPORTANCE_HIGH))
+        // Silent, like a VPN status: there to glance at, never to buzz.
+        nm.createNotificationChannel(NotificationChannel(CH_POSITIONS, "Open positions", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "One live notification per open position while the background monitor runs"
+            setShowBadge(false)
+        })
         repo.scope.launch {
             while (isActive) {
                 // Every 2 s on screen; every 5 s in the background, where it only feeds notifications.
@@ -56,6 +65,21 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
                 runCatching { onFill(f) }
             }
         }
+        // Price alerts set on MFP fire through the account stream (once per fire).
+        repo.scope.launch {
+            repo.account.priceAlerts.collect { a -> runCatching { onPriceAlert(a) } }
+        }
+    }
+
+    private fun onPriceAlert(a: kotlinx.serialization.json.JsonObject) {
+        val d = repo.prefs.notifyDefaults
+        if (d.muted || !d.priceAlerts) return
+        fun s(k: String) = (a[k] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        val sym = s("symbol")?.let { com.alex.mfppro.ui.ticker(it, s("provider") ?: "") } ?: s("coin") ?: "Price"
+        val px = (s("trigger_price") ?: s("price"))?.toDoubleOrNull()
+        val cond = when (s("condition")) { "above", "crosses_above", "gte" -> "rose to"; "below", "crosses_below", "lte" -> "fell to"; else -> "hit" }
+        val note = s("note")?.takeIf { it.isNotBlank() }
+        trade((s("alert_id") ?: s("id") ?: sym).hashCode() + 7, "Price alert: $sym $cond ${px?.let(::px) ?: ""}".trim(), note ?: "MFP price alert", alarm = true)
     }
 
     private val status = HashMap<String, String>()
@@ -230,11 +254,39 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
     companion object {
         val inApp = kotlinx.coroutines.flow.MutableSharedFlow<InApp>(extraBufferCapacity = 8)
 
+        /** Whether Android will show this app's notifications at all (permission and the app's switch). */
+        fun enabled(ctx: Context) = NotificationManagerCompat.from(ctx).areNotificationsEnabled()
+
+        /**
+         * A sample system notification, shown even with the app open, so the user hears the sound and
+         * sees how alerts look. [alarm] uses the risk channel (loud, vibrates). False when Android blocks it.
+         */
+        fun test(ctx: Context, alarm: Boolean): Boolean {
+            if (!enabled(ctx)) return false
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) return false
+            val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+            return runCatching {
+                NotificationManagerCompat.from(ctx).notify(
+                    if (alarm) 9_002 else 9_001,
+                    NotificationCompat.Builder(ctx, if (alarm) CH_ALERTS else CH_TRADES)
+                        .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
+                        .setSubText(if (alarm) "Risk alert · test" else "Trade · test")
+                        .setColor(if (alarm) 0xFFEF4444.toInt() else 0xFFF59E0B.toInt())
+                        .setContentTitle(if (alarm) "Test: drawdown running low" else "Test: Filled Long BTC $1,000")
+                        .setContentText("This is how ${if (alarm) "risk alerts" else "fills"} look and sound")
+                        .setPriority(NotificationCompat.PRIORITY_HIGH)
+                        .setContentIntent(open).setAutoCancel(true).build(),
+                )
+            }.isSuccess
+        }
+
         /**
          * The ongoing monitor notification, carrying live numbers: open PnL in the title, one line per
          * position when expanded, equity and drawdown room underneath. Silent on every update.
          */
-        fun monitorNotification(ctx: Context, t: com.alex.mfppro.widget.LiveText) = NotificationCompat.Builder(ctx, CH_MONITOR)
+        fun monitorNotification(ctx: Context, t: com.alex.mfppro.widget.LiveText, grouped: Boolean = false) = NotificationCompat.Builder(ctx, CH_MONITOR)
             .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
             .setContentTitle(t.title)
             .setContentText(t.text)
@@ -242,7 +294,10 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             .apply {
                 // Green or red with the PnL (the user's theme colours aside: the shade has its own look).
                 t.pnl?.let { setColor(if (it >= 0) 0xFF20B26C.toInt() else 0xFFEF454A.toInt()) }
-                if (t.lines.isNotEmpty()) setStyle(NotificationCompat.InboxStyle().also { st ->
+                // With a notification per position the summary heads the group; the per-line list would repeat them.
+                if (grouped) setGroup(GROUP_POSITIONS).setGroupSummary(true).setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+                    .apply { if (t.summary.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText(t.text + "\n" + t.summary)) }
+                else if (t.lines.isNotEmpty()) setStyle(NotificationCompat.InboxStyle().also { st ->
                     t.lines.forEach(st::addLine)
                     if (t.summary.isNotEmpty()) st.setSummaryText(t.summary)
                 })
@@ -251,6 +306,46 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
             .build()
+
+        /** Notification id for a position: stable for its life, apart from the monitor's and alerts' ids. */
+        fun positionId(posId: String) = 0x4000_0000 or (posId.hashCode() and 0x0FFF_FFFF)
+
+        /**
+         * One position's ongoing notification: PnL and return in the title, price, entry and size below,
+         * the account as subtext. Tapping opens the position; Close only opens the close confirmation in
+         * the app, it never sends an order itself. Silent on every update.
+         */
+        fun positionNotification(
+            ctx: Context, lp: com.alex.mfppro.widget.LivePos, tp: Double?, sl: Double?, breach: String?, rank: Int,
+            fields: Set<String> = setOf("price", "breach", "entry", "value", "exits"),
+        ): android.app.Notification {
+            // ▲ / ▼ carry the side where the shade shows no colour.
+            val title = "${lp.name} ${if (lp.p.isLong) "▲" else "▼"} ${lp.side.lowercase()}  ${com.alex.mfppro.ui.fmtUsd(lp.pnl, true)} (${com.alex.mfppro.widget.fmtRoe(lp.roe)})"
+            val text = listOfNotNull(
+                lp.mark?.takeIf { "price" in fields }?.let { "@ ${com.alex.mfppro.ui.fmtPrice(it)}" },
+                breach?.takeIf { "breach" in fields },
+                "entry ${com.alex.mfppro.ui.fmtPrice(lp.p.entryPrice)}".takeIf { "entry" in fields },
+                com.alex.mfppro.ui.fmtUsd(lp.value).takeIf { "value" in fields },
+            ).joinToString(" · ")
+            val exits = if ("exits" in fields) listOfNotNull(tp?.let { "TP ${com.alex.mfppro.ui.fmtPrice(it)}" }, sl?.let { "SL ${com.alex.mfppro.ui.fmtPrice(it)}" } ?: "no stop").joinToString(" · ") else ""
+            val big = listOf(text, exits).filter { it.isNotEmpty() }.joinToString("\n")
+            return NotificationCompat.Builder(ctx, CH_POSITIONS)
+                .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
+                .setContentTitle(title)
+                .apply { if (text.isNotEmpty()) setContentText(text) else if (exits.isNotEmpty()) setContentText(exits) }
+                .apply { if (big.isNotEmpty()) setStyle(NotificationCompat.BigTextStyle().bigText(big)) }
+                .setSubText(lp.account)
+                .apply { lp.pnl?.let { setColor(if (it >= 0) 0xFF20B26C.toInt() else 0xFFEF454A.toInt()) } }
+                .setGroup(GROUP_POSITIONS)
+                // Largest position first, as on the widget.
+                .setSortKey(String.format(Locale.US, "%04d", rank))
+                .setOngoing(true).setOnlyAlertOnce(true).setSilent(true).setShowWhen(false)
+                .setTimeoutAfter(60_000)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setContentIntent(com.alex.mfppro.widget.Widgets.link(ctx, "position", lp.p.id))
+                .addAction(0, "Close…", com.alex.mfppro.widget.Widgets.link(ctx, "position", lp.p.id, close = true))
+                .build()
+        }
     }
 }
 
@@ -264,28 +359,101 @@ class MonitorService : Service() {
         val repo = (application as MfpApp).repo
         var shown = com.alex.mfppro.widget.liveText(com.alex.mfppro.widget.liveSnap(repo))
         ServiceCompat.startForeground(
-            this, 42, AlertMonitor.monitorNotification(this, shown),
+            this, MONITOR_ID, AlertMonitor.monitorNotification(this, shown),
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0,
         )
         repo.setBackgroundMonitoring(true)
-        // Live numbers in the notification: re-posted (silently) only when its words changed.
+        // Live numbers in the notifications: each re-posted (silently) only when its words changed.
         if (liveJob == null) liveJob = repo.scope.launch {
+            var grouped = false
             while (isActive) {
                 delay(3_000)
-                val now = runCatching { com.alex.mfppro.widget.liveText(com.alex.mfppro.widget.liveSnap(repo)) }.getOrNull() ?: continue
-                if (now == shown) continue
                 if (Build.VERSION.SDK_INT >= 33 &&
                     ContextCompat.checkSelfPermission(this@MonitorService, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 ) continue
-                shown = now
-                runCatching { NotificationManagerCompat.from(this@MonitorService).notify(42, AlertMonitor.monitorNotification(this@MonitorService, now)) }
+                val snap = runCatching { com.alex.mfppro.widget.liveSnap(repo) }.getOrNull() ?: continue
+                val now = com.alex.mfppro.widget.liveText(snap)
+                val per = repo.prefs.positionNotifs && snap.positions.isNotEmpty()
+                val nm = NotificationManagerCompat.from(this@MonitorService)
+                if (now != shown || per != grouped) {
+                    shown = now; grouped = per
+                    runCatching { nm.notify(MONITOR_ID, AlertMonitor.monitorNotification(this@MonitorService, now, grouped = per)) }
+                }
+                runCatching { syncPositions(repo, nm, if (per) snap.positions else emptyList()) }
             }
         }
         return START_STICKY
     }
 
+    /** Position notification id -> what it last showed, so unchanged ones aren't re-posted. */
+    private val posShown = HashMap<Int, String>()
+
+    /**
+     * One ongoing notification per open position (Android caps updates per app, so at most 8, the
+     * largest), and closed positions' notifications removed. Each also times out after a minute
+     * without a refresh, so a killed process can't leave stale PnL in the shade; a quiet position is
+     * refreshed every 30 s to keep it.
+     */
+    // Only called after the POST_NOTIFICATIONS check in the live loop.
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun syncPositions(repo: Repo, nm: NotificationManagerCompat, list: List<com.alex.mfppro.widget.LivePos>) {
+        val keep = HashSet<Int>()
+        val bucket = System.currentTimeMillis() / 30_000
+        val fields = repo.prefs.positionNotifFields
+        val basis = repo.prefs.breachBasis
+        list.take(repo.prefs.positionNotifCount.coerceIn(1, 8)).forEachIndexed { i, lp ->
+            val id = AlertMonitor.positionId(lp.p.id)
+            keep += id
+            val exits = repo.exitsOf(lp.p)
+            val tp = exits.firstOrNull { it.exitGroup == "tp" }?.exitPrice
+            val sl = exits.firstOrNull { it.exitGroup == "sl" }?.exitPrice
+            val breach = breachText(repo, lp, basis)
+            val sig = listOf(i, com.alex.mfppro.ui.fmtUsd(lp.pnl, true), com.alex.mfppro.widget.fmtRoe(lp.roe),
+                lp.mark?.let { com.alex.mfppro.ui.fmtPrice(it) }, breach, lp.p.size, lp.p.entryPrice, tp, sl, lp.account, fields, bucket).joinToString("|")
+            if (posShown[id] == sig) return@forEachIndexed
+            posShown[id] = sig
+            nm.notify(id, AlertMonitor.positionNotification(this, lp, tp, sl, breach, i, fields))
+        }
+        (posShown.keys - keep).forEach { nm.cancel(it); posShown.remove(it) }
+    }
+
+    /**
+     * Distance to the account's nearest floor, as the asset's price move in % and the dollars left:
+     * "LL −2.31% ($450)". LL when DLL and MLL are one, else whichever binds. [basis]:
+     * - "position": this position alone moves against you;
+     * - "account": every open position on the account moves the same % together, so the net
+     *   long/short exposure decides it ("acct" in the text);
+     * - "usd": dollars left only.
+     * Null without a price or floors.
+     */
+    private fun breachText(repo: Repo, lp: com.alex.mfppro.widget.LivePos, basis: String): String? {
+        val m = lp.mark ?: return null
+        val s = repo.account.accounts.value[lp.p.accountId] ?: return null
+        val marks = repo.market.marks.value
+        val r = riskOf(s, marks)
+        val room = r.room ?: return null
+        val label = r.bindingLabel
+        if (room <= 0) return "$label breached"
+        val usd = com.alex.mfppro.ui.fmtUsd(room)
+        return when (basis) {
+            "usd" -> "$label $usd left"
+            "account" -> {
+                // Net signed exposure: longs lose on a drop, shorts on a rise; they offset each other.
+                val net = s.positions.values.sumOf { p -> (if (p.isLong) 1 else -1) * p.size * (marks[p.feedKey]?.takeIf { it > 0 } ?: p.entryPrice) }
+                if (kotlin.math.abs(net) < 1e-9) "$label $usd (hedged)"
+                else String.format(Locale.US, "%s %+.2f%% acct (%s)", label, (if (net > 0) -1 else 1) * room / kotlin.math.abs(net) * 100, usd)
+            }
+            else -> {
+                val px = breachPrice(lp.p, m, room) ?: return "$label $usd"
+                String.format(Locale.US, "%s %+.2f%% (%s)", label, (px / m - 1) * 100, usd)
+            }
+        }
+    }
+
     override fun onDestroy() {
         liveJob?.cancel(); liveJob = null
+        val nm = NotificationManagerCompat.from(this)
+        posShown.keys.forEach { nm.cancel(it) }; posShown.clear()
         (application as MfpApp).repo.setBackgroundMonitoring(false)
         super.onDestroy()
     }

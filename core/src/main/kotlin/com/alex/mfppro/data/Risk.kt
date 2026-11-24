@@ -25,6 +25,13 @@ data class RiskView(
     val room get() = listOfNotNull(dailyRoom, ddRoom).minOrNull()
     val nearestFloor get() = listOfNotNull(dailyFloor, ddFloor).maxOrNull()
     val bindingIsDaily get() = dailyFloor != null && (ddFloor == null || dailyFloor >= ddFloor)
+    /**
+     * DLL and MLL sit at the same level (usual before the first payout): one loss limit, shown once as
+     * "LL" instead of two labels on top of each other. Within $1 or 0.05 % of equity counts as the same.
+     */
+    val floorsSame get() = dailyFloor != null && ddFloor != null && kotlin.math.abs(dailyFloor - ddFloor) <= maxOf(1.0, equity * 0.0005)
+    /** Short name of the floor a loss hits first: LL when both are one, else DLL (daily) or MLL (max loss). */
+    val bindingLabel get() = when { floorsSame -> "LL"; bindingIsDaily -> "DLL"; ddFloor != null -> "MLL"; else -> "LL" }
     val startOfDayEquity get() = if (dailyFloor != null && dailyAllowance != null) dailyFloor + dailyAllowance else null
     val todayPnl get() = startOfDayEquity?.let { equity - it }
     val toTarget get() = target?.let { (it - equity).coerceAtLeast(0.0) }

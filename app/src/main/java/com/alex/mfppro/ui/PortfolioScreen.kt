@@ -428,8 +428,12 @@ private fun AccountHero(repo: Repo, acc: AccountState, marks: Map<String, Double
             Text("Equity", color = C.muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
             Text(fmtUsd(r.equity), style = num.copy(fontSize = 19.sp, fontWeight = FontWeight.Bold, color = C.text))
         }
-        if ((r.ddAllowance ?: 0.0) > 0) RuleLine("Max DD left", r.ddRoom, r.ddAllowance, floor = r.ddFloor)
-        if ((r.dailyAllowance ?: 0.0) > 0) RuleLine("Daily loss left", r.dailyRoom, r.dailyAllowance, floor = r.dailyFloor)
+        // DLL and MLL at one level: one loss-limit line instead of the same number twice.
+        if (r.floorsSame) RuleLine("Loss limit left (LL)", r.room, if (r.bindingIsDaily) r.dailyAllowance else r.ddAllowance, floor = r.nearestFloor)
+        else {
+            if ((r.ddAllowance ?: 0.0) > 0) RuleLine("Max DD left", r.ddRoom, r.ddAllowance, floor = r.ddFloor)
+            if ((r.dailyAllowance ?: 0.0) > 0) RuleLine("Daily loss left", r.dailyRoom, r.dailyAllowance, floor = r.dailyFloor)
+        }
         val goal = r.target?.let { it - start }?.takeIf { it > 0 }
         if (goal != null) RuleLine("To target", r.toTarget, goal, target = true)
     }

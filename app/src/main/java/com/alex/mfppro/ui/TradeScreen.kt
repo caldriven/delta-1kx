@@ -407,8 +407,11 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     },
                 )),
             // Where this position takes the account onto each floor, with % away from the last price.
-            mark?.takeIf { shows("floors") && !mini }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
-            mark?.takeIf { shows("floors") && !mini }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            // DLL and MLL at one level (before the first payout) are one line, "LL": two would sit on top of
+            // each other and fight for the label slot when the chart is zoomed or stretched.
+            mark?.takeIf { shows("floors") && !mini && r.floorsSame }?.let { m -> r.room?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "LL", parts = listOfNotNull("LL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") && !mini && !r.floorsSame }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
+            mark?.takeIf { shows("floors") && !mini && !r.floorsSame }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "MLL", parts = listOfNotNull("MLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             // Where this position alone would bring equity to the pass target.
             mark?.takeIf { shows("target") && !mini }?.let { m -> r.toTarget?.takeIf { it > 0 && p.size > 0 }?.let { need ->
                 val px = if (p.isLong) m + need / p.size else m - need / p.size
@@ -525,7 +528,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                     modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { layersOpen = true }.padding(3.dp).size(20.dp))
                 androidx.compose.material3.DropdownMenu(layersOpen, onDismissRequest = { layersOpen = false }, containerColor = C.panel) {
                     Text("On the chart", color = C.muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
-                    for ((key, label) in listOf("pnl" to "PnL box", "exits" to "TP / SL lines", "floors" to "DLL / Max DD floors",
+                    for ((key, label) in listOf("pnl" to "PnL box", "exits" to "TP / SL lines", "floors" to "DLL / MLL floors (LL when one)",
                         "target" to "Pass target", "orders" to "Open orders", "fills" to "Fill markers ▲▼")) {
                         androidx.compose.material3.DropdownMenuItem(
                             text = { AppCheck(label, key !in hidden) { on -> hidden = if (on) hidden - key else hidden + key; repo.prefs.chartHidden = hidden } },

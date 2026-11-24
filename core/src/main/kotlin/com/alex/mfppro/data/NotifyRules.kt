@@ -13,6 +13,8 @@ data class NotifyRules(
     // Trades.
     val fills: Boolean = true,
     val stops: Boolean = true,
+    /** Price alerts set on MFP (they belong to the user, so only the default set's value counts). */
+    val priceAlerts: Boolean = true,
     // Risk.
     val breach: Boolean = true,
     val room: Boolean = true,
@@ -41,6 +43,26 @@ data class NotifyRules(
     /** Applies a PnL preset's step values. */
     fun withPreset(p: PnlPreset) = copy(pnlUsd = p.usd, pnlPct = p.pct, pnlEq = p.eq, pnlRisk = p.risk, pnlPreset = p.name)
 }
+
+/** One-tap starting points for the default rules; anything can be tuned afterwards. */
+data class NotifyProfile(val name: String, val about: String, val apply: (NotifyRules) -> NotifyRules)
+
+val NOTIFY_PROFILES = listOf(
+    NotifyProfile("Essentials", "Stops, breaches, low drawdown, margin calls") {
+        it.copy(muted = false, fills = false, stops = true, priceAlerts = true, breach = true, room = true, margin = true, pnl = false)
+    },
+    NotifyProfile("Standard", "Essentials plus every fill and calm PnL steps") {
+        it.copy(muted = false, fills = true, stops = true, priceAlerts = true, breach = true, room = true, margin = true, pnl = true)
+            .withPreset(PNL_PRESETS.first { p -> p.name == "Calm" })
+    },
+    NotifyProfile("Everything", "All of it, with frequent PnL steps") {
+        it.copy(muted = false, fills = true, stops = true, priceAlerts = true, breach = true, room = true, margin = true, pnl = true)
+            .withPreset(PNL_PRESETS.first { p -> p.name == "Active" })
+    },
+)
+
+/** The profile [r] matches exactly, if any. */
+fun NotifyRules.profile(): String? = NOTIFY_PROFILES.firstOrNull { it.apply(this) == this }?.name
 
 /** Ready-made PnL step sets, from few alerts to many. */
 data class PnlPreset(val name: String, val about: String, val usd: Int, val pct: Float, val eq: Float, val risk: Float)

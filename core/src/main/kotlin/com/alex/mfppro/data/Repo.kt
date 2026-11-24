@@ -84,6 +84,10 @@ class Repo(val prefs: Prefs) {
 
     init {
         Opens.configure(prefs.dayOpenZone, prefs.dayOpenHour)
+        // The market feed needs the API key too (Bearer on the upgrade); say so once when MFP refuses it.
+        market.setKey(_apiKey.value)
+        scope.launch { market.blocked.collect { it?.let(::postMessage) } }
+        scope.launch { account.notices.collect(::postMessage) }
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
@@ -173,22 +177,9 @@ class Repo(val prefs: Prefs) {
         return report(label, trade.placeScaled(key, body))
     }
 
-    /**
-     * Place an order. With [fallbackLeverage], a rejection about leverage (the venue
-     * won't change it on an open position) is retried once at that leverage.
-     */
-    suspend fun placeOrder(label: String, body: JsonObject, fallbackLeverage: Double? = null): TradeResult {
+    suspend fun placeOrder(label: String, body: JsonObject): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
-        var r = trade.placeOrder(key, body)
-        if (r is TradeResult.Rejected && fallbackLeverage != null &&
-            (r.code.contains("leverage", true) || r.message.contains("leverage", true))) {
-            Log.w(TAG, "leverage rejected (${r.code}), retrying at ${fallbackLeverage}x")
-            r = trade.placeOrder(key, JsonObject(body + mapOf(
-                "leverage" to JsonPrimitive(fallbackLeverage.toInt()),
-                "client_order_id" to JsonPrimitive("mfppro-" + java.util.UUID.randomUUID().toString().take(13)),
-            )))
-        }
-        return report(label, r)
+        return report(label, trade.placeOrder(key, body))
     }
 
     /**
@@ -482,6 +473,7 @@ class Repo(val prefs: Prefs) {
         prefs.apiKey = key
         _apiKey.value = key
         if (key == null) account.stop() else account.start(key)
+        market.setKey(key)
         startRiskRefresh()
     }
 
