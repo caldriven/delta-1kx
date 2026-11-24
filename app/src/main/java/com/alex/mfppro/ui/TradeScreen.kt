@@ -327,10 +327,11 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             val px = o.limitPrice ?: o.triggerPrice ?: return@mapNotNull null
             val buy = o.side == "buy"
             val kind = (if (o.type.startsWith("stop")) "Stop " else "Limit ") + (if (buy) "buy" else "sell") + (if (o.reduceOnly) " · reduce" else "")
-            // A reduce-only limit against an open position is a limit take-profit: drag it to move it.
+            // A reduce-only limit against an open position is a limit take-profit: drag it to move it. It may
+            // only go on the far side of the price (above it for a long): on the near side it would fill at once.
             val pos = myPositions.firstOrNull { p -> p.accountId == o.accountId && o.reduceOnly && o.triggerPrice == null && (o.side == "sell") == p.isLong }
             PriceLine(px, if (buy) C.up else C.down, kind, parts = listOf(kind, fmtUsd(o.size * px), pctAway(px)),
-                drag = pos?.let { p -> LineDrag({ x -> exitPreview(p, x, "TP") }) { x -> askExit(p, p.pnlAt(x) >= 0, x, null, null, o) } },
+                drag = pos?.let { p -> LineDrag({ x -> exitPreview(p, x, "TP") }) { x -> askExit(p, true, x, null, null, o) } },
                 onRemove = { chartAct(ChartAsk("Cancel order", "$kind ${fmtPrice(px, market)}", C.down,
                     listOf(ConfirmRow("Value", fmtUsd(o.size * px))), "Cancel order") { repo.cancelOrder(o) }) })
         } + listOfNotNull(draft.price?.takeIf { compact && draft.on }?.let { px ->
@@ -345,9 +346,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     val pivotLines = if (showPivots) Opens.pivots(days, weeklyPivots, hours)?.let { pv ->
         val tag = if (weeklyPivots) "W" else "D"
         listOf(
-            PriceLine(pv.r3, PIVOT_R, " R3", ref = true), PriceLine(pv.r2, PIVOT_R, " R2", ref = true), PriceLine(pv.r1, PIVOT_R, " R1", ref = true),
-            PriceLine(pv.p, PIVOT_P, " P", ref = true),
-            PriceLine(pv.s1, PIVOT_S, " S1", ref = true), PriceLine(pv.s2, PIVOT_S, " S2", ref = true), PriceLine(pv.s3, PIVOT_S, " S3", ref = true),
+            PriceLine(pv.r3, PIVOT_R, "$tag R3", ref = true), PriceLine(pv.r2, PIVOT_R, "$tag R2", ref = true), PriceLine(pv.r1, PIVOT_R, "$tag R1", ref = true),
+            PriceLine(pv.p, PIVOT_P, "$tag P", ref = true),
+            PriceLine(pv.s1, PIVOT_S, "$tag S1", ref = true), PriceLine(pv.s2, PIVOT_S, "$tag S2", ref = true), PriceLine(pv.s3, PIVOT_S, "$tag S3", ref = true),
         )
     }.orEmpty() else emptyList()
     val chartLines = orderLines + (if (showPos) myPositions else emptyList()).flatMap { p ->
@@ -394,16 +395,18 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             else PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "", solid = true,
                 box = PosBox(
                     fmtUsd(pnl, true),
+                    // With several accounts on the chart, the box names its account (and so do its confirms).
+                    label = tag.ifBlank { null },
                     tp = LineDrag({ exitPreview(p, it, "TP") }) { px -> askExit(p, true, px, tp, sl) },
                     sl = LineDrag({ exitPreview(p, it, "SL") }) { px -> askExit(p, false, px, tp, sl) },
                     onReverse = {
                         if (repo.prefs.locked()) repo.postMessage(repo.prefs.lockMessage())
                         else chartAct(ChartAsk("Reverse", "Flip to ${if (p.isLong) "short" else "long"}", C.accent,
-                            listOf(ConfirmRow("Market", ticker(p.symbol, p.provider)), ConfirmRow("Order value", fmtUsd(p.size * 2 * (mark ?: p.entryPrice)))), "Reverse") { repo.reverse(p) })
+                            listOfNotNull(ConfirmRow("Market", ticker(p.symbol, p.provider)), ConfirmRow("Account", accountName(acc)).takeIf { multi }, ConfirmRow("Order value", fmtUsd(p.size * 2 * (mark ?: p.entryPrice)))), "Reverse") { repo.reverse(p) })
                     },
                     onClose = {
                         chartAct(ChartAsk("Market close", "Close " + ticker(p.symbol, p.provider), C.down,
-                            listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(net(mark?.let(p::pnlAt)), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
+                            listOfNotNull(ConfirmRow("Account", accountName(acc)).takeIf { multi }, ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(net(mark?.let(p::pnlAt)), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
                     },
                 )),
             // Where this position takes the account onto each floor, with % away from the last price.
@@ -1005,7 +1008,8 @@ private fun LandscapeChart(
             Spacer(Modifier.width(8.dp))
             Icon(Icons.Filled.FullscreenExit, "Exit", tint = C.text, modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClose).padding(6.dp).size(22.dp))
         }
-        CandleChart(candles, lines, Modifier.fillMaxSize(), showVp = showVp, showPoc = showPoc, vpSince = vpSince, sessions = sessions, liq = liq, npocs = npocs)
+        // Keyed like the portrait chart: a new interval starts from a fresh zoom, pan and price range.
+        androidx.compose.runtime.key(symbol, interval) { CandleChart(candles, lines, Modifier.fillMaxSize(), showVp = showVp, showPoc = showPoc, vpSince = vpSince, sessions = sessions, liq = liq, npocs = npocs) }
     }
 }
 

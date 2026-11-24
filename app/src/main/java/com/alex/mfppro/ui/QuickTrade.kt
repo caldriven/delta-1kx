@@ -114,7 +114,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
 
     // Button read-outs refresh every 15 s so they're readable rather than flickering.
     val risk = riskOf(acc, marks)
-    val live = Snap(book?.bids?.firstOrNull()?.px ?: mark, book?.asks?.firstOrNull()?.px ?: mark, risk.dailyRoom, risk.ddRoom, available)
+    val live = Snap(book?.bids?.firstOrNull()?.px ?: mark, book?.asks?.firstOrNull()?.px ?: mark, risk.dailyRoom, risk.ddRoom, available, risk.floorsSame)
     val latest by rememberUpdatedState(live)
     // Re-read at once when the account or its positions change, not only every 15 s.
     val snapKey = Triple(market.marketId, acc.account.id, acc.positions.size)
@@ -233,7 +233,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 val net = heldSigned * (1 - f)
                 QuickBtn(
                     if (f >= 1.0) "All" else "${(f * 100).toInt()}%", "$" + fmtCompact(size * (px ?: held.entryPrice)),
-                    sn?.dailyRoom?.let { floorPrice(px, net, it) }, sn?.ddRoom?.let { floorPrice(px, net, it) }, px,
+                    sn?.dailyRoom?.let { floorPrice(px, net, it) }, sn?.ddRoom?.let { floorPrice(px, net, it) }, sn?.floorsSame == true, px,
                     if (buy) C.up else C.down, enabled = !busy && sideOk(buy), modifier = Modifier.weight(1f),
                     empty = if (f >= 1.0) "flat after" else "no floor in reach",
                 ) { send(buy, 1.0, f) }
@@ -259,7 +259,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 QuickBtn(
                     if (capped) "max" else (if (mult % 1.0 == 0.0) mult.toInt().toString() else String.format(Locale.US, "%.1f", mult)) + "x",
                     (if (reduceOnly && held != null) "≤$" else "$") + fmtCompact(usd),
-                    dll, dd, px,
+                    dll, dd, sn?.floorsSame == true, px,
                     if (buy) C.up else C.down, enabled = !busy && !locked && sideOk(buy), modifier = Modifier.weight(1f),
                 ) { send(buy, mult) }
               }
@@ -283,7 +283,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     }
 }
 
-private data class Snap(val bid: Double?, val ask: Double?, val dailyRoom: Double?, val ddRoom: Double?, val available: Double)
+private data class Snap(val bid: Double?, val ask: Double?, val dailyRoom: Double?, val ddRoom: Double?, val available: Double, val floorsSame: Boolean = false)
 
 /**
  * Price at which an account with [room] left hits the floor, holding [net]
@@ -312,7 +312,7 @@ private fun safeFloor(v: Double, ref: Double?): Double {
 
 /** Size button: position value first, then the leverage multiple and where the floor would be hit. */
 @Composable
-private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, empty: String = "no floor in reach", onClick: () -> Unit) {
+private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, same: Boolean, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, empty: String = "no floor in reach", onClick: () -> Unit) {
     // Fixed height with the floor line always reserved, so every button in the row lines up.
     // Value first and largest; the multiple sits beside it small, the floor price under it.
     Column(
@@ -329,8 +329,7 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
         }
         // Whichever floor price is nearer is the one that breaches first.
         // Both at one price (DLL and MLL the same before a payout): it's the one loss limit, LL.
-        val same = dll != null && dd != null && kotlin.math.abs(dll - dd) <= kotlin.math.abs(dll) * 1e-4
-        val near = if (same) "LL" to dll!!
+        val near = if (same && dll != null) "LL" to dll
             else listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "MLL" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
         // The floor is already rounded to a coarse step: show it without trailing zeros (3.235, not 3.23500).
         Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)).let { t -> if ('.' in t) t.trimEnd('0').trimEnd('.') else t } } ?: empty, style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)

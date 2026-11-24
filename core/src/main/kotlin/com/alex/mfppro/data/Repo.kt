@@ -370,17 +370,20 @@ class Repo(val prefs: Prefs) {
 
     /** Move one TP/SL order to [price], leaving every other exit (and its size) as it is. */
     suspend fun moveExit(p: Position, o: Order, price: Double): TradeResult {
+        // A resting limit TP is a plain reduce-only limit, not an exit order: exit-order edits can't move it.
+        if (o.isRestingExit) return moveLimit(p, o, price)
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val label = "${if (o.exitGroup == "tp") "TP" else "SL"} ${p.symbol}"
         val px = market(p.marketId)?.let { com.alex.mfppro.ui.snapTick(price, it) } ?: price
         fun op(id: String, size: Double) = buildJsonObject { put("kind", "modify"); put("order_id", id); put("price", px); put("size", size) }
-        val current = exitsOf(p)
+        // Only real exit orders go in the batch's snapshot; resting limit TPs would make MFP refuse it.
+        val current = exitsOf(p).filter { !it.isRestingExit }
         var r = trade.replaceExits(key, p, current, listOf(op(o.id, o.size)))
         if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
             r = trade.replaceExits(key, p, current, listOf(op(o.id, o.size)), armPrice = true)
         if (r is TradeResult.Rejected && r.code == "stale_snapshot") {
             // Reload from MFP; the order may have been replaced under a new id at the same price.
-            val fresh = freshExits(key, p)
+            val fresh = freshExits(key, p)?.filter { !it.isRestingExit }
             val again = fresh?.firstOrNull { it.id == o.id } ?: fresh?.firstOrNull { it.exitGroup == o.exitGroup && it.exitPrice == o.exitPrice }
             if (fresh != null && again != null) r = trade.replaceExits(key, p.fresh(), fresh, listOf(op(again.id, again.size)))
         }
@@ -394,20 +397,31 @@ class Repo(val prefs: Prefs) {
                 (it.marketId == p.marketId || it.symbol == p.symbol) && (it.side == "sell") == p.isLong
         }
 
-    /** Move a reduce-only limit: cancel it, then place the same size at [price]. */
+    /**
+     * Move a reduce-only limit to [price]. Modified in place first, so the position is never without
+     * it; only if MFP won't modify it is it cancelled and placed again. Never marketable: a price
+     * through the book is refused rather than filled at market.
+     */
     suspend fun moveLimit(p: Position, o: Order, price: Double): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
+        val label = "Limit ${p.symbol} → ${"%.6g".format(java.util.Locale.US, price)}"
+        val px = market(p.marketId)?.let { com.alex.mfppro.ui.snapTick(price, it) } ?: price
+        val m = trade.modifyOrder(key, o.id, px)
+        if (m !is TradeResult.Rejected) return report(label, m)
+        if (m.code == "network") return report(label, m)
         val c = trade.cancelOrder(key, o.id)
-        if (c is TradeResult.Rejected && c.code != "not_found" && c.code != "order_not_found") return report("Move limit ${p.symbol}", c)
-        val size = minOf(o.size, p.size)
-        return placeOrder("Limit ${p.symbol} → ${"%.6g".format(java.util.Locale.US, price)}", buildJsonObject {
+        val gone = c is TradeResult.Rejected && (c.code == "not_found" || c.code == "order_not_found")
+        if (c is TradeResult.Rejected && !gone) return report(label, c)
+        // Gone already: it may just have filled. Size from the position as it is now, or stop if it's closed.
+        val now = if (gone) account.accounts.value[p.accountId]?.positions?.get(p.id) ?: return report(label, c) else p
+        val size = minOf(o.size, now.size)
+        return placeOrder(label, buildJsonObject {
             put("client_order_id", "mfppro-" + java.util.UUID.randomUUID().toString().take(13))
             put("account_id", p.accountId); put("market_id", p.marketId)
             put("side", o.side); put("size", roundSize(size, market(p.marketId)))
-            put("leverage", o.leverage ?: p.leverage); put("margin_mode", p.marginMode)
+            put("leverage", o.leverage ?: now.leverage); put("margin_mode", now.marginMode)
             put("reduce_only", true)
-            put("type", "limit"); put("limit_price", price)
-            put("marketable_limit_acknowledged", true)
+            put("type", "limit"); put("limit_price", px)
         })
     }
 
@@ -532,9 +546,10 @@ class Repo(val prefs: Prefs) {
         backgroundAt = 0
         // After a minute or more away the resume cursor and REST data are likely stale: start clean.
         if (away > STALE_AFTER_MS) { refreshAll(); return }
-        // After more than a few seconds away (or a frozen process) the sockets are dead or backed up
-        // with stale frames: open fresh ones rather than trusting a probe.
-        val fresh = away > 5_000
+        // Away past the grace period the sockets were closed (or the frozen process left them backed up):
+        // open fresh ones. A shorter switch keeps them and just probes, so app switching doesn't burn
+        // MFP's connection admissions.
+        val fresh = away > BACKGROUND_GRACE_MS
         account.resume(fresh = fresh)
         market.resume(fresh = fresh)
         startRiskRefresh()

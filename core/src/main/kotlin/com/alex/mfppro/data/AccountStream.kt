@@ -270,8 +270,10 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             }
             "price_alert" -> {
                 val a = f.obj("alert") ?: return
-                val fire = f.str("fire_id") ?: (f.str("alert_id") + "|" + a.str("triggered_at"))
-                if (seenAlerts.put(fire, Unit) == null) _priceAlerts.tryEmit(a)
+                val id = f.str("alert_id") ?: a.str("alert_id") ?: a.str("id")
+                val fire = f.str("fire_id") ?: id?.let { "$it|${a.str("triggered_at") ?: f.str("time")}" }
+                // Nothing to dedupe on: pass it on rather than risk dropping every later one.
+                if (fire == null || seenAlerts.put(fire, Unit) == null) _priceAlerts.tryEmit(a)
             }
             "order" -> mutate(f) { s ->
                 val o = f.obj("order")?.let { decode<Order>(it) } ?: return@mutate s

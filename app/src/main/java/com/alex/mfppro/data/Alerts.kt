@@ -79,7 +79,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         val px = (s("trigger_price") ?: s("price"))?.toDoubleOrNull()
         val cond = when (s("condition")) { "above", "crosses_above", "gte" -> "rose to"; "below", "crosses_below", "lte" -> "fell to"; else -> "hit" }
         val note = s("note")?.takeIf { it.isNotBlank() }
-        trade((s("alert_id") ?: s("id") ?: sym).hashCode() + 7, "Price alert: $sym $cond ${px?.let(::px) ?: ""}".trim(), note ?: "MFP price alert", alarm = true)
+        trade((s("alert_id") ?: s("id") ?: sym).hashCode() + 7, "Price alert: $sym $cond ${px?.let(::px) ?: ""}".trim(), note ?: "MFP price alert", sub = "Price alert")
     }
 
     private val status = HashMap<String, String>()
@@ -177,7 +177,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
         return null
     }
 
-    private fun trade(id: Int, title: String, text: String, alarm: Boolean = false) {
+    private fun trade(id: Int, title: String, text: String, alarm: Boolean = false, sub: String? = null) {
         // With the app on screen a system notification only gets in the way: a quiet line in the app instead.
         if (repo.visible.value) { inApp.tryEmit(InApp(title, text, alarm)); return }
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -189,7 +189,7 @@ class AlertMonitor(private val ctx: Context, private val repo: Repo) {
             NotificationCompat.Builder(ctx, if (alarm) CH_ALERTS else CH_TRADES)
                 .setSmallIcon(com.alex.mfppro.R.drawable.ic_stat_delta1)
                 // A label and colour per kind, so a risk alarm never reads like a routine fill.
-                .setSubText(if (alarm) "Risk alert" else "Trade").setColor(if (alarm) 0xFFEF4444.toInt() else 0xFFF59E0B.toInt())
+                .setSubText(sub ?: if (alarm) "Risk alert" else "Trade").setColor(if (alarm) 0xFFEF4444.toInt() else 0xFFF59E0B.toInt())
                 .setContentTitle(title).setContentText(text)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(if (alarm) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_EVENT)

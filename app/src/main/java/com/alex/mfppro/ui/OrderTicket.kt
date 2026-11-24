@@ -128,6 +128,13 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginModeFor(accountId)) == "isolated") }
     // The panel's leverage is the setting: remembered per market, and what quick orders use too.
     var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
+    // Saved as soon as it changes, not only on send: the quick buttons read the same setting.
+    androidx.compose.runtime.LaunchedEffect(lev, isolated) {
+        if (held == null) {
+            repo.prefs.setLeverage(market.marketId, lev)
+            accountId?.let { repo.prefs.setMarginModeFor(it, if (isolated) "isolated" else "cross") }
+        }
+    }
     var reduceOnly by remember { mutableStateOf(false) }
     var postOnly by remember { mutableStateOf(repo.prefs.postOnly) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }

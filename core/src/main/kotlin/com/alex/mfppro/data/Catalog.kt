@@ -163,7 +163,8 @@ object Opens {
     /** Pivots from the last completed day (in the chosen session time, from [hours] when set), or week. Null without data. */
     fun pivots(days: List<Candle>, weekly: Boolean, hours: List<Candle>? = null): Pivots? {
         val end = if (weekly) weekStart() else dayStart()
-        val start = if (weekly) end - 7 * 86_400_000L else end - 86_400_000L
+        // The previous session by the calendar: 23 or 25 hours on a summer-time change in a custom zone.
+        val start = if (weekly) startOf(tradeDate().with(java.time.DayOfWeek.MONDAY).minusWeeks(1)) else startOf(tradeDate().minusDays(1))
         if (custom && !weekly && hours != null) {
             val bars = hours.filter { it.openTime in start until end }
             if (bars.isNotEmpty()) {
