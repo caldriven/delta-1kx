@@ -145,18 +145,23 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         _accounts.value = emptyMap()
     }
 
-    /** Close the socket but keep the resume cursor (app went to background). */
-    fun pause() = scope.launch(serial) {
+    /**
+     * Close the socket but keep the resume cursor (app went to background).
+     * [still] is checked on the stream's own thread, so a pause that races a
+     * later resume (process thawed with both pending) does nothing.
+     */
+    fun pause(still: () -> Boolean = { true }) = scope.launch(serial) {
+        if (!still()) return@launch
         reconnectJob?.cancel()
         gen++
         ws?.close(1000, "background"); ws = null
         if (key != null) _conn.value = Conn.Reconnecting
     }
 
-    /** Called when the app returns to the foreground. */
-    fun resume() = scope.launch(serial) {
+    /** Called when the app returns to the foreground; [fresh] forces a new socket (been away a while). */
+    fun resume(fresh: Boolean = false) = scope.launch(serial) {
         if (key == null || _conn.value == Conn.AuthFailed) return@launch
-        if (ws == null || System.currentTimeMillis() - lastFrameAt > SILENCE_MS) {
+        if (fresh || ws == null || System.currentTimeMillis() - lastFrameAt > SILENCE_MS) {
             attempt = 0
             reconnectNow()
         } else probe()
@@ -231,10 +236,11 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             "error" -> Log.w(TAG, "error frame: $text")
             "order" -> mutate(f) { s ->
                 val o = f.obj("order")?.let { decode<Order>(it) } ?: return@mutate s
-                when (f.str("event")) {
-                    "filled", "canceled", "rejected", "expired" -> s.copy(orders = s.orders - o.id)
-                    else -> s.copy(orders = s.orders + (o.id to o))
-                }
+                // A modify can come back as a new order that replaces the old one: drop the old id too.
+                val replaced = listOfNotNull(f.str("replaced_order_id"), f.obj("order")?.str("replaced_order_id"), f.obj("order")?.str("replaces_order_id"))
+                val kept = s.orders - replaced.toSet()
+                if (f.str("event") in TERMINAL || o.status in TERMINAL) s.copy(orders = kept - o.id)
+                else s.copy(orders = kept + (o.id to o))
             }
             "position" -> mutate(f) { s ->
                 val p = f.obj("position")?.let { decode<Position>(it) } ?: return@mutate s
@@ -346,6 +352,8 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             .onFailure { Log.w(TAG, "decode ${T::class.simpleName}: ${it.message}") }
             .getOrNull()
 }
+
+private val TERMINAL = setOf("filled", "canceled", "cancelled", "rejected", "expired", "replaced", "closed", "done")
 
 internal fun JsonObject.str(k: String) = (this[k] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
 internal fun JsonObject.long(k: String) = (this[k] as? kotlinx.serialization.json.JsonPrimitive)?.longOrNull

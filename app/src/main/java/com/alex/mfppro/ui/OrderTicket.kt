@@ -125,8 +125,9 @@ fun OrderTicket(repo: Repo, market: Market, request: TicketRequest, onDismiss: (
     // The account's own cap: Elite accounts get more on some indices and commodities.
     val maxLev = maxLeverage(market, acc?.account, accountId?.let { policies[it] })
     // Follow the account: its position in this market sets leverage and margin mode.
-    var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
     var isolated by remember(accountId) { mutableStateOf((held?.marginMode ?: repo.prefs.marginModeFor(accountId)) == "isolated") }
+    // New cross positions start at the max: same risk for the size, least margin tied up. Isolated remembers its own.
+    var lev by remember(accountId, maxLev) { mutableStateOf(held?.leverage?.toInt() ?: if (!isolated) maxLev else repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)) }
     var reduceOnly by remember { mutableStateOf(false) }
     var postOnly by remember { mutableStateOf(repo.prefs.postOnly) }
     var closeAsk by remember { mutableStateOf<Double?>(null) }

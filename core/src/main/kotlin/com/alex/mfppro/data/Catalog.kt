@@ -92,10 +92,9 @@ object Logos {
 /** Slower-moving overview numbers loaded on demand: 7-day price change and 24h OI change. */
 data class MarketExtra(val week: Double? = null, val oi24h: Double? = null, val dayOpen: Double? = null)
 
-/** UTC session boundaries and the daily candle opens at each of them. */
 /**
  * MFP's clock, from the market stream's ping replies, so day boundaries don't depend on the
- * phone's clock (time zones never matter: every boundary here is UTC).
+ * phone's clock. The day-open time zone, if any, is applied in [Opens].
  */
 object ServerClock {
     @Volatile var offset = 0L
@@ -105,29 +104,74 @@ object ServerClock {
 }
 
 /**
- * Daily, weekly and monthly opens at 00:00 UTC. Every MFP venue's daily candle opens at 00:00 UTC
- * (checked for Binance, Bybit, Hyperliquid, Veranta and Ostium), so the day open is today's daily candle.
+ * Session boundaries for the daily / weekly / monthly opens. By default 00:00 UTC (what the
+ * venues' daily candles use). [configure] moves the open to an hour in a time zone, e.g. 00:00
+ * Europe/Oslo (UTC+1 in winter, UTC+2 in summer) or 17:00 New York, with summer time handled
+ * by the zone. Every MFP venue's daily candle opens at 00:00 UTC (checked for Binance, Bybit,
+ * Hyperliquid, Veranta and Ostium), so off UTC midnight the opens come from 1h candles.
+ * Times follow [ServerClock], not the phone's clock.
  */
 object Opens {
-    private val UTC = java.time.ZoneOffset.UTC
-    private fun today() = java.time.Instant.ofEpochMilli(ServerClock.now()).atZone(UTC).toLocalDate()
-    fun dayStart() = today().atStartOfDay(UTC).toInstant().toEpochMilli()
-    fun weekStart() = today().with(java.time.DayOfWeek.MONDAY).atStartOfDay(UTC).toInstant().toEpochMilli()
-    fun monthStart() = today().withDayOfMonth(1).atStartOfDay(UTC).toInstant().toEpochMilli()
+    private val UTC: java.time.ZoneId = java.time.ZoneOffset.UTC
+    @Volatile private var zone: java.time.ZoneId = UTC
+    @Volatile private var hour = 0
 
-    /** Open of the first daily candle at or after [t]; markets closed at the boundary use the next session. */
+    /** Set from Settings; [zoneId] is an IANA zone ("UTC", "Europe/Oslo", "America/New_York"). */
+    fun configure(zoneId: String, openHour: Int) {
+        zone = runCatching { java.time.ZoneId.of(zoneId) }.getOrDefault(UTC)
+        hour = openHour.coerceIn(0, 23)
+    }
+    /** True when the open isn't 00:00 UTC and needs hourly candles. */
+    val custom get() = !(hour == 0 && (zone == UTC || zone.id == "UTC" || zone.id == "Z"))
+    /** Changes whenever the setting does; key effects on it. */
+    val key get() = "${zone.id}|$hour"
+
+    /** An open at or after noon starts the next day's session (17:00 New York opens Monday on Sunday). */
+    private fun lead() = if (hour >= 12) 1L else 0L
+    private fun startOf(tradeDate: java.time.LocalDate) =
+        tradeDate.minusDays(lead()).atTime(hour, 0).atZone(zone).toInstant().toEpochMilli()
+    /** The session (trade date) running now. */
+    private fun tradeDate(now: Long = ServerClock.now()): java.time.LocalDate {
+        val local = java.time.Instant.ofEpochMilli(now).atZone(zone)
+        val d = local.toLocalDate().plusDays(lead())
+        return if (now >= startOf(d)) d else d.minusDays(1)
+    }
+    fun dayStart() = startOf(tradeDate())
+    fun weekStart() = startOf(tradeDate().with(java.time.DayOfWeek.MONDAY))
+    fun monthStart() = startOf(tradeDate().withDayOfMonth(1))
+    /** Milliseconds until the next daily open (00:00 UTC unless set otherwise). */
+    fun untilNextDay(): Long = startOf(tradeDate().plusDays(1)) - ServerClock.now()
+
+    /** Open of the first candle at or after [t]; markets closed at the boundary use the next session. */
     fun openAt(days: List<Candle>, t: Long): Double? = days.firstOrNull { it.openTime >= t }?.o
 
-    /** Today's UTC open, or the last close when today's candle hasn't printed yet. */
-    fun dayOpen(days: List<Candle>): Double? = openAt(days, dayStart()) ?: days.lastOrNull()?.c
+    /**
+     * Today's open, or the last close when today's session hasn't printed yet. With a custom
+     * open time it comes from [hours] (1h candles); without them it falls back to the UTC day.
+     */
+    fun dayOpen(days: List<Candle>, hours: List<Candle>? = null): Double? =
+        if (custom && !hours.isNullOrEmpty()) openAt(hours, dayStart()) ?: hours.lastOrNull()?.c
+        else openAt(days, dayStart()) ?: days.lastOrNull()?.c
+
+    /** Week / month open: from 1h candles when they reach back far enough, else the daily candle. */
+    fun openAt(days: List<Candle>, hours: List<Candle>?, t: Long): Double? =
+        if (custom && hours != null && (hours.firstOrNull()?.openTime ?: Long.MAX_VALUE) <= t) openAt(hours, t) else openAt(days, t)
 
     /** Classic floor pivots: P from the last full period's high, low and close, three levels each side. */
     data class Pivots(val p: Double, val r1: Double, val r2: Double, val r3: Double, val s1: Double, val s2: Double, val s3: Double)
 
-    /** Pivots from the last completed UTC day, or the last completed week when [weekly]. Null without data. */
-    fun pivots(days: List<Candle>, weekly: Boolean): Pivots? {
+    /** Pivots from the last completed day (in the chosen session time, from [hours] when set), or week. Null without data. */
+    fun pivots(days: List<Candle>, weekly: Boolean, hours: List<Candle>? = null): Pivots? {
         val end = if (weekly) weekStart() else dayStart()
         val start = if (weekly) end - 7 * 86_400_000L else end - 86_400_000L
+        if (custom && !weekly && hours != null) {
+            val bars = hours.filter { it.openTime in start until end }
+            if (bars.isNotEmpty()) {
+                val h = bars.maxOf { it.h }; val l = bars.minOf { it.l }; val c = bars.last().c
+                val p = (h + l + c) / 3
+                return Pivots(p, 2 * p - l, p + (h - l), h + 2 * (p - l), 2 * p - h, p - (h - l), l - 2 * (h - p))
+            }
+        }
         // Markets shut at the boundary (weekends for stocks): fall back to the latest full period seen.
         val bars = days.filter { it.openTime in start until end }.ifEmpty {
             days.filter { it.openTime < end }.let { if (weekly) it.takeLast(5) else it.takeLast(1) }

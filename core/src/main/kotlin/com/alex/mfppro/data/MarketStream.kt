@@ -95,6 +95,12 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     // Candle and OI series are long: only the keys that changed are copied on a flush.
     private val dirtyCandles = HashSet<String>()
     private val dirtyOi = HashSet<String>()
+    // Data-flow watchdog state (see checkStale).
+    private var staleCheckAt = 0L
+    private var lastAnyEventAt = 0L
+    private val feedEventAt = HashMap<String, Long>()
+    private val subSentAt = HashMap<Sub, Long>()
+    private var connectedAt = 0L
 
     private val refs = HashMap<Sub, Int>()
     private val activeIds = HashMap<Sub, Int>()
@@ -137,6 +143,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     private fun watchdog() {
         val socket = ws ?: return
         val now = System.currentTimeMillis()
+        if (_live.value && now - staleCheckAt >= 1_000) { staleCheckAt = now; if (checkStale(now)) return }
         val probeFailed = probeAt > 0 && lastFrameAt < probeAt && now - probeAt > 2_500
         if (probeFailed || now - lastFrameAt > 8_000) {
             Log.w(TAG, "socket silent, reconnecting")
@@ -152,6 +159,28 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         }
     }
 
+    /**
+     * Pongs prove the socket is up, not that data still flows. A price feed
+     * (ticks/books) that has gone quiet is re-subscribed; if every feed is quiet
+     * the socket is replaced. Returns true when it reconnected.
+     */
+    private fun checkStale(now: Long): Boolean {
+        val price = activeIds.keys.filter { it.channel == "ticks" || it.channel == "books" }
+        if (price.isEmpty()) return false
+        val quiet = price.filter { now - maxOf(feedEventAt[it.feed] ?: 0, subSentAt[it] ?: now) > 20_000 }
+        if (quiet.size == price.size && now - maxOf(lastAnyEventAt, connectedAt) > 30_000) {
+            Log.w(TAG, "no market data for 30s, reconnecting")
+            _live.value = false
+            connect()
+            return true
+        }
+        for (sub in quiet) {
+            Log.w(TAG, "feed ${sub.feed} ${sub.channel} quiet, resubscribing")
+            activeIds.remove(sub)?.let { id -> idToSub.remove(id); ws?.send("""{"op":"unsub","id":$id}""") }
+            send(sub)
+        }
+        return false
+    }
     fun probe() = scope.launch(serial) {
         val socket = ws ?: return@launch
         probeAt = System.currentTimeMillis(); lastPingAt = probeAt
@@ -225,7 +254,9 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         }
     }
 
-    fun pause() = scope.launch(serial) {
+    /** [still] is checked on the stream thread: a pause that lost a race with resume does nothing. */
+    fun pause(still: () -> Boolean = { true }) = scope.launch(serial) {
+        if (!still()) return@launch
         paused = true
         reconnectJob?.cancel()
         gen++
@@ -233,12 +264,13 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         _live.value = false
     }
 
-    fun resume() = scope.launch(serial) {
+    /** Back in the foreground. [fresh] replaces the socket: after a while away its data is stale or backed up. */
+    fun resume(fresh: Boolean = false) = scope.launch(serial) {
         paused = false
         // A socket that went quiet while the app was frozen is reconnected now rather than
         // after the probe times out, so the screen isn't showing old prices for seconds.
         val stale = System.currentTimeMillis() - lastFrameAt > 8_000
-        if (refs.isNotEmpty() && (ws == null || stale)) { attempt = 0; connect() } else if (ws != null) probe()
+        if (refs.isNotEmpty() && (ws == null || stale || fresh)) { attempt = 0; connect() } else if (ws != null) probe()
     }
 
     /**
@@ -268,6 +300,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 scope.launch(serial) {
                     if (myGen != gen) return@launch
                     attempt = 0
+                    connectedAt = System.currentTimeMillis()
                     _live.value = true
                     refs.keys.forEach { send(it) }
                 }
@@ -303,6 +336,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         val id = nextId++
         activeIds[sub] = id
         idToSub[id] = sub
+        subSentAt[sub] = System.currentTimeMillis()
         val payload = buildJsonObject {
             put("symbols", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(sub.coin)) })
             put("providers", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(sub.provider)) })
@@ -423,6 +457,9 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         val provider = e.str("provider") ?: return
         val coin = e.str("symbol") ?: return
         val key = feedKey(provider, coin)
+        val now = System.currentTimeMillis()
+        lastAnyEventAt = now
+        if (e.str("type") == "tick" || e.str("type") == "book") feedEventAt[key] = now
         when (e.str("type")) {
             "tick" -> if (e.str("kind") == "mark" && e.dbl("price")?.also { venueBuf[key] = it; dirty += "vmarks" } != null &&
                 realtime && System.currentTimeMillis() - (bookMidAt[key] ?: 0) < 3_000) {

@@ -247,6 +247,15 @@ class Prefs(private val secure: KvStore, private val plain: KvStore) {
     var chipPivots: Boolean
         get() = plain.getBoolean("chip_pivots", true)
         set(v) = plain.edit().putBoolean("chip_pivots", v).apply()
+    /** Daily open: an hour in a time zone (summer time follows the zone). Default 00:00 UTC. */
+    var dayOpenZone: String
+        get() = plain.getString("day_open_zone", "UTC")!!
+        set(v) = plain.edit().putString("day_open_zone", v).apply()
+    var dayOpenHour: Int
+        get() = plain.getInt("day_open_hour", 0)
+        set(v) = plain.edit().putInt("day_open_hour", v).apply()
+
+
     var showPivots: Boolean
         get() = plain.getBoolean("show_pivots", false)
         set(v) = plain.edit().putBoolean("show_pivots", v).apply()

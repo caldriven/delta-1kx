@@ -97,7 +97,14 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
 
 
     val classOf = { m: Market -> AssetClasses.classOf(m, classes) }
-    // Change since today's 00:00 UTC open; the feed's rolling 24h until the daily candles load.
+    // Change since today's daily open (Settings → Daily open). Sorting uses only this, so markets
+    // aren't ranked on two different measures while the opens load; still-loading ones sink.
+    val sinceOpen = { m: Market ->
+        val px = stats[m.feedKey]?.markPx
+        val open = extras[m.marketId]?.dayOpen
+        if (px != null && open != null && open > 0) (px / open - 1) * 100 else null
+    }
+    // Shown: the feed's rolling 24h until the opens load.
     val dayChg = { m: Market ->
         val px = stats[m.feedKey]?.markPx
         val open = extras[m.marketId]?.dayOpen
@@ -118,7 +125,7 @@ fun OverviewScreen(repo: Repo, analysis: Boolean = false, onOpenMarket: (String)
                 val s = stats[m.feedKey]
                 when (key) {
                     SortKey.NAME -> null
-                    SortKey.CHG -> dayChg(m)
+                    SortKey.CHG -> sinceOpen(m)
                     SortKey.H1 -> chg1h[m.marketId]
                     SortKey.WEEK -> extras[m.marketId]?.week
                     SortKey.VOL -> s?.dayNtlVlm

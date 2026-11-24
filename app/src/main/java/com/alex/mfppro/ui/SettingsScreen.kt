@@ -484,6 +484,30 @@ private fun ChartPage(repo: Repo) {
         Toggle("Killzones", "Asia, London, NY AM and London close as a strip along the bottom", kz, DATA) { kz = it; p.killzones = it }
         var sess by remember { mutableStateOf(p.showSessions) }
         Toggle("Market hours", "Tokyo, London and New York along the top, weekend band", sess, DATA) { sess = it; p.showSessions = it }
+
+        // Daily open: when "today" starts for the D/W/M opens, today's % change and pivots.
+        Label("Daily open")
+        var openZone by remember { mutableStateOf(p.dayOpenZone) }
+        var openHour by remember { mutableStateOf(p.dayOpenHour) }
+        fun setOpen(z: String, h: Int) { openZone = z; openHour = h; repo.setDayOpen(z, h) }
+        val presets = listOf(
+            Triple("UTC 00:00", "UTC", 0),
+            Triple("Europe 00:00 (UTC+1/+2)", "Europe/Oslo", 0),
+            Triple("New York 17:00", "America/New_York", 17),
+            Triple("New York 00:00", "America/New_York", 0),
+        )
+        Row(Modifier.padding(top = 6.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            presets.forEach { (label, z, h) -> Seg(label, openZone == z && openHour == h, DATA) { setOpen(z, h) } }
+        }
+        // Any hour in the chosen zone.
+        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Hour in ${openZone.substringAfter('/').replace('_', ' ')}", color = C.muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Seg("−", false, DATA) { setOpen(openZone, (openHour + 23) % 24) }
+            Text(String.format(java.util.Locale.US, "%02d:00", openHour), style = num.copy(fontSize = 14.sp, color = C.text), modifier = Modifier.padding(horizontal = 10.dp))
+            Seg("+", false, DATA) { setOpen(openZone, (openHour + 1) % 24) }
+        }
+        val nowOffset = runCatching { java.time.ZonedDateTime.now(java.time.ZoneId.of(openZone)).offset.id.replace("Z", "+00:00") }.getOrDefault("")
+        Note("Summer and winter time follow the zone (now UTC$nowOffset). Venues and MFP use 00:00 UTC for their daily candles; any other time is priced from hourly candles.")
     }
     Section("Liquidation levels", DATA, Icons.Filled.Bolt) {
         Note("Ranges and volume-spike moves → fixed liq levels per leverage. Tap a label ⓘ on the chart for details.")

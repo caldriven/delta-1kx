@@ -178,6 +178,17 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             delay(if (d.isEmpty()) 5_000 else minOf(600_000L, com.alex.mfppro.data.ServerClock.untilUtcMidnight() + 3_000))
         }
     }
+    // Custom daily open time (Settings): a week of 1h candles, since UTC daily candles don't line up with it.
+    val opensKey = Opens.key
+    var hours by remember(market.marketId, opensKey) { mutableStateOf<List<Candle>?>(null) }
+    LaunchedEffect(market.marketId, opensKey) {
+        if (!Opens.custom) return@LaunchedEffect
+        while (true) {
+            val h = repo.market.candleHistory(market.provider, market.coin, "1h", 200)
+            if (h.isNotEmpty()) hours = h
+            delay(if (h.isEmpty()) 5_000 else 300_000)
+        }
+    }
 
     val key = market.feedKey
     // Only this market's stats, book, candles and OI recompose the screen. Marks stay live (every
@@ -201,10 +212,10 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     val extras by repo.extras.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { repo.loadOverviewExtras() }
     val oiChg = extras[market.marketId]?.oi24h
-    val dOpen = Opens.dayOpen(days)
-    val wOpen = Opens.openAt(days, Opens.weekStart())
-    val mOpen = Opens.openAt(days, Opens.monthStart())
-    // "Today" is measured from the UTC daily open, like most venues' daily candles.
+    val dOpen = Opens.dayOpen(days, hours)
+    val wOpen = Opens.openAt(days, hours, Opens.weekStart())
+    val mOpen = Opens.openAt(days, hours, Opens.monthStart())
+    // "Today" is measured from the daily open set in Settings (00:00 UTC by default).
     val today = if (live != null && dOpen != null && dOpen > 0) (live / dOpen - 1) * 100 else s?.change24hPct
 
     // Only the trading account unless "All accounts" is on.
@@ -236,12 +247,13 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
     }
     // A TP or SL dropped from the chart: snapped to the tick, and only on its own side of the price,
     // since a stop through the price would close the position at once.
-    fun askExit(p: com.alex.mfppro.data.Position, tp: Boolean, raw: Double, tp0: Double?, sl0: Double?) {
+    // [order]: the existing TP/SL or reduce-only limit being moved; only that order changes.
+    fun askExit(p: com.alex.mfppro.data.Position, tp: Boolean, raw: Double, tp0: Double?, sl0: Double?, order: com.alex.mfppro.data.Order? = null) {
         val px = repo.market(p.marketId)?.let { snapTick(raw, it) } ?: raw
         val now = mark ?: p.entryPrice
         val wrong = if (tp == p.isLong) px <= now else px >= now
         if (wrong) repo.postMessage(if (tp) "Take profit must be ${if (p.isLong) "above" else "below"} the price" else "Stop loss must be ${if (p.isLong) "below" else "above"} the price")
-        else exitAsk = ExitAsk(p, tp, px, tp0, sl0)
+        else exitAsk = ExitAsk(p, tp, px, tp0, sl0, order)
     }
     var showOpens by remember { mutableStateOf(repo.prefs.showOpens) }
     var showPivots by remember { mutableStateOf(repo.prefs.showPivots) }
@@ -315,7 +327,10 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
             val px = o.limitPrice ?: o.triggerPrice ?: return@mapNotNull null
             val buy = o.side == "buy"
             val kind = (if (o.type.startsWith("stop")) "Stop " else "Limit ") + (if (buy) "buy" else "sell") + (if (o.reduceOnly) " · reduce" else "")
+            // A reduce-only limit against an open position is a limit take-profit: drag it to move it.
+            val pos = myPositions.firstOrNull { p -> p.accountId == o.accountId && o.reduceOnly && o.triggerPrice == null && (o.side == "sell") == p.isLong }
             PriceLine(px, if (buy) C.up else C.down, kind, parts = listOf(kind, fmtUsd(o.size * px), pctAway(px)),
+                drag = pos?.let { p -> LineDrag({ x -> exitPreview(p, x, "TP") }) { x -> askExit(p, p.pnlAt(x) >= 0, x, null, null, o) } },
                 onRemove = { chartAct(ChartAsk("Cancel order", "$kind ${fmtPrice(px, market)}", C.down,
                     listOf(ConfirmRow("Value", fmtUsd(o.size * px))), "Cancel order") { repo.cancelOrder(o) }) })
         } + listOfNotNull(draft.price?.takeIf { compact && draft.on }?.let { px ->
@@ -327,7 +342,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         })
     // Daily pivots on intraday candles; weekly once a candle is 4h or longer, where daily levels crowd together.
     val weeklyPivots = interval in listOf("4h", "1d", "1w", "1M")
-    val pivotLines = if (showPivots) Opens.pivots(days, weeklyPivots)?.let { pv ->
+    val pivotLines = if (showPivots) Opens.pivots(days, weeklyPivots, hours)?.let { pv ->
         val tag = if (weeklyPivots) "W" else "D"
         listOf(
             PriceLine(pv.r3, PIVOT_R, " R3", ref = true), PriceLine(pv.r2, PIVOT_R, " R2", ref = true), PriceLine(pv.r1, PIVOT_R, " R1", ref = true),
@@ -344,6 +359,35 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val tp = exits.firstOrNull { it.exitGroup == "tp" }?.exitPrice
         val sl = exits.firstOrNull { it.exitGroup == "sl" }?.exitPrice
         fun away(px: Double) = mark?.let { fmtPct((px / it - 1) * 100) } ?: ""
+        // Every TP and SL gets its own line (partial TPs included); dragging one moves only that order.
+        val exitLines = if (!shows("exits")) emptyList() else exits.mapNotNull { o ->
+            val px = o.exitPrice ?: return@mapNotNull null
+            val isTp = o.exitGroup == "tp"
+            val part = if (p.size > 0 && o.size < p.size * 0.999) " " + kotlin.math.round(o.size / p.size * 100).toInt() + "%" else ""
+            val name = (if (isTp) "TP" else "SL") + part + if (o.exitExecution == "limit") " L" else ""
+            val share = if (p.size > 0) (o.size / p.size).coerceAtMost(1.0) else 1.0
+            PriceLine(px, if (isTp) C.up else C.down, name,
+                parts = listOfNotNull(name, away(px), fmtUsd(net(p.pnlAt(px) * share), true), tag.ifBlank { null }),
+                drag = LineDrag({ x -> exitPreview(p, x, if (isTp) "TP" else "SL") }) { x -> askExit(p, isTp, x, tp, sl, o) },
+                onRemove = {
+                    // The only exit of its kind goes through setTpSl; a partial TP is cancelled on its own.
+                    val alone = exits.count { it.exitGroup == o.exitGroup } <= 1
+                    val run: suspend () -> Unit = {
+                        if (!alone) repo.cancelOrder(o)
+                        else if (isTp) repo.setTpSl(p, null, sl, "Remove TP ${p.symbol}")
+                        else repo.setTpSl(p, tp, null, "Remove SL ${p.symbol}")
+                    }
+                    val head = "${ticker(p.symbol, p.provider)} $name ${fmtPrice(px, market)}"
+                    // Removing a stop always asks: the position may be left without protection.
+                    if (isTp) {
+                        chartAct(ChartAsk("Remove take profit", head, C.down,
+                            listOf(ConfirmRow("Stop loss", sl?.let { s -> fmtPrice(s, market) } ?: "none")), "Remove", run))
+                    } else {
+                        confirmAsk = ChartAsk("Remove stop loss", head, C.down,
+                            listOf(ConfirmRow("Position", if (alone) "stays open without a stop" else "keeps its other stops")), "Remove", run)
+                    }
+                })
+        }
         listOfNotNull(
             // With the PnL box off, the entry stays as a plain line.
             if (!shows("pnl")) PriceLine(p.entryPrice, if ((pnl ?: 0.0) >= 0) C.up else C.down, "Entry", solid = true, parts = listOf("Entry"))
@@ -362,15 +406,6 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                             listOf(ConfirmRow("Value", fmtUsd(p.size * (mark ?: p.entryPrice))), ConfirmRow("PnL", fmtUsd(net(mark?.let(p::pnlAt)), true), pnlColor(mark?.let(p::pnlAt)))), "Close") { repo.closePosition(p) }, com.alex.mfppro.data.Confirm.Full)
                     },
                 )),
-            tp?.takeIf { shows("exits") }?.let { PriceLine(it, C.up, "TP", parts = listOfNotNull("TP", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "TP") }) { px -> askExit(p, true, px, tp, sl) },
-                onRemove = { chartAct(ChartAsk("Remove take profit", "${ticker(p.symbol, p.provider)} TP ${fmtPrice(it, market)}", C.down,
-                    listOf(ConfirmRow("Stop loss", sl?.let { s -> fmtPrice(s, market) } ?: "none")), "Remove") { repo.setTpSl(p, null, sl, "Remove TP ${p.symbol}") }) }) },
-            // Removing a stop always asks: the position is left without protection.
-            sl?.takeIf { shows("exits") }?.let { PriceLine(it, C.down, "SL", parts = listOfNotNull("SL", away(it), fmtUsd(net(p.pnlAt(it)), true), tag.ifBlank { null }),
-                drag = LineDrag({ px -> exitPreview(p, px, "SL") }) { px -> askExit(p, false, px, tp, sl) },
-                onRemove = { confirmAsk = ChartAsk("Remove stop loss", "${ticker(p.symbol, p.provider)} SL ${fmtPrice(it, market)}", C.down,
-                    listOf(ConfirmRow("Position", "stays open without a stop")), "Remove") { repo.setTpSl(p, tp, null, "Remove SL ${p.symbol}") } }) },
             // Where this position takes the account onto each floor, with % away from the last price.
             mark?.takeIf { shows("floors") && !mini }?.let { m -> r.dailyRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.accent, "DLL", parts = listOfNotNull("DLL", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
             mark?.takeIf { shows("floors") && !mini }?.let { m -> r.ddRoom?.let { room -> breachPrice(p, m, room)?.let { PriceLine(it, C.down, "Max DD", parts = listOfNotNull("Max DD", away(it), "-" + fmtUsd(room), tag.ifBlank { null })) } } },
@@ -379,7 +414,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 val px = if (p.isLong) m + need / p.size else m - need / p.size
                 px.takeIf { it > 0 }?.let { PriceLine(it, PASS, "Pass target", parts = listOfNotNull("Pass target", away(it), "+" + fmtUsd(need), tag.ifBlank { null })) }
             } },
-        )
+        ) + exitLines
     } + (if (showOpens && !mini) listOfNotNull(
         mOpen?.let { PriceLine(it, OPEN_M, "M open", ref = true) },
         wOpen?.let { PriceLine(it, OPEN_W, "W open", ref = true) },
@@ -627,7 +662,9 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
         val p = e.p
         val em = repo.market(p.marketId)
         // How this exit executes: what it already uses, else the last choice.
-        var exec by remember(e) { mutableStateOf(repo.exitsOf(p).firstOrNull { it.exitGroup == (if (e.tp) "tp" else "sl") }?.exitExecution
+        val moving = e.order
+        var exec by remember(e) { mutableStateOf(moving?.takeIf { it.exitGroup != null }?.exitExecution
+            ?: repo.exitsOf(p).firstOrNull { it.exitGroup == (if (e.tp) "tp" else "sl") }?.exitExecution
             ?: if (e.tp) repo.prefs.tpExecution else repo.prefs.slExecution) }
         val pnl = p.pnlAt(e.price)
         val pct = (e.price / p.entryPrice - 1) * 100 * (if (p.isLong) 1 else -1)
@@ -638,12 +675,19 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
                 ConfirmRow("Entry", fmtPrice(p.entryPrice, em)),
                 ConfirmRow("Est. PnL", String.format(Locale.US, "%+.2f%%  %s", pct, fmtUsd(pnl, true)), pnlColor(pnl)),
             ),
-            confirm = if (e.tp) "Set TP" else "Set SL", onDismiss = { exitAsk = null },
-            extra = { ExitExecPicker(e.tp, exec, p.provider) { exec = it } },
+            confirm = if (moving != null) "Move" else if (e.tp) "Set TP" else "Set SL", onDismiss = { exitAsk = null },
+            // Moving an existing order keeps how it executes; the picker is for new exits.
+            extra = { if (moving == null) ExitExecPicker(e.tp, exec, p.provider) { exec = it } },
         ) {
             exitAsk = null
-            if (e.tp) repo.prefs.tpExecution = exec else repo.prefs.slExecution = exec
-            tradeScope.launch { repo.setTpSl(p, if (e.tp) e.price else e.tp0, if (e.tp) e.sl0 else e.price, tpExec = exec.takeIf { e.tp }, slExec = exec.takeIf { !e.tp }) }
+            when {
+                moving != null && moving.exitGroup != null -> tradeScope.launch { repo.moveExit(p, moving, e.price) }
+                moving != null -> tradeScope.launch { repo.moveLimit(p, moving, e.price) }
+                else -> {
+                    if (e.tp) repo.prefs.tpExecution = exec else repo.prefs.slExecution = exec
+                    tradeScope.launch { repo.setTpSl(p, if (e.tp) e.price else e.tp0, if (e.tp) e.sl0 else e.price, tpExec = exec.takeIf { e.tp }, slExec = exec.takeIf { !e.tp }) }
+                }
+            }
         }
     }
 
@@ -653,7 +697,7 @@ fun TradeScreen(repo: Repo, marketId: String?, compact: Boolean, onPickMarket: (
 /** A chart-box action waiting for confirmation. */
 private class ChartAsk(val title: String, val headline: String, val color: Color, val rows: List<ConfirmRow>, val confirm: String, val run: suspend () -> Unit)
 
-private class ExitAsk(val p: com.alex.mfppro.data.Position, val tp: Boolean, val price: Double, val tp0: Double?, val sl0: Double?)
+private class ExitAsk(val p: com.alex.mfppro.data.Position, val tp: Boolean, val price: Double, val tp0: Double?, val sl0: Double?, val order: com.alex.mfppro.data.Order? = null)
 
 private val PASS get() = C.target
 private val OPEN_D get() = C.openD
@@ -843,13 +887,19 @@ internal fun MarketPicker(repo: Repo, markets: List<Market>, classes: Map<String
     }
     LaunchedEffect(Unit) { repo.loadOverviewExtras() }
     LaunchedEffect(sortBy) { if (sortBy == "4h") repo.load4h() }
-    // 24h = change since today's 00:00 UTC open.
+    // 24h = change since today's daily open (Settings), falling back to the feed's rolling 24h for display.
     fun d24(m: Market): Double? {
         val px = stats[m.feedKey]?.markPx ?: return null
         val open = extras[m.marketId]?.dayOpen ?: return stats[m.feedKey]?.change24hPct
         return if (open > 0) (px / open - 1) * 100 else null
     }
-    fun value(m: Market): Double? = when (sortBy) { "24h" -> d24(m); "4h" -> chg4h[m.marketId]; "vol" -> stats[m.feedKey]?.dayNtlVlm; else -> null }
+    // Sort on the daily-open change only, never a mix of that and the rolling 24h.
+    fun sinceOpen(m: Market): Double? {
+        val px = stats[m.feedKey]?.markPx ?: return null
+        val open = extras[m.marketId]?.dayOpen?.takeIf { it > 0 } ?: return null
+        return (px / open - 1) * 100
+    }
+    fun value(m: Market): Double? = when (sortBy) { "24h" -> sinceOpen(m); "4h" -> chg4h[m.marketId]; "vol" -> stats[m.feedKey]?.dayNtlVlm; else -> null }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = C.panel) {
         AppInput("", q, { q = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp), placeholder = "Search")
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {

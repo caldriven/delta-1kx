@@ -77,8 +77,10 @@ class LimitDraft {
 
 /**
  * One-tap trading for the position-management view. Each button opens a position
- * worth (available balance × leverage), shown on the button, at market or, in Limit
- * mode, as a limit order at the [draft] price. Closing lives on the position card below.
+ * worth a multiple of free margin, shown on the button, at market or, in Limit
+ * mode, as a limit order at the [draft] price. On cross every order goes in at the
+ * market's max leverage, so it ties up as little margin as possible (room for hedges);
+ * the multiple only picks the size. Closing lives on the position card below.
  */
 @Composable
 fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
@@ -123,7 +125,14 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     LaunchedEffect(reducing) { if (reducing && held != null) buySide = !held.isLong }
     // MFP's exposure caps limit what a new order can add.
     val capLeft = if (reduceOnly) null else exposureLeft(policies[acc.account.id], acc, marks, market.marketId)
-    fun effMult(mult: Double) = if (held != null && !reduceOnly) minOf(mult, held.leverage.coerceAtLeast(1.0)) else mult
+    // Cross: always the max leverage. Isolated keeps leverage = the multiple (or the position's own).
+    val cross = (held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id)) != "isolated"
+    fun levFor(mult: Double) = when {
+        cross -> maxLev
+        held != null -> held.leverage.toInt().coerceAtLeast(1)
+        else -> kotlin.math.ceil(mult).toInt().coerceIn(1, maxLev)
+    }
+    fun effMult(mult: Double) = if (held != null && !reduceOnly && !cross) minOf(mult, held.leverage.coerceAtLeast(1.0)) else mult
     // Reduce only needs something to reduce: an open position, traded against.
     fun sideOk(buy: Boolean) = !reduceOnly || (held != null && buy != held.isLong)
 
@@ -141,8 +150,8 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         if (size < market.minSize || usd < market.minNotional) {
             repo.postMessage("Size below the market minimum (${fmtUsd(market.minNotional)})"); return
         }
-        // An open position keeps its leverage; the multiple only sets the size.
-        val lev = held?.leverage?.toInt() ?: kotlin.math.ceil(mult).toInt()
+        // The multiple only sets the size. Leverage: max on cross, never saved as a preference.
+        val lev = levFor(mult)
         val word = (if (limitPx != null) "Limit " else "") + if (buy) "Long" else "Short"
         // A limit at or through the touch fills straight away; the server wants that acknowledged.
         val crosses = limitPx != null && (if (buy) limitPx >= (book?.asks?.firstOrNull()?.px ?: Double.MAX_VALUE) else limitPx <= (book?.bids?.firstOrNull()?.px ?: 0.0))
@@ -152,8 +161,8 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
             return
         }
         val run: suspend () -> Unit = {
-            if (held == null) repo.prefs.setLeverage(market.marketId, lev)
-            repo.placeOrder("$word ${market.symbol}", buildJsonObject {
+            // If MFP won't move an open position to the new leverage, retry at the position's own.
+            repo.placeOrder("$word ${market.symbol}", fallbackLeverage = held?.leverage?.takeIf { it.toInt() != lev }, body = buildJsonObject {
                 put("client_order_id", "mfppro-" + UUID.randomUUID().toString().take(13))
                 put("account_id", acc.account.id); put("market_id", market.marketId)
                 put("side", if (buy) "buy" else "sell"); put("size", size)
@@ -171,7 +180,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         // How far price can move against this position before the account hits its floor.
         val breachMove = riskOf(acc, marks).room?.takeIf { usd > 0 }?.let { it / usd * 100 }
         val detail = (if (limitPx != null) "Limit ${if (buy) "buy" else "sell"} at ${fmtPrice(limitPx)}" + (if (crosses) " (crosses the book: fills now)" else if (repo.prefs.postOnly) " · post only" else "") else "Market ${if (buy) "buy" else "sell"}") +
-            " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
+            " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x ${if (cross) "cross" else "isolated"} (margin ≈ ${fmtUsd(usd / lev)})" +
             (if (reduceOnly) ", reduce only" else "") + " on ${accountName(acc)}." +
             (if (!reduceOnly && breachMove != null) String.format(Locale.US, "\nA %.2f%% move against it reaches your drawdown floor.", breachMove) else "")
         // Reducing by the whole position is a full close and follows that setting.
@@ -259,6 +268,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
               }
             }
         }
+        // What the buttons mean: size as a multiple of free margin, sent at max leverage on cross.
+        if (!reducing) Text(
+            "Size = × free margin ${fmtUsd(snap?.available ?: available)}" + if (cross) " · sent at ${maxLev}x cross" else " · isolated",
+            color = C.muted, fontSize = 10.sp,
+        )
         if (locked) Text(repo.prefs.lockMessage(), color = C.down, fontSize = 11.sp)
     }
 
