@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alex.mfppro.data.NotifyRules
+import com.alex.mfppro.data.profile
 import com.alex.mfppro.data.PNL_PRESETS
 import com.alex.mfppro.data.Repo
 import kotlinx.coroutines.launch
@@ -158,17 +159,20 @@ private fun Home(repo: Repo, onBack: () -> Unit, open: (String) -> Unit) {
         NavRow("Accounts", "Names, cross or isolated, MFP rules", API, Icons.Filled.AccountBox) { open("accounts") }
         NavRow("Trading", "Confirmations, slippage, quick sizes, TP/SL type", ORDERS, Icons.Filled.TouchApp) { open("trading") }
         NavRow("Risk guard", if (p.lockEnabled) "Night lock ${p.lockStart}:00–${p.lockEnd}:00 Oslo" else "Night lock off", RULES, Icons.Filled.Bedtime) { open("risk") }
-        NavRow("Notifications", notifySummary(repo), ALERTS, Icons.Filled.NotificationsActive) { open("notify") }
+        NavRow("Notifications", notifySummary(repo, androidx.compose.ui.platform.LocalContext.current), ALERTS, Icons.Filled.NotificationsActive) { open("notify") }
         NavRow("Chart", "Sessions, killzones, indicator bar", DATA, Icons.Filled.Bolt) { open("chart") }
         NavRow("Display", "${Palette.theme.label} theme · profit split ${Split.pct}%", DISPLAY, Icons.Filled.Palette, last = true) { open("display") }
     }
 }
 
-private fun notifySummary(repo: Repo): String {
+private fun notifySummary(repo: Repo, ctx: android.content.Context): String {
     val ids = activeAccounts(repo.account.accounts.value, includeComp = true).map { it.account.id }
     val own = ids.count { repo.prefs.notifyOverride(it) != null }
     val muted = ids.count { repo.prefs.notifyFor(it).muted }
     return listOfNotNull(
+        // Blocked by Android trumps everything else on the line.
+        "Blocked by Android".takeIf { !com.alex.mfppro.data.AlertMonitor.enabled(ctx) },
+        repo.prefs.notifyDefaults.profile(),
         if (repo.prefs.monitorBackground) "Background on" else "In app only",
         own.takeIf { it > 0 }?.let { "$it with own rules" },
         muted.takeIf { it > 0 }?.let { "$it muted" },
@@ -317,13 +321,101 @@ private fun RiskPage(repo: Repo) {
 private fun NotifyPage(repo: Repo, ask: () -> Unit, open: (String) -> Unit) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val accounts by repo.account.accounts.collectAsStateWithLifecycle()
+    // Whether Android shows our notifications at all; checked again when coming back from system settings.
+    var allowed by remember { mutableStateOf(com.alex.mfppro.data.AlertMonitor.enabled(ctx)) }
+    val owner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(owner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) allowed = com.alex.mfppro.data.AlertMonitor.enabled(ctx)
+        }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+    fun openSystemSettings() = runCatching {
+        ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
     Section("Delivery", ALERTS, Icons.Filled.NotificationsActive) {
+        // Off at the system level means nothing below can reach the phone: say so first, with the fix.
+        if (!allowed) {
+            Text("Notifications are off for this app", color = C.down, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Note("Android blocks them, so alerts only show inside the app while it's open.")
+            Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Seg("Allow", false, C.down) { ask(); allowed = com.alex.mfppro.data.AlertMonitor.enabled(ctx) }
+                Seg("Open system settings", false, C.muted) { openSystemSettings() }
+            }
+            Divider()
+        }
         var bg by remember { mutableStateOf(repo.prefs.monitorBackground) }
         Toggle("Watch in background", "Keeps alerts live with the app closed", bg, ALERTS) {
             bg = it; repo.prefs.monitorBackground = it
             if (it) ask()
             com.alex.mfppro.data.MonitorService.setEnabled(ctx, it)
         }
+        Note(if (bg) "A small ongoing notification shows live PnL while it watches."
+            else "Off: alerts only fire while the app is open, as a line at the top of the screen.")
+        if (bg) {
+            var per by remember { mutableStateOf(repo.prefs.positionNotifs) }
+            Toggle("One notification per position", "Live PnL, price and TP/SL for each open position, grouped under the summary. Close… opens the confirmation in the app", per, ALERTS) {
+                per = it; repo.prefs.positionNotifs = it
+            }
+            if (per) {
+                val p = repo.prefs
+                var count by remember { mutableStateOf(p.positionNotifCount) }
+                ChipPick("Positions", listOf(1, 2, 3, 5, 8), count, ALERTS, { if (it == 1) "Largest" else if (it == 8) "All (8)" else "Top $it" }) {
+                    count = it; p.positionNotifCount = it
+                }
+                var basis by remember { mutableStateOf(p.breachBasis) }
+                Text("Distance to breach", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                Row(Modifier.padding(top = 4.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for ((k, label) in listOf("position" to "This position", "account" to "Whole account", "usd" to "$ only")) {
+                        Seg(label, basis == k, ALERTS) { basis = k; p.breachBasis = k }
+                    }
+                }
+                Note(when (basis) {
+                    "account" -> "% move of all open positions together (net long/short), and the $ left: \"LL −1.80% acct (\$450)\"."
+                    "usd" -> "Only the dollars left to the nearest floor: \"LL \$450 left\"."
+                    else -> "% move of this position's asset alone, and the $ left: \"LL −2.31% (\$450)\"."
+                } + " LL = DLL and MLL at one level; otherwise it names the one hit first.")
+                var fields by remember { mutableStateOf(p.positionNotifFields) }
+                Text("Show", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                Row(Modifier.padding(top = 4.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for ((k, label) in listOf("price" to "Price", "breach" to "Breach", "entry" to "Entry", "value" to "Value", "exits" to "TP/SL")) {
+                        Seg(label, k in fields, ALERTS) { fields = if (k in fields) fields - k else fields + k; p.positionNotifFields = fields }
+                    }
+                }
+                Note("PnL and ▲/▼ side are always in the title. Changes show in the shade within a few seconds.")
+            }
+        }
+        if (allowed) {
+            Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Test", color = C.muted, fontSize = 12.sp, modifier = Modifier.padding(end = 4.dp))
+                Seg("Fill", false, ALERTS) { if (!com.alex.mfppro.data.AlertMonitor.test(ctx, alarm = false)) repo.postMessage("Android blocked the test notification") }
+                Seg("Risk alert", false, RULES) { if (!com.alex.mfppro.data.AlertMonitor.test(ctx, alarm = true)) repo.postMessage("Android blocked the test notification") }
+            }
+            Note("Sound, vibration and lock-screen display are set per kind in Android's settings.")
+            Seg("Sound and vibration…", false, C.muted) { openSystemSettings() }
+        }
+    }
+    // One tap to a sensible setup for every account; the rules pages below fine-tune it.
+    Section("Quick setup", ALERTS, Icons.Filled.NotificationsActive) {
+        var d by remember { mutableStateOf(repo.prefs.notifyDefaults) }
+        val current = d.profile()
+        for (prof in com.alex.mfppro.data.NOTIFY_PROFILES) {
+            val on = current == prof.name
+            Column(
+                Modifier.padding(vertical = 3.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(if (on) ALERTS.copy(alpha = 0.14f) else C.bg)
+                    .border(1.dp, if (on) ALERTS else C.line, RoundedCornerShape(10.dp))
+                    .clickable { d = prof.apply(d); repo.prefs.notifyDefaults = d; ask() }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(prof.name, color = if (on) ALERTS else C.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(prof.about, color = C.muted, fontSize = 11.sp, lineHeight = 15.sp)
+            }
+        }
+        Note(if (current == null) "Your default rules are a custom mix." else "Applies to every account that follows the default.")
     }
     Text("RULES", color = C.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, modifier = Modifier.padding(6.dp, 10.dp, 6.dp, 4.dp))
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(C.panel)) {
@@ -342,7 +434,7 @@ private fun NotifyPage(repo: Repo, ask: () -> Unit, open: (String) -> Unit) {
     Note("Each account follows the default until you give it its own rules or mute it.")
 }
 
-private fun rulesSummary(r: NotifyRules): String = if (r.muted) "Muted" else listOfNotNull(
+private fun rulesSummary(r: NotifyRules): String = if (r.muted) "Muted" else r.profile() ?: listOfNotNull(
     "fills".takeIf { r.fills }, "stops".takeIf { r.stops }, "breach".takeIf { r.breach },
     "room < ${if (r.roomUsd > 0) "$" + r.roomUsd else "${r.roomPct}%"}".takeIf { r.room },
     "margin ${r.marginPct}%".takeIf { r.margin },
@@ -375,6 +467,10 @@ private fun RulesPage(repo: Repo, accountId: String?, ask: () -> Unit, openPnl: 
     Section("Trades", ALERTS, Icons.Filled.NotificationsActive) {
         Toggle("Fills", "Every open and close, with PnL", r.fills, ALERTS) { save(r.copy(fills = it)); if (it) ask() }
         Toggle("Stop loss hit", "Loud alert when a stop fills", r.stops, ALERTS) { save(r.copy(stops = it)); if (it) ask() }
+        // Price alerts belong to the MFP user, not an account: set once, on the default page.
+        if (accountId == null) Toggle("MFP price alerts", "Alerts you set on myfundedperpetuals.com, as they fire", r.priceAlerts, ALERTS) {
+            save(r.copy(priceAlerts = it)); if (it) ask()
+        }
     }
     Section("Risk", RULES, Icons.Filled.NotificationsActive) {
         Toggle("Breach / liquidation", "Account failed, no room left, liquidated", r.breach, RULES) { save(r.copy(breach = it)); if (it) ask() }
@@ -484,6 +580,30 @@ private fun ChartPage(repo: Repo) {
         Toggle("Killzones", "Asia, London, NY AM and London close as a strip along the bottom", kz, DATA) { kz = it; p.killzones = it }
         var sess by remember { mutableStateOf(p.showSessions) }
         Toggle("Market hours", "Tokyo, London and New York along the top, weekend band", sess, DATA) { sess = it; p.showSessions = it }
+
+        // Daily open: when "today" starts for the D/W/M opens, today's % change and pivots.
+        Label("Daily open")
+        var openZone by remember { mutableStateOf(p.dayOpenZone) }
+        var openHour by remember { mutableStateOf(p.dayOpenHour) }
+        fun setOpen(z: String, h: Int) { openZone = z; openHour = h; repo.setDayOpen(z, h) }
+        val presets = listOf(
+            Triple("UTC 00:00", "UTC", 0),
+            Triple("Europe 00:00 (UTC+1/+2)", "Europe/Oslo", 0),
+            Triple("New York 17:00", "America/New_York", 17),
+            Triple("New York 00:00", "America/New_York", 0),
+        )
+        Row(Modifier.padding(top = 6.dp).horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            presets.forEach { (label, z, h) -> Seg(label, openZone == z && openHour == h, DATA) { setOpen(z, h) } }
+        }
+        // Any hour in the chosen zone.
+        Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Hour in ${openZone.substringAfter('/').replace('_', ' ')}", color = C.muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Seg("−", false, DATA) { setOpen(openZone, (openHour + 23) % 24) }
+            Text(String.format(java.util.Locale.US, "%02d:00", openHour), style = num.copy(fontSize = 14.sp, color = C.text), modifier = Modifier.padding(horizontal = 10.dp))
+            Seg("+", false, DATA) { setOpen(openZone, (openHour + 1) % 24) }
+        }
+        val nowOffset = runCatching { java.time.ZonedDateTime.now(java.time.ZoneId.of(openZone)).offset.id.replace("Z", "+00:00") }.getOrDefault("")
+        Note("Summer and winter time follow the zone (now UTC$nowOffset). Venues and MFP use 00:00 UTC for their daily candles; any other time is priced from hourly candles.")
     }
     Section("Liquidation levels", DATA, Icons.Filled.Bolt) {
         Note("Ranges and volume-spike moves → fixed liq levels per leverage. Tap a label ⓘ on the chart for details.")

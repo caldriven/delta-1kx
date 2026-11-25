@@ -60,7 +60,9 @@ fun Ticket(repo: Repo, m: Market, modifier: Modifier) {
     var limit by remember { mutableStateOf(false) }
     var usd by remember { mutableStateOf("") }
     var px by remember(m.marketId) { mutableStateOf("") }
-    val maxLev = m.maxLeverage.toInt().coerceAtLeast(1)
+    // The account's own cap, like the phone: Elite accounts get more on some indices and commodities.
+    val policies by repo.policies.collectAsState()
+    val maxLev = com.alex.mfppro.data.maxLeverage(m, acc?.account, tradeId?.let { policies[it] })
     var lev by remember(m.marketId) { mutableStateOf(repo.prefs.leverage(m.marketId, minOf(10, maxLev)).toString()) }
     var reduce by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }

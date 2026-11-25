@@ -77,8 +77,12 @@ class LimitDraft {
 
 /**
  * One-tap trading for the position-management view. Each button opens a position
- * worth (available balance × leverage), shown on the button, at market or, in Limit
- * mode, as a limit order at the [draft] price. Closing lives on the position card below.
+ * worth a multiple of free margin, shown on the button, at market or, in Limit
+ * mode, as a limit order at the [draft] price. The multiple only picks the size.
+ * Leverage follows the asset: a new position goes in at this pair's own max (pairs
+ * differ), so every button up to that max has the margin it needs; an open position
+ * keeps its own. Nothing is saved, and the order panel's setting is left alone.
+ * Closing lives on the position card below.
  */
 @Composable
 fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
@@ -91,8 +95,15 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
 
     val policies by repo.policies.collectAsStateWithLifecycle()
     val maxLev = com.alex.mfppro.data.maxLeverage(market, acc.account, policies[acc.account.id])
-    // Four sizes: 1x..4x on low-leverage markets, otherwise quarters of the max (10x -> 2.5/5/7.5/10).
-    val presets = if (maxLev <= 4) (1..maxLev).map { it.toDouble() } else (1..4).map { maxLev * it / 4.0 }
+    // "2.5x" on a button only sizes the order, as a multiple of free margin. Leverage adapts to the
+    // asset: its own max for a new position, so the largest button fits; an open position keeps its own.
+    // Never saved: the order panel's leverage setting stays as it is.
+    val marginMode = held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id)
+    val cross = marginMode != "isolated"
+    val lev = held?.leverage?.toInt()?.coerceAtLeast(1) ?: maxLev
+    // Four sizes, quarters of this pair's own max leverage (pairs differ, cross or not): 2x -> 0.5/1/1.5/2,
+    // 20x -> 5/10/15/20. The "x" is only a familiar label for the size, as a multiple of free margin.
+    val presets = (1..4).map { maxLev * it / 4.0 }
     var buySide by remember { mutableStateOf(true) }
     var reduceOnly by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -106,7 +117,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
 
     // Button read-outs refresh every 15 s so they're readable rather than flickering.
     val risk = riskOf(acc, marks)
-    val live = Snap(book?.bids?.firstOrNull()?.px ?: mark, book?.asks?.firstOrNull()?.px ?: mark, risk.dailyRoom, risk.ddRoom, available)
+    val live = Snap(book?.bids?.firstOrNull()?.px ?: mark, book?.asks?.firstOrNull()?.px ?: mark, risk.dailyRoom, risk.ddRoom, available, risk.floorsSame)
     val latest by rememberUpdatedState(live)
     // Re-read at once when the account or its positions change, not only every 15 s.
     val snapKey = Triple(market.marketId, acc.account.id, acc.positions.size)
@@ -123,7 +134,6 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     LaunchedEffect(reducing) { if (reducing && held != null) buySide = !held.isLong }
     // MFP's exposure caps limit what a new order can add.
     val capLeft = if (reduceOnly) null else exposureLeft(policies[acc.account.id], acc, marks, market.marketId)
-    fun effMult(mult: Double) = if (held != null && !reduceOnly) minOf(mult, held.leverage.coerceAtLeast(1.0)) else mult
     // Reduce only needs something to reduce: an open position, traded against.
     fun sideOk(buy: Boolean) = !reduceOnly || (held != null && buy != held.isLong)
 
@@ -134,15 +144,13 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     fun send(buy: Boolean, mult: Double, frac: Double? = null) {
         val px = limitPx ?: (if (buy) book?.asks?.firstOrNull()?.px else book?.bids?.firstOrNull()?.px) ?: mark ?: return
         var size = if (frac != null && held != null) (if (frac >= 1.0) held.size else roundSize(held.size * frac, market))
-            else roundSize(minOf(available * effMult(mult), capLeft ?: Double.MAX_VALUE) / px, market)
+            else roundSize(minOf(available * mult, capLeft ?: Double.MAX_VALUE) / px, market)
         // Reduce only can't exceed the open position.
         if (reduceOnly && held != null) size = minOf(size, held.size)
         val usd = size * px
         if (size < market.minSize || usd < market.minNotional) {
             repo.postMessage("Size below the market minimum (${fmtUsd(market.minNotional)})"); return
         }
-        // An open position keeps its leverage; the multiple only sets the size.
-        val lev = held?.leverage?.toInt() ?: kotlin.math.ceil(mult).toInt()
         val word = (if (limitPx != null) "Limit " else "") + if (buy) "Long" else "Short"
         // A limit at or through the touch fills straight away; the server wants that acknowledged.
         val crosses = limitPx != null && (if (buy) limitPx >= (book?.asks?.firstOrNull()?.px ?: Double.MAX_VALUE) else limitPx <= (book?.bids?.firstOrNull()?.px ?: 0.0))
@@ -152,12 +160,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
             return
         }
         val run: suspend () -> Unit = {
-            if (held == null) repo.prefs.setLeverage(market.marketId, lev)
             repo.placeOrder("$word ${market.symbol}", buildJsonObject {
                 put("client_order_id", "mfppro-" + UUID.randomUUID().toString().take(13))
                 put("account_id", acc.account.id); put("market_id", market.marketId)
                 put("side", if (buy) "buy" else "sell"); put("size", size)
-                put("leverage", lev); put("margin_mode", held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id))
+                put("leverage", lev); put("margin_mode", marginMode)
                 if (reduceOnly) put("reduce_only", true)
                 if (limitPx != null) {
                     put("type", "limit"); put("limit_price", limitPx)
@@ -171,7 +178,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
         // How far price can move against this position before the account hits its floor.
         val breachMove = riskOf(acc, marks).room?.takeIf { usd > 0 }?.let { it / usd * 100 }
         val detail = (if (limitPx != null) "Limit ${if (buy) "buy" else "sell"} at ${fmtPrice(limitPx)}" + (if (crosses) " (crosses the book: fills now)" else if (repo.prefs.postOnly) " · post only" else "") else "Market ${if (buy) "buy" else "sell"}") +
-            " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x" +
+            " ${market.symbol} ≈ ${fmtUsd(usd)} at ${lev}x ${if (cross) "cross" else "isolated"} (margin ≈ ${fmtUsd(usd / lev)})" +
             (if (reduceOnly) ", reduce only" else "") + " on ${accountName(acc)}." +
             (if (!reduceOnly && breachMove != null) String.format(Locale.US, "\nA %.2f%% move against it reaches your drawdown floor.", breachMove) else "")
         // Reducing by the whole position is a full close and follows that setting.
@@ -229,7 +236,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 val net = heldSigned * (1 - f)
                 QuickBtn(
                     if (f >= 1.0) "All" else "${(f * 100).toInt()}%", "$" + fmtCompact(size * (px ?: held.entryPrice)),
-                    sn?.dailyRoom?.let { floorPrice(px, net, it) }, sn?.ddRoom?.let { floorPrice(px, net, it) }, px,
+                    sn?.dailyRoom?.let { floorPrice(px, net, it) }, sn?.ddRoom?.let { floorPrice(px, net, it) }, sn?.floorsSame == true, px,
                     if (buy) C.up else C.down, enabled = !busy && sideOk(buy), modifier = Modifier.weight(1f),
                     empty = if (f >= 1.0) "flat after" else "no floor in reach",
                 ) { send(buy, 1.0, f) }
@@ -241,9 +248,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 if (capped) return@forEach
                 val sn = snap
                 val px = limitPx ?: if (buy) sn?.ask else sn?.bid
-                val want = (sn?.available ?: available) * effMult(mult)
-                capped = capLeft != null && want >= capLeft && mult != presets.first()
-                var usd = minOf(want, capLeft ?: Double.MAX_VALUE)
+                val avail = sn?.available ?: available
+                val want = avail * mult
+                val limit = capLeft ?: Double.MAX_VALUE
+                capped = want >= limit && mult != presets.first()
+                var usd = minOf(want, limit)
                 if (reduceOnly && held != null && px != null) usd = minOf(usd, held.size * px)
                 // Net exposure in this market after the fill decides where each floor is hit.
                 val size = if (px != null && px > 0) usd / px else 0.0
@@ -251,14 +260,23 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 val dll = sn?.dailyRoom?.let { floorPrice(px, net, it) }
                 val dd = sn?.ddRoom?.let { floorPrice(px, net, it) }
                 QuickBtn(
-                    if (capped) "max" else (if (mult % 1.0 == 0.0) mult.toInt().toString() else String.format(Locale.US, "%.1f", mult)) + "x",
+                    if (capped) "max" else // 0.75 stays 0.75, 2.5 stays 2.5, 10 stays 10.
+                        java.math.BigDecimal.valueOf(mult).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString() + "x",
                     (if (reduceOnly && held != null) "≤$" else "$") + fmtCompact(usd),
-                    dll, dd, px,
+                    dll, dd, sn?.floorsSame == true, px,
                     if (buy) C.up else C.down, enabled = !busy && !locked && sideOk(buy), modifier = Modifier.weight(1f),
                 ) { send(buy, mult) }
               }
             }
         }
+        // What the buttons mean: size only; leverage is this asset's (or the open position's).
+        if (!reducing) Text(
+            "Size = × free margin ${fmtUsd(snap?.available ?: available)} · sent at ${lev}x ${if (cross) "cross" else "isolated"}" +
+                (if (held != null) " (position's)" else " (max for this pair)") +
+                // An open position at lower leverage: its margin covers sizes up to that multiple only.
+                if (lev < maxLev) " · above ${lev}x needs more margin" else "",
+            color = C.muted, fontSize = 10.sp,
+        )
         if (locked) Text(repo.prefs.lockMessage(), color = C.down, fontSize = 11.sp)
     }
 
@@ -269,7 +287,7 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     }
 }
 
-private data class Snap(val bid: Double?, val ask: Double?, val dailyRoom: Double?, val ddRoom: Double?, val available: Double)
+private data class Snap(val bid: Double?, val ask: Double?, val dailyRoom: Double?, val ddRoom: Double?, val available: Double, val floorsSame: Boolean = false)
 
 /**
  * Price at which an account with [room] left hits the floor, holding [net]
@@ -298,7 +316,7 @@ private fun safeFloor(v: Double, ref: Double?): Double {
 
 /** Size button: position value first, then the leverage multiple and where the floor would be hit. */
 @Composable
-private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, empty: String = "no floor in reach", onClick: () -> Unit) {
+private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, same: Boolean, ref: Double?, color: Color, enabled: Boolean, modifier: Modifier, empty: String = "no floor in reach", onClick: () -> Unit) {
     // Fixed height with the floor line always reserved, so every button in the row lines up.
     // Value first and largest; the multiple sits beside it small, the floor price under it.
     Column(
@@ -314,7 +332,9 @@ private fun QuickBtn(title: String, value: String, dll: Double?, dd: Double?, re
             Text(title, color = if (enabled) color else C.muted, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(bottom = 1.dp))
         }
         // Whichever floor price is nearer is the one that breaches first.
-        val near = listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "DD" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
+        // Both at one price (DLL and MLL the same before a payout): it's the one loss limit, LL.
+        val near = if (same && dll != null) "LL" to dll
+            else listOfNotNull(dll?.let { "DLL" to it }, dd?.let { "MLL" to it }).minByOrNull { kotlin.math.abs(it.second - (ref ?: it.second)) }
         // The floor is already rounded to a coarse step: show it without trailing zeros (3.235, not 3.23500).
         Text(near?.let { (k, v) -> "$k " + fmtPrice(safeFloor(v, ref)).let { t -> if ('.' in t) t.trimEnd('0').trimEnd('.') else t } } ?: empty, style = num.copy(fontSize = 9.sp, color = if (near != null) C.down else C.muted), maxLines = 1)
     }

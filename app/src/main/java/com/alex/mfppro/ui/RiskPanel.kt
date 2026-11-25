@@ -108,13 +108,18 @@ fun RiskPanel(repo: Repo, modifier: Modifier = Modifier, showExposure: Boolean =
         Column {
         val loaded = acc.account.risk != null
         // Room bars run light orange (all left) to red (none left).
-        run {
+        // DLL and MLL at one level: one line for the loss limit, not the same number twice.
+        if (r.floorsSame) {
+            val full = (if (r.bindingIsDaily) r.dailyAllowance else r.ddAllowance)?.takeIf { it > 0 }
+            val f = r.roomFraction
+            RuleLine("Loss limit left (LL)", r.room, f, androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat()), of = full)
+        } else run {
             val f = r.ddAllowance?.takeIf { it > 0 }?.let { a -> r.ddRoom?.let { (it / a).coerceIn(0.0, 1.0) } }
             RuleLine("Max DD left", r.ddRoom, f, androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat()),
                 empty = if (loaded && r.ddRoom == null && (r.ddAllowance ?: 0.0) <= 0) "off" else "—", of = r.ddAllowance?.takeIf { it > 0 })
         }
         // No daily loss rule on this account: nothing to show.
-        if (!loaded || r.dailyFloor != null || (r.dailyAllowance ?: 0.0) > 0) {
+        if (!r.floorsSame && (!loaded || r.dailyFloor != null || (r.dailyAllowance ?: 0.0) > 0)) {
             val f = r.dailyAllowance?.takeIf { it > 0 }?.let { a -> r.dailyRoom?.let { (it / a).coerceIn(0.0, 1.0) } }
             RuleLine("Daily loss left", r.dailyRoom, f, androidx.compose.ui.graphics.lerp(C.down, ROOM_FULL, (f ?: 1.0).toFloat()),
                 empty = if (loaded && r.dailyRoom == null && (r.dailyAllowance ?: 0.0) <= 0) "off" else "—", of = r.dailyAllowance?.takeIf { it > 0 })
@@ -220,7 +225,8 @@ fun AccountPickerSheet(repo: Repo, onDismiss: () -> Unit) {
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(fmtUsd(r.equity), style = num.copy(fontWeight = FontWeight.SemiBold))
-                    Text("DD left " + fmtUsd(r.room), style = num.copy(fontSize = 11.sp, color = roomColor(r.roomFraction)))
+                    // The floor a loss hits first: LL when DLL and MLL are one, else whichever binds.
+                    Text("${r.bindingLabel} left " + fmtUsd(r.room), style = num.copy(fontSize = 11.sp, color = roomColor(r.roomFraction)))
                 }
                 if (on) Text("  ✓", color = C.accent)
             }

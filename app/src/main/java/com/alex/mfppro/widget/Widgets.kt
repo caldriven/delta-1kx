@@ -238,7 +238,7 @@ object Widgets {
     }
 
     /** Opens the app at a position's manage screen, its close confirmation, a market's chart, or the Dashboard. */
-    private fun link(ctx: Context, host: String, id: String? = null, close: Boolean = false): PendingIntent {
+    internal fun link(ctx: Context, host: String, id: String? = null, close: Boolean = false): PendingIntent {
         val uri = Uri.Builder().scheme(SCHEME).authority(host).apply {
             id?.let { appendPath(it) }
             if (close) appendQueryParameter("do", "close")

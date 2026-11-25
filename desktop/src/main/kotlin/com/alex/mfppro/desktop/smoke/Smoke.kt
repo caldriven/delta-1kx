@@ -16,12 +16,14 @@ import kotlin.system.exitProcess
 
 /**
  * Headless check of the shared core on desktop JVM: loads the public MFP market list and waits
- * for a live BTC price on the market socket. No key, no window, settings in a temp folder.
+ * for a live BTC price on the market socket. Key from FP_API_KEY if set, no window, settings in a temp folder.
  * Run with ./gradlew :desktop:smoke
  */
 fun main(): Unit = runBlocking {
     val repo = desktopRepo(Files.createTempDirectory("delta1kx-smoke").toFile())
     repo.setVisible(true)
+    // MFP requires a live key on the market feed from 1 Dec 2026: FP_API_KEY=fp_live_... (a read-only key is enough).
+    System.getenv("FP_API_KEY")?.takeIf { it.isNotBlank() }?.let { repo.market.setKey(it) }
     val ok = runCatching {
         withTimeout(60_000) {
             val markets = repo.markets.first { it.isNotEmpty() }
@@ -30,6 +32,8 @@ fun main(): Unit = runBlocking {
             repo.market.acquire(Sub("ticks", btc.provider, btc.coin))
             val px = repo.market.marks.first { btc.feedKey in it }[btc.feedKey]
             println("live ${btc.symbol} on ${btc.provider}: $px")
+            // "authenticated" once the client meets MFP's developer-feed rules (key + compression).
+            println("feed auth: ${repo.market.feedAuth.value ?: "no header"}")
             // 24h volume as the stats feed reports it, for the market list's volume column.
             val sample = markets.filter { it.symbol in setOf("BTC", "ETH", "SOL") || it.coin.startsWith("FARTCOIN") }
             sample.forEach { repo.market.acquire(Sub("marketStats", it.provider, it.coin)) }

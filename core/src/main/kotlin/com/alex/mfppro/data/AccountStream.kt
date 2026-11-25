@@ -83,6 +83,18 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?) = size > 500
     }
 
+    /** MFP price alerts as they fire (the event's "alert" object), once per fire_id. */
+    private val _priceAlerts = MutableSharedFlow<JsonObject>(extraBufferCapacity = 16)
+    val priceAlerts = _priceAlerts.asSharedFlow()
+    // A fresh connection can repeat a fire from up to 10 s earlier, and resume replays them.
+    private val seenAlerts = object : LinkedHashMap<String, Unit>(64, 0.75f, false) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?) = size > 200
+    }
+
+    /** Server notices and refusals worth showing once (accounts_truncated, an upgrade error code). */
+    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val notices = _notices.asSharedFlow()
+
     // Ping every 3s; no frame for 8s (or 2.5s after a probe) means the socket is dead.
     init {
         scope.launch(serial) {
@@ -145,18 +157,23 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
         _accounts.value = emptyMap()
     }
 
-    /** Close the socket but keep the resume cursor (app went to background). */
-    fun pause() = scope.launch(serial) {
+    /**
+     * Close the socket but keep the resume cursor (app went to background).
+     * [still] is checked on the stream's own thread, so a pause that races a
+     * later resume (process thawed with both pending) does nothing.
+     */
+    fun pause(still: () -> Boolean = { true }) = scope.launch(serial) {
+        if (!still()) return@launch
         reconnectJob?.cancel()
         gen++
         ws?.close(1000, "background"); ws = null
         if (key != null) _conn.value = Conn.Reconnecting
     }
 
-    /** Called when the app returns to the foreground. */
-    fun resume() = scope.launch(serial) {
+    /** Called when the app returns to the foreground; [fresh] forces a new socket (been away a while). */
+    fun resume(fresh: Boolean = false) = scope.launch(serial) {
         if (key == null || _conn.value == Conn.AuthFailed) return@launch
-        if (ws == null || System.currentTimeMillis() - lastFrameAt > SILENCE_MS) {
+        if (fresh || ws == null || System.currentTimeMillis() - lastFrameAt > SILENCE_MS) {
             attempt = 0
             reconnectNow()
         } else probe()
@@ -178,29 +195,46 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
                 scope.launch(serial) { if (myGen == gen) handle(text) }
             }
 
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // Answer the server's close so onClosed follows with its code (1012, 4001, 4008, 4013...).
+                webSocket.close(1000, null)
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                scope.launch(serial) { if (myGen == gen) onDrop(code, null) }
+                scope.launch(serial) { if (myGen == gen) onDrop(code, null, reason) }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "failure ${response?.code}: ${t.message}")
-                scope.launch(serial) { if (myGen == gen) onDrop(null, response) }
+                // A refused upgrade carries {"error":{"code","message"}} like the REST API.
+                val err = response?.let { r -> runCatching { r.body?.string() }.getOrNull() }
+                    ?.let { runCatching { restJson.parseToJsonElement(it).jsonObject.obj("error")?.str("code") }.getOrNull() }
+                Log.w(TAG, "failure ${response?.code ?: ""} ${err ?: ""}: ${t.message}")
+                scope.launch(serial) { if (myGen == gen) onDrop(null, response, err) }
             }
         })
     }
 
-    private fun onDrop(closeCode: Int?, upgrade: Response?) {
+    private fun onDrop(closeCode: Int?, upgrade: Response?, reason: String? = null) {
         ws = null
         val status = upgrade?.code
+        // 401: bad, revoked or other-environment key; 403: sandbox access lapsed; 4001: revoked mid-stream.
+        // None of these heal by retrying the same key.
         if (closeCode == 4001 || status == 401 || status == 403) {
             _conn.value = Conn.AuthFailed
+            _notices.tryEmit(when {
+                reason == "sandbox_access_expired" -> "Sandbox access expired: it needs a challenge purchase in the last 90 days"
+                key?.startsWith("fp_test_") == true -> "Account stream refused the sandbox key${reason?.let { " ($it)" } ?: ""}"
+                else -> "Account stream refused the API key${reason?.let { " ($it)" } ?: ""}: check it in Settings"
+            })
             return
         }
         if (closeCode == 4008) streamId = null // too slow: take a fresh snapshot
         // Dropped mid-snapshot: a resume would never finish it, so start over with a fresh one.
         if (building != null) { building = null; streamId = null }
         val retryAfter = upgrade?.header("Retry-After")?.toLongOrNull()?.times(1000)
-        val backoff = retryAfter ?: (minOf(30_000L, 500L shl minOf(attempt, 6)) + Random.nextLong(0, 500))
+        val base = minOf(30_000L, 500L shl minOf(attempt, 6))
+        // 429/503 name a wait; add jitter so a restart doesn't bring every client back at once.
+        val backoff = (retryAfter ?: base) + Random.nextLong(0, 1_000)
         attempt++
         _conn.value = Conn.Reconnecting
         reconnectJob = scope.launch(serial) {
@@ -229,12 +263,25 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             "heartbeat" -> _upstream.value = f["upstream_connected"]?.jsonPrimitive?.booleanOrNull ?: true
             "reconnect" -> reconnectNow()
             "error" -> Log.w(TAG, "error frame: $text")
+            "notice" -> {
+                Log.w(TAG, "notice: $text")
+                if (f.str("code") == "accounts_truncated")
+                    _notices.tryEmit("This API key reaches more accounts than one stream follows: use a key limited to the accounts you trade")
+            }
+            "price_alert" -> {
+                val a = f.obj("alert") ?: return
+                val id = f.str("alert_id") ?: a.str("alert_id") ?: a.str("id")
+                val fire = f.str("fire_id") ?: id?.let { "$it|${a.str("triggered_at") ?: f.str("time")}" }
+                // Nothing to dedupe on: pass it on rather than risk dropping every later one.
+                if (fire == null || seenAlerts.put(fire, Unit) == null) _priceAlerts.tryEmit(a)
+            }
             "order" -> mutate(f) { s ->
                 val o = f.obj("order")?.let { decode<Order>(it) } ?: return@mutate s
-                when (f.str("event")) {
-                    "filled", "canceled", "rejected", "expired" -> s.copy(orders = s.orders - o.id)
-                    else -> s.copy(orders = s.orders + (o.id to o))
-                }
+                // A modify can come back as a new order that replaces the old one: drop the old id too.
+                val replaced = listOfNotNull(f.str("replaced_order_id"), f.obj("order")?.str("replaced_order_id"), f.obj("order")?.str("replaces_order_id"))
+                val kept = s.orders - replaced.toSet()
+                if (f.str("event") in TERMINAL || o.status in TERMINAL) s.copy(orders = kept - o.id)
+                else s.copy(orders = kept + (o.id to o))
             }
             "position" -> mutate(f) { s ->
                 val p = f.obj("position")?.let { decode<Position>(it) } ?: return@mutate s
@@ -346,6 +393,8 @@ class AccountStream(private val http: OkHttpClient, private val scope: Coroutine
             .onFailure { Log.w(TAG, "decode ${T::class.simpleName}: ${it.message}") }
             .getOrNull()
 }
+
+private val TERMINAL = setOf("filled", "canceled", "cancelled", "rejected", "expired", "replaced", "closed", "done")
 
 internal fun JsonObject.str(k: String) = (this[k] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
 internal fun JsonObject.long(k: String) = (this[k] as? kotlinx.serialization.json.JsonPrimitive)?.longOrNull

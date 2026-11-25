@@ -95,6 +95,16 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     // Candle and OI series are long: only the keys that changed are copied on a flush.
     private val dirtyCandles = HashSet<String>()
     private val dirtyOi = HashSet<String>()
+    // Data-flow watchdog state (see checkStale).
+    private var staleCheckAt = 0L
+    private var lastAnyEventAt = 0L
+    private val feedEventAt = HashMap<String, Long>()
+    private val subSentAt = HashMap<Sub, Long>()
+    private var connectedAt = 0L
+    private var staleLoggedAt = 0L
+    private var staleReconnectAt = 0L
+    /** Resubscribes in a row that brought no data, per feed (see checkStale). */
+    private val quietResubs = HashMap<Sub, Int>()
 
     private val refs = HashMap<Sub, Int>()
     private val activeIds = HashMap<Sub, Int>()
@@ -113,6 +123,36 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     private var paused = false
     private var attempt = 0
     private var reconnectJob: Job? = null
+
+    // ---- developer-feed rules: API key, compression, 5 sockets per key, 30 admissions a minute ----
+    /** Live API key sent as Bearer on the upgrade; MFP refuses the feed without one once enforced. */
+    private var key: String? = null
+    /**
+     * Why the feed is refused until something changes (bad or missing key, no compression).
+     * No reconnect loop while set; a new key clears it.
+     */
+    private val _blocked = MutableStateFlow<String?>(null)
+    val blocked = _blocked.asStateFlow()
+    /** X-Developer-Feed-Auth from the last upgrade: "authenticated" when this client meets every rule. */
+    private val _feedAuth = MutableStateFlow<String?>(null)
+    val feedAuth = _feedAuth.asStateFlow()
+    /** Subscriptions the server turned down (bad filter, over a limit): not re-sent until released or reconnected. */
+    private val rejected = HashMap<Sub, String>()
+    /** The socket the server is draining: still read for prices until its replacement has its snapshot. */
+    private var draining: WebSocket? = null
+    private var drainJob: Job? = null
+    /** Upgrade times in the last minute, to stay under MFP's 30 a minute (burst 10). */
+    private val admissions = ArrayDeque<Long>()
+    /** Last ping reply's upstreamReadAgeMs: negative = MFP's own feed is down, null = unknown. */
+    private var upstreamAgeMs: Long? = null
+
+    /** Set or clear the API key; reconnects with it when the feed is in use. */
+    fun setKey(k: String?) = scope.launch(serial) {
+        if (k == key) return@launch
+        key = k
+        _blocked.value = null
+        if (!paused && refs.isNotEmpty()) { attempt = 0; connect() }
+    }
 
     private var lastFrameAt = 0L
     private var lastPingAt = 0L
@@ -137,6 +177,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
     private fun watchdog() {
         val socket = ws ?: return
         val now = System.currentTimeMillis()
+        if (_live.value && now - staleCheckAt >= 1_000) { staleCheckAt = now; if (checkStale(now)) return }
         val probeFailed = probeAt > 0 && lastFrameAt < probeAt && now - probeAt > 2_500
         if (probeFailed || now - lastFrameAt > 8_000) {
             Log.w(TAG, "socket silent, reconnecting")
@@ -152,6 +193,44 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         }
     }
 
+    /**
+     * Pongs prove the socket is up, not that data still flows. A price feed
+     * (ticks/books) that has gone quiet is re-subscribed; if every feed is quiet
+     * the socket is replaced. Returns true when it reconnected.
+     */
+    private fun checkStale(now: Long): Boolean {
+        val price = activeIds.keys.filter { it.channel == "ticks" || it.channel == "books" }
+        if (price.isEmpty()) return false
+        // A feed that stays quiet after a resubscribe is likely a closed market (stocks at the weekend):
+        // wait twice as long each time, up to 5 minutes, instead of churning it every 20 s.
+        fun quietAfter(s: Sub): Long {
+            if ((feedEventAt[s.feed] ?: 0) > (subSentAt[s] ?: 0)) quietResubs.remove(s)
+            return minOf(300_000L, 20_000L shl minOf(quietResubs[s] ?: 0, 4))
+        }
+        val quiet = price.filter { now - maxOf(feedEventAt[it.feed] ?: 0, subSentAt[it] ?: now) > quietAfter(it) }
+        // Replacing the whole socket at most every 2 minutes: when only closed markets are open, a new
+        // socket gets the same silence.
+        if (quiet.size == price.size && now - maxOf(lastAnyEventAt, connectedAt) > 30_000 && now - staleReconnectAt > 120_000) {
+            staleReconnectAt = now
+            // MFP's own upstream is down: a new socket would get the same silence, and burn admissions.
+            val up = upstreamAgeMs
+            if (up != null && (up < 0 || up > 30_000)) {
+                if (now - lastAnyEventAt > 30_000 && now - staleLoggedAt > 60_000) { staleLoggedAt = now; Log.w(TAG, "no market data: MFP upstream unavailable (${up}ms)") }
+                return false
+            }
+            Log.w(TAG, "no market data for 30s, reconnecting")
+            _live.value = false
+            connect()
+            return true
+        }
+        for (sub in quiet) {
+            quietResubs[sub] = (quietResubs[sub] ?: 0) + 1
+            Log.w(TAG, "feed ${sub.feed} ${sub.channel} quiet, resubscribing")
+            activeIds.remove(sub)?.let { id -> idToSub.remove(id); ws?.send("""{"op":"unsub","id":$id}""") }
+            send(sub)
+        }
+        return false
+    }
     fun probe() = scope.launch(serial) {
         val socket = ws ?: return@launch
         probeAt = System.currentTimeMillis(); lastPingAt = probeAt
@@ -212,6 +291,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         val n = (refs[sub] ?: return@launch) - 1
         if (n > 0) { refs[sub] = n; return@launch }
         refs.remove(sub)
+        rejected.remove(sub)
         activeIds.remove(sub)?.let { id ->
             idToSub.remove(id)
             ws?.send("""{"op":"unsub","id":$id}""")
@@ -225,20 +305,26 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         }
     }
 
-    fun pause() = scope.launch(serial) {
+    /** [still] is checked on the stream thread: a pause that lost a race with resume does nothing. */
+    fun pause(still: () -> Boolean = { true }) = scope.launch(serial) {
+        if (!still()) return@launch
         paused = true
         reconnectJob?.cancel()
         gen++
         ws?.close(1000, "background"); ws = null
+        closeDraining()
         _live.value = false
     }
 
-    fun resume() = scope.launch(serial) {
+    /** Back in the foreground. [fresh] replaces the socket: after a while away its data is stale or backed up. */
+    fun resume(fresh: Boolean = false) = scope.launch(serial) {
         paused = false
+        // A refusal may have been passing (a revoked-then-restored key, a CDN hiccup): try once more on return.
+        _blocked.value = null
         // A socket that went quiet while the app was frozen is reconnected now rather than
         // after the probe times out, so the screen isn't showing old prices for seconds.
         val stale = System.currentTimeMillis() - lastFrameAt > 8_000
-        if (refs.isNotEmpty() && (ws == null || stale)) { attempt = 0; connect() } else if (ws != null) probe()
+        if (refs.isNotEmpty() && (ws == null || stale || fresh)) { attempt = 0; connect() } else if (ws != null) probe()
     }
 
     /**
@@ -248,6 +334,7 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
      */
     fun refresh() = scope.launch(serial) {
         paused = false
+        _blocked.value = null
         if (refs.isEmpty()) return@launch
         val socket = ws
         if (socket == null || !_live.value || System.currentTimeMillis() - lastFrameAt > 4_000) { attempt = 0; connect(); return@launch }
@@ -255,54 +342,150 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         for (sub in refs.keys.toList()) if (sub.channel == "candles" && sub.interval != null) loadChartHistory(sub)
     }
 
-    private fun connect() {
+    /**
+     * Open a socket and subscribe everything in [refs]. [keepOld]: the server is draining the
+     * current one, so it stays open (and is read for prices) until the replacement has its snapshot.
+     */
+    private fun connect(keepOld: Boolean = false) {
         reconnectJob?.cancel()
+        if (_blocked.value != null) { ws?.cancel(); ws = null; _live.value = false; return }
+        // Every caller reconnects for a reason, but a flapping feed must not burn MFP's
+        // 30 admissions a minute (burst 10): past 8 in a minute, wait for the oldest to age out.
+        val now = System.currentTimeMillis()
+        while (admissions.isNotEmpty() && now - admissions.first() > 60_000) admissions.removeFirst()
+        // A server drain is MFP's own request and always gets its replacement.
+        if (!keepOld && admissions.size >= 8) {
+            val wait = admissions.first() + 60_000 - now + Random.nextLong(0, 1_000)
+            Log.w(TAG, "reconnecting too often, next try in ${wait / 1000}s")
+            // A socket that still works keeps running meanwhile; only a dead one is dropped.
+            if (ws == null || !_live.value) { gen++; ws?.cancel(); ws = null; _live.value = false }
+            reconnectJob = scope.launch(serial) { delay(wait); connect() }
+            return
+        }
+        admissions.addLast(now)
         gen++
-        ws?.cancel()
+        if (keepOld) draining = ws
+        else { ws?.cancel(); draining?.cancel(); draining = null; drainJob?.cancel() }
         val myGen = gen
-        lastFrameAt = System.currentTimeMillis()
-        activeIds.clear(); idToSub.clear()
-        oneShots.values.forEach { it.complete(null) }; oneShots.clear()
-        ws = http.newWebSocket(Request.Builder().url(URL).build(), object : WebSocketListener() {
+        lastFrameAt = now
+        // IDs and sub mappings belong to one connection. On a drain the old socket still answers the
+        // requests it was sent (ids keep counting up, so they never clash with the new socket's).
+        activeIds.clear(); idToSub.clear(); rejected.clear()
+        if (!keepOld) { pingSent.clear(); oneShots.values.forEach { it.complete(null) }; oneShots.clear() }
+        upstreamAgeMs = null
+        // OkHttp offers permessage-deflate on every upgrade by itself, which MFP requires.
+        val req = Request.Builder().url(URL).apply { key?.let { header("Authorization", "Bearer $it") } }.build()
+        ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                val auth = response.header("X-Developer-Feed-Auth")
+                val enforceAt = response.header("X-Developer-Feed-Enforce-At")
+                val ext = response.header("Sec-WebSocket-Extensions")
                 scope.launch(serial) {
                     if (myGen != gen) return@launch
                     attempt = 0
+                    connectedAt = System.currentTimeMillis()
+                    _feedAuth.value = auth
+                    // Anything but "authenticated" is the error this socket will get once MFP enforces the rules.
+                    if (auth != null && auth != "authenticated") Log.w(TAG, "feed auth: $auth (enforced from ${enforceAt ?: "a later date"}), extensions: $ext")
+                    else Log.i(TAG, "connected, feed auth: ${auth ?: "n/a"}, extensions: ${ext ?: "none"}")
                     _live.value = true
                     refs.keys.forEach { send(it) }
+                    // The replacement's snapshots are arriving now; close the draining socket shortly after.
+                    if (draining != null) drainJob = scope.launch(serial) { delay(5_000); closeDraining() }
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                scope.launch(serial) { if (myGen == gen) handle(text) }
+                scope.launch(serial) {
+                    if (myGen == gen) handle(text)
+                    else if (webSocket === draining) handleDraining(text)
+                }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // Complete the close handshake; onClosed follows with the same code.
+                webSocket.close(1000, null)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                scope.launch(serial) { if (myGen == gen) onDrop(null) }
+                scope.launch(serial) {
+                    if (webSocket === draining) draining = null
+                    else if (myGen == gen) onDrop(null, code, reason)
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "failure ${response?.code}: ${t.message}")
-                scope.launch(serial) { if (myGen == gen) onDrop(response) }
+                // A refused upgrade carries {"error":{"code","message"}} like the REST API.
+                val err = response?.let { r -> runCatching { r.body?.string() }.getOrNull() }
+                    ?.let { runCatching { restJson.parseToJsonElement(it).jsonObject.obj("error")?.str("code") }.getOrNull() }
+                Log.w(TAG, "failure ${response?.code ?: ""} ${err ?: ""}: ${t.message}")
+                scope.launch(serial) {
+                    if (webSocket === draining) draining = null
+                    else if (myGen == gen) onDrop(response, null, err)
+                }
             }
         })
     }
 
-    private fun onDrop(upgrade: Response?) {
+    private fun closeDraining() {
+        drainJob?.cancel()
+        draining?.close(1000, "replaced")
+        draining = null
+    }
+
+    /**
+     * Frames from a socket being drained: market events to bridge the gap until the replacement is
+     * live, and answers to history requests it was already sent.
+     */
+    private fun handleDraining(text: String) {
+        val f = runCatching { restJson.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        when (f.str("op")) {
+            "events" -> f.arr("events").forEach { (it as? JsonObject)?.let(::onEvent) }
+            "res" -> f.long("id")?.toInt()?.let { id -> pingSent.remove(id); oneShots.remove(id)?.complete(f["result"]) }
+            "err" -> f.long("id")?.toInt()?.let { oneShots.remove(it)?.complete(null) }
+        }
+    }
+
+    /**
+     * The socket went away. [upgrade] is set when the upgrade itself was refused, [closeCode] when an
+     * open socket was closed; [reason] is MFP's error code for either. Key, compression and bad-request
+     * errors are permanent until the key changes, so they stop here instead of looping.
+     */
+    private fun onDrop(upgrade: Response?, closeCode: Int?, reason: String?) {
         ws = null
         _live.value = false
+        val status = upgrade?.code
+        val permanent = when {
+            status == 400 || closeCode == 4003 -> "MFP refused the feed: ${reason ?: "compression_required"} (permessage-deflate)"
+            status == 401 || status == 403 || closeCode == 4001 || closeCode == 4002 ->
+                if (key == null || reason == "api_key_required") "Market data needs an API key: add a live key (fp_live_…) in Settings"
+                else "Market data refused the API key (${reason ?: "invalid_api_key"}): use a live read-only or trading key"
+            else -> null
+        }
+        if (permanent != null) {
+            Log.e(TAG, permanent)
+            _blocked.value = permanent
+            reconnectJob?.cancel()
+            return
+        }
         if (paused || refs.isEmpty()) return
         val retryAfter = upgrade?.header("Retry-After")?.toLongOrNull()?.times(1000)
-        val backoff = retryAfter ?: (minOf(30_000L, 500L shl minOf(attempt, 6)) + Random.nextLong(0, 500))
+        // 5 sockets per key: another device or window holds them. Wait a while rather than hammer.
+        val tooMany = closeCode == 4029 || reason == "too_many_connections"
+        val base = minOf(30_000L, 500L shl minOf(attempt, 6))
+        val backoff = maxOf(retryAfter ?: 0L, if (tooMany) 60_000L else base) + Random.nextLong(0, 1_000)
+        if (tooMany) Log.w(TAG, "too many market sockets on this key (max 5), retrying in ${backoff / 1000}s")
         attempt++
         reconnectJob = scope.launch(serial) { delay(backoff); connect() }
     }
 
     private fun send(sub: Sub) {
         val socket = ws ?: return
+        if (sub in rejected) return
         val id = nextId++
         activeIds[sub] = id
         idToSub[id] = sub
+        subSentAt[sub] = System.currentTimeMillis()
         val payload = buildJsonObject {
             put("symbols", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(sub.coin)) })
             put("providers", buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive(sub.provider)) })
@@ -399,6 +582,8 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 val id = f.long("id")?.toInt() ?: return
                 // Ping replies carry the server's time: keep the clock offset for UTC day boundaries.
                 pingSent.remove(id)?.let { sent ->
+                    // How long since MFP's own upstream heard anything; absent = unknown.
+                    upstreamAgeMs = f.long("upstreamReadAgeMs")
                     val server = f.long("result") ?: return
                     val now = System.currentTimeMillis()
                     ServerClock.offset = server - (sent + now) / 2
@@ -411,10 +596,20 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
                 activeIds.remove(sub)
                 if (refs.containsKey(sub)) send(sub)
             }
-            "draining" -> connect()
-            "sub_err", "err" -> {
+            // Server is replacing this socket: open the replacement first, then let this one go.
+            "draining" -> if (draining == null) { Log.i(TAG, "server draining, opening a replacement"); connect(keepOld = true) }
+            "sub_err" -> {
+                // A rejected filter or a full connection (256 subs, 64 leases): don't re-send it on every
+                // stale check. It is tried again after a release or on the next connection.
+                val sub = f.long("id")?.toInt()?.let { idToSub.remove(it) }
+                val err = f.obj("error")
+                val why = err?.str("reason") ?: err?.str("code") ?: err?.str("message") ?: "rejected"
+                if (sub != null) { activeIds.remove(sub); rejected[sub] = why }
+                Log.w(TAG, "subscription refused ${sub?.channel ?: ""} ${sub?.feed ?: ""}: $why")
+            }
+            "err" -> {
                 f.long("id")?.toInt()?.let { oneShots.remove(it)?.complete(null) }
-                Log.w(TAG, "server error: $text")
+                Log.w(TAG, "request failed: $text")
             }
         }
     }
@@ -423,6 +618,9 @@ class MarketStream(private val http: OkHttpClient, private val scope: CoroutineS
         val provider = e.str("provider") ?: return
         val coin = e.str("symbol") ?: return
         val key = feedKey(provider, coin)
+        val now = System.currentTimeMillis()
+        lastAnyEventAt = now
+        if (e.str("type") == "tick" || e.str("type") == "book") feedEventAt[key] = now
         when (e.str("type")) {
             "tick" -> if (e.str("kind") == "mark" && e.dbl("price")?.also { venueBuf[key] = it; dirty += "vmarks" } != null &&
                 realtime && System.currentTimeMillis() - (bookMidAt[key] ?: 0) < 3_000) {

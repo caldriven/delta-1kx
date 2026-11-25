@@ -83,6 +83,11 @@ class Repo(val prefs: Prefs) {
     val visible = _visible.asStateFlow()
 
     init {
+        Opens.configure(prefs.dayOpenZone, prefs.dayOpenHour)
+        // The market feed needs the API key too (Bearer on the upgrade); say so once when MFP refuses it.
+        market.setKey(_apiKey.value)
+        scope.launch { market.blocked.collect { it?.let(::postMessage) } }
+        scope.launch { account.notices.collect(::postMessage) }
         loadMarkets()
         _apiKey.value?.let { account.start(it) }
         trackPositionMarks()
@@ -259,7 +264,7 @@ class Repo(val prefs: Prefs) {
      */
     suspend fun setTpSl(
         p: Position, tp: Double?, sl: Double?, label: String = "TP/SL ${p.symbol}",
-        tpExec: String? = null, slExec: String? = null,
+        tpExec: String? = null, slExec: String? = null, retried: Boolean = false,
     ): TradeResult {
         val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
         val all = exitsOf(p)
@@ -295,10 +300,11 @@ class Repo(val prefs: Prefs) {
             if (price == null) {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
             } else if (keep != null) {
-                // Unchanged (e.g. the other leg is being removed): leave it out of the batch.
-                if (keep.exitPrice != price || keep.size != p.size)
-                    ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", p.size) }
-                existing.filter { it !== keep }.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
+                // One exit follows the whole position. With several (partial TPs) only this one moves,
+                // keeping its own size, and the others stay where they are.
+                val size = if (existing.size == 1) p.size else keep.size
+                if (keep.exitPrice != price || keep.size != size)
+                    ops += buildJsonObject { put("kind", "modify"); put("order_id", keep.id); put("price", price); put("size", size) }
             } else {
                 existing.forEach { ops += buildJsonObject { put("kind", "cancel"); put("order_id", it.id) } }
                 placed[group] = ops.size
@@ -318,6 +324,10 @@ class Repo(val prefs: Prefs) {
             // Older limit exits may be known to MFP by their trigger rather than their limit: try that once.
             if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
                 r = trade.replaceExits(key, p, current, ops, armPrice = true)
+            // Still stale: the app's copy of the exits is out of date (a missed modify/replace event).
+            // Load them fresh and build the batch again from what MFP actually has.
+            if (r is TradeResult.Rejected && (r as TradeResult.Rejected).code == "stale_snapshot" && !retried && freshExits(key, p) != null)
+                return setTpSl(p.fresh(), tp, sl, label, tpExec, slExec, retried = true)
             if (r is TradeResult.Rejected) return report(label, r)
         }
         // Old resting TPs go before the new one is placed, so reduce-only size never overlaps.
@@ -344,6 +354,75 @@ class Repo(val prefs: Prefs) {
             })
         }
         return report(label, r)
+    }
+
+    /** The position as the stream has it now (size may have changed since [this] was captured). */
+    private fun Position.fresh() = account.accounts.value[accountId]?.positions?.get(id) ?: this
+
+    /** Pull working orders from REST into the stream state; returns the position's exits, or null on failure. */
+    private suspend fun freshExits(key: String, p: Position): List<Order>? {
+        val at = System.currentTimeMillis()
+        val list = runCatching { rest.workingOrders(key, p.accountId) }.getOrNull() ?: return null
+        // A full page may be cut off (MFP pages at 100): never drop orders on the strength of it.
+        if (list.size < 100) account.reconcileOrders(p.accountId, list, at).join()
+        return exitsOf(p)
+    }
+
+    /** Move one TP/SL order to [price], leaving every other exit (and its size) as it is. */
+    suspend fun moveExit(p: Position, o: Order, price: Double): TradeResult {
+        // A resting limit TP is a plain reduce-only limit, not an exit order: exit-order edits can't move it.
+        if (o.isRestingExit) return moveLimit(p, o, price)
+        val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
+        val label = "${if (o.exitGroup == "tp") "TP" else "SL"} ${p.symbol}"
+        val px = market(p.marketId)?.let { com.alex.mfppro.ui.snapTick(price, it) } ?: price
+        fun op(id: String, size: Double) = buildJsonObject { put("kind", "modify"); put("order_id", id); put("price", px); put("size", size) }
+        // Only real exit orders go in the batch's snapshot; resting limit TPs would make MFP refuse it.
+        val current = exitsOf(p).filter { !it.isRestingExit }
+        var r = trade.replaceExits(key, p, current, listOf(op(o.id, o.size)))
+        if (r is TradeResult.Rejected && r.code == "stale_snapshot" && current.any { it.triggerPrice != null && it.limitPrice != null })
+            r = trade.replaceExits(key, p, current, listOf(op(o.id, o.size)), armPrice = true)
+        if (r is TradeResult.Rejected && r.code == "stale_snapshot") {
+            // Reload from MFP; the order may have been replaced under a new id at the same price.
+            val fresh = freshExits(key, p)?.filter { !it.isRestingExit }
+            val again = fresh?.firstOrNull { it.id == o.id } ?: fresh?.firstOrNull { it.exitGroup == o.exitGroup && it.exitPrice == o.exitPrice }
+            if (fresh != null && again != null) r = trade.replaceExits(key, p.fresh(), fresh, listOf(op(again.id, again.size)))
+        }
+        return report(label, r)
+    }
+
+    /** Reduce-only limit orders working against [p] (limit take-profits placed as plain limits). */
+    fun reduceLimitsOf(p: Position): List<Order> =
+        account.accounts.value[p.accountId]?.orders?.values.orEmpty().filter {
+            it.exitGroup == null && it.reduceOnly && it.limitPrice != null && it.triggerPrice == null &&
+                (it.marketId == p.marketId || it.symbol == p.symbol) && (it.side == "sell") == p.isLong
+        }
+
+    /**
+     * Move a reduce-only limit to [price]. Modified in place first, so the position is never without
+     * it; only if MFP won't modify it is it cancelled and placed again. Never marketable: a price
+     * through the book is refused rather than filled at market.
+     */
+    suspend fun moveLimit(p: Position, o: Order, price: Double): TradeResult {
+        val key = requireKey() ?: return TradeResult.Rejected("no_key", "No API key")
+        val label = "Limit ${p.symbol} → ${"%.6g".format(java.util.Locale.US, price)}"
+        val px = market(p.marketId)?.let { com.alex.mfppro.ui.snapTick(price, it) } ?: price
+        val m = trade.modifyOrder(key, o.id, px)
+        if (m !is TradeResult.Rejected) return report(label, m)
+        if (m.code == "network") return report(label, m)
+        val c = trade.cancelOrder(key, o.id)
+        val gone = c is TradeResult.Rejected && (c.code == "not_found" || c.code == "order_not_found")
+        if (c is TradeResult.Rejected && !gone) return report(label, c)
+        // Gone already: it may just have filled. Size from the position as it is now, or stop if it's closed.
+        val now = if (gone) account.accounts.value[p.accountId]?.positions?.get(p.id) ?: return report(label, c) else p
+        val size = minOf(o.size, now.size)
+        return placeOrder(label, buildJsonObject {
+            put("client_order_id", "mfppro-" + java.util.UUID.randomUUID().toString().take(13))
+            put("account_id", p.accountId); put("market_id", p.marketId)
+            put("side", o.side); put("size", roundSize(size, market(p.marketId)))
+            put("leverage", o.leverage ?: now.leverage); put("margin_mode", now.marginMode)
+            put("reduce_only", true)
+            put("type", "limit"); put("limit_price", px)
+        })
     }
 
     /** Move the stop loss to the entry price, keeping any take profit. */
@@ -395,12 +474,20 @@ class Repo(val prefs: Prefs) {
             if (st.account.status == "active" && (busy || st.account.id == _tradeAccount.value))
                 refreshAccount(key, st.account.id, crossCheck = true)
         }
+        // Exits and limits often settle a moment later on the venue; check the orders once more.
+        delay(3_000)
+        for (st in account.accounts.value.values) {
+            val busy = st.positions.isNotEmpty() || st.orders.isNotEmpty()
+            if (st.account.status == "active" && (busy || st.account.id == _tradeAccount.value))
+                refreshOrders(key, st.account.id)
+        }
     }
 
     fun setApiKey(key: String?) {
         prefs.apiKey = key
         _apiKey.value = key
         if (key == null) account.stop() else account.start(key)
+        market.setKey(key)
         startRiskRefresh()
     }
 
@@ -418,6 +505,7 @@ class Repo(val prefs: Prefs) {
     private val _refreshTick = MutableStateFlow(0)
     val refreshTick = _refreshTick.asStateFlow()
     @Volatile private var backgroundAt = 0L
+    @Volatile private var foreground = true
 
     /**
      * Pull everything fresh without restarting the app: a new account snapshot (no resume),
@@ -452,13 +540,18 @@ class Repo(val prefs: Prefs) {
     }
 
     private fun onForeground() {
+        foreground = true
         pauseJob?.cancel()
         val away = if (backgroundAt > 0) System.currentTimeMillis() - backgroundAt else 0
         backgroundAt = 0
         // After a minute or more away the resume cursor and REST data are likely stale: start clean.
         if (away > STALE_AFTER_MS) { refreshAll(); return }
-        account.resume()
-        market.resume()
+        // Away past the grace period the sockets were closed (or the frozen process left them backed up):
+        // open fresh ones. A shorter switch keeps them and just probes, so app switching doesn't burn
+        // MFP's connection admissions.
+        val fresh = away > BACKGROUND_GRACE_MS
+        account.resume(fresh = fresh)
+        market.resume(fresh = fresh)
         startRiskRefresh()
         if (_markets.value.isEmpty()) loadMarkets()
     }
@@ -468,13 +561,15 @@ class Repo(val prefs: Prefs) {
     fun setBackgroundMonitoring(on: Boolean) { monitoring = on; if (on) onForeground() }
 
     private fun onBackground() {
+        foreground = false
         backgroundAt = System.currentTimeMillis()
         if (monitoring) return
         riskJob?.cancel()
         pauseJob = scope.launch {
             delay(BACKGROUND_GRACE_MS)
-            account.pause()
-            market.pause()
+            // Checked again on each stream's thread: a thawed process can run this after onForeground.
+            account.pause { !foreground }
+            market.pause { !foreground }
         }
     }
 
@@ -619,10 +714,14 @@ class Repo(val prefs: Prefs) {
         if (acc.status == "active" && crossCheck) {
             val asked = System.currentTimeMillis()
             runCatching { rest.positions(key, id) }.onSuccess { account.reconcilePositions(id, it, asked) }
-            // A full page may be cut off (MFP pages at 100): never drop orders on the strength of it.
-            runCatching { rest.workingOrders(key, id) }.onSuccess { if (it.size < 100) account.reconcileOrders(id, it, asked) }
-                .onFailure { Log.w(TAG, "orders $id: ${it.message}") }
+            refreshOrders(key, id, asked)
         }
+    }
+
+    /** REST cross-check of working orders. A full page may be cut off (MFP pages at 100): never drop orders on the strength of it. */
+    private suspend fun refreshOrders(key: String, id: String, asked: Long = System.currentTimeMillis()) {
+        runCatching { rest.workingOrders(key, id) }.onSuccess { if (it.size < 100) account.reconcileOrders(id, it, asked) }
+            .onFailure { Log.w(TAG, "orders $id: ${it.message}") }
     }
 
     // ---- market overview ----------------------------------------------
@@ -633,6 +732,14 @@ class Repo(val prefs: Prefs) {
     val extras = _extras.asStateFlow()
     private var extrasLoadedAt = 0L
     private var extrasJob: Job? = null
+
+    /** New daily open time: apply it and reload the opens behind every "today" change. */
+    fun setDayOpen(zoneId: String, hour: Int) {
+        prefs.dayOpenZone = zoneId; prefs.dayOpenHour = hour
+        Opens.configure(zoneId, hour)
+        extrasJob?.cancel(); extrasLoadedAt = 0
+        loadOverviewExtras()
+    }
 
     /** Asset classes (cached), then 7-day change and 24h OI change for every market, every 15 min at most. */
     fun loadOverviewExtras() {
@@ -650,11 +757,13 @@ class Repo(val prefs: Prefs) {
                     try {
                         val oi = runCatching { oiHistory.change24h(m.provider, m.coin) }.getOrNull()
                         val days = market.candleHistory(m.provider, m.coin, "1d", 8)
+                        // Custom open time: today's open from hourly candles (UTC days don't line up).
+                        val hours = if (Opens.custom) runCatching { market.candleHistory(m.provider, m.coin, "1h", 30) }.getOrNull() else null
                         val week = if (days.size >= 2) {
                             val ref = if (days.size >= 8) days[days.size - 8].c else days.first().o
                             if (ref > 0) (days.last().c / ref - 1) * 100 else null
                         } else null
-                        _extras.update { it + (m.marketId to MarketExtra(week, oi, Opens.dayOpen(days))) }
+                        _extras.update { it + (m.marketId to MarketExtra(week, oi, Opens.dayOpen(days, hours))) }
                     } finally { gate.release() }
                 }
             }
