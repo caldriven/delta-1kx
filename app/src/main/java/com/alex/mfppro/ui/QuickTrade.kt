@@ -78,9 +78,11 @@ class LimitDraft {
 /**
  * One-tap trading for the position-management view. Each button opens a position
  * worth a multiple of free margin, shown on the button, at market or, in Limit
- * mode, as a limit order at the [draft] price. The multiple only picks the size:
- * leverage and margin mode are the order panel's (or the open position's), and a
- * quick order never changes them. Closing lives on the position card below.
+ * mode, as a limit order at the [draft] price. The multiple only picks the size.
+ * Leverage follows the asset: a new position goes in at this pair's own max (pairs
+ * differ), so every button up to that max has the margin it needs; an open position
+ * keeps its own. Nothing is saved, and the order panel's setting is left alone.
+ * Closing lives on the position card below.
  */
 @Composable
 fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
@@ -93,11 +95,12 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
 
     val policies by repo.policies.collectAsStateWithLifecycle()
     val maxLev = com.alex.mfppro.data.maxLeverage(market, acc.account, policies[acc.account.id])
-    // Leverage and margin mode are the order panel's (or the open position's): the quick buttons never
-    // change them. "2.5x" on a button only sizes the order, as a multiple of free margin.
+    // "2.5x" on a button only sizes the order, as a multiple of free margin. Leverage adapts to the
+    // asset: its own max for a new position, so the largest button fits; an open position keeps its own.
+    // Never saved: the order panel's leverage setting stays as it is.
     val marginMode = held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id)
     val cross = marginMode != "isolated"
-    val lev = held?.leverage?.toInt()?.coerceAtLeast(1) ?: repo.prefs.leverage(market.marketId, minOf(10, maxLev)).coerceIn(1, maxLev)
+    val lev = held?.leverage?.toInt()?.coerceAtLeast(1) ?: maxLev
     // Four sizes up to this pair's own max leverage (pairs differ, cross or not): 1x..4x on
     // low-leverage markets, otherwise quarters of the max (20x -> 5/10/15/20). Labels only size the order.
     val presets = if (maxLev <= 4) (1..maxLev).map { it.toDouble() } else (1..4).map { maxLev * it / 4.0 }
@@ -265,11 +268,11 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
               }
             }
         }
-        // What the buttons mean: size only. Leverage comes from the order panel and isn't changed here.
+        // What the buttons mean: size only; leverage is this asset's (or the open position's).
         if (!reducing) Text(
             "Size = × free margin ${fmtUsd(snap?.available ?: available)} · sent at ${lev}x ${if (cross) "cross" else "isolated"}" +
-                (if (held != null) " (position's)" else " (order panel)") +
-                // Margin at the panel's leverage covers sizes up to that multiple; bigger ones may be refused.
+                (if (held != null) " (position's)" else " (max for this pair)") +
+                // An open position at lower leverage: its margin covers sizes up to that multiple only.
                 if (lev < maxLev) " · above ${lev}x needs more margin" else "",
             color = C.muted, fontSize = 10.sp,
         )
