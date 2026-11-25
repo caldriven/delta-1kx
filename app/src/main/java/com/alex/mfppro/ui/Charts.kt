@@ -729,8 +729,11 @@ fun CandleChart(
             val sideRects = ArrayList<Rect>()
             for ((yy, t) in sideLabels.sortedWith(compareBy({ sidePrio[it.second] ?: 1 }, { abs(it.first - ly) }))) {
                 val th = t.size.height.toFloat()
+                val x0 = chartW - t.size.width - 4.dp.toPx()
                 val top = listOf(yy - th - 1.dp.toPx(), yy + 1.dp.toPx()).firstOrNull { c ->
-                    c >= 0f && c + th <= chartH && sideRects.none { c < it.bottom && c + th > it.top }
+                    // Clear of the other right-edge labels and of the pills and position boxes on the left.
+                    c >= 0f && c + th <= chartH && sideRects.none { c < it.bottom && c + th > it.top } &&
+                        placed.none { c < it.bottom && c + th > it.top && x0 < it.right && chartW > it.left }
                 } ?: continue
                 sideRects += Rect(chartW - t.size.width - 4.dp.toPx(), top, chartW, top + th)
                 drawText(t, topLeft = Offset(chartW - t.size.width - 4.dp.toPx(), top))
