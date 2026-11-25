@@ -510,6 +510,14 @@ fun CandleChart(
             val ordered = lines.filterNot { it.ref }.let { ls -> ls.filter { it.price >= lo }.sortedByDescending { it.price } + ls.filter { it.price < lo }.sortedBy { it.price } }
             // On-screen lines first, so the edge tags for off-screen levels can step around their tags.
             val tagYs = mutableListOf<Float>()
+            // Position boxes on screen claim their spot first, so a pill near the entry (LL, a TP close by)
+            // steps around the box instead of hiding behind it.
+            for (l in lines) {
+                val bx = l.box ?: continue
+                if (l.price !in lo..hi) continue
+                val by = y(l.price)
+                placed += Rect(6.dp.toPx(), by - 10.dp.toPx(), 6.dp.toPx() + posBoxWidth(tm, bx, bx.label ?: "PnL", pillStyle), by + 10.dp.toPx())
+            }
             // Off-screen, the position box takes the edge before any other level: PnL comes before Max DD.
             // Within the on-screen lines, the ones you act on (TP/SL, orders: draggable or removable) take
             // their spot before reference levels like floors and the pass target, which move aside for them.
@@ -955,6 +963,14 @@ private fun DrawScope.posBox(tm: TextMeasurer, b: PosBox, col: Color, label: Str
         x += w
     }
     drawRoundRect(col, Offset(left, top), Size(widths.sum(), h), androidx.compose.ui.geometry.CornerRadius(5f, 5f), style = androidx.compose.ui.graphics.drawscope.Stroke(1.2f))
+}
+
+/** Width [posBox] will draw, so other labels can keep clear of it before it is drawn. */
+private fun DrawScope.posBoxWidth(tm: TextMeasurer, b: PosBox, label: String, style: TextStyle): Float {
+    val padX = 6.dp.toPx()
+    val bold = style.copy(fontWeight = FontWeight.Bold)
+    return listOf(label to bold, b.pnl to bold, "TP" to bold, "SL" to bold, "⇅" to style, "✕" to style)
+        .mapIndexed { i, (t, st) -> tm.measure(t, st).size.width + padX * (if (i >= 4) 4 else 2) }.sum()
 }
 
 private fun DrawScope.tagWidth(tm: TextMeasurer, parts: List<String>, style: TextStyle): Float =
