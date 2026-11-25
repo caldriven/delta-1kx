@@ -101,9 +101,9 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
     val marginMode = held?.marginMode ?: repo.prefs.marginModeFor(acc.account.id)
     val cross = marginMode != "isolated"
     val lev = held?.leverage?.toInt()?.coerceAtLeast(1) ?: maxLev
-    // Four sizes up to this pair's own max leverage (pairs differ, cross or not): 1x..4x on
-    // low-leverage markets, otherwise quarters of the max (20x -> 5/10/15/20). Labels only size the order.
-    val presets = if (maxLev <= 4) (1..maxLev).map { it.toDouble() } else (1..4).map { maxLev * it / 4.0 }
+    // Four sizes, quarters of this pair's own max leverage (pairs differ, cross or not): 2x -> 0.5/1/1.5/2,
+    // 20x -> 5/10/15/20. The "x" is only a familiar label for the size, as a multiple of free margin.
+    val presets = (1..4).map { maxLev * it / 4.0 }
     var buySide by remember { mutableStateOf(true) }
     var reduceOnly by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -260,7 +260,8 @@ fun QuickTrade(repo: Repo, market: Market, draft: LimitDraft) {
                 val dll = sn?.dailyRoom?.let { floorPrice(px, net, it) }
                 val dd = sn?.ddRoom?.let { floorPrice(px, net, it) }
                 QuickBtn(
-                    if (capped) "max" else (if (mult % 1.0 == 0.0) mult.toInt().toString() else String.format(Locale.US, "%.1f", mult)) + "x",
+                    if (capped) "max" else // 0.75 stays 0.75, 2.5 stays 2.5, 10 stays 10.
+                        java.math.BigDecimal.valueOf(mult).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString() + "x",
                     (if (reduceOnly && held != null) "≤$" else "$") + fmtCompact(usd),
                     dll, dd, sn?.floorsSame == true, px,
                     if (buy) C.up else C.down, enabled = !busy && !locked && sideOk(buy), modifier = Modifier.weight(1f),
